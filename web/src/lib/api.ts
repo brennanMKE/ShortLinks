@@ -216,6 +216,24 @@ export function listUsers(): Promise<{ users: AdminUser[] }> {
   return apiGet<{ users: AdminUser[] }>('/admin/users');
 }
 
+/**
+ * POST /admin/users/{id}/deactivate — deactivate a non-admin user (admin only).
+ * `reason` is one of the six deactivation reason values; `note` is required by
+ * the server when reason is `other`. Returns the updated user.
+ */
+export function deactivateUser(id: number, reason: string, note: string): Promise<AdminUser> {
+  return apiPost<AdminUser>(`/admin/users/${id}/deactivate`, { reason, note });
+}
+
+/**
+ * POST /admin/users/{id}/reactivate — reactivate a user (admin only). `note` is
+ * optional and recorded in the account.reactivated audit metadata. Returns the
+ * updated user.
+ */
+export function reactivateUser(id: number, note: string): Promise<AdminUser> {
+  return apiPost<AdminUser>(`/admin/users/${id}/reactivate`, { note });
+}
+
 /** GET /admin/settings — runtime settings (admin only). */
 export function getSettings(): Promise<{ settings: Setting[] }> {
   return apiGet<{ settings: Setting[] }>('/admin/settings');
@@ -231,12 +249,68 @@ export function listFilterRules(): Promise<{ rules: FilterRule[] }> {
   return apiGet<{ rules: FilterRule[] }>('/admin/url-filters');
 }
 
-/** GET /admin/audit — paginated audit log (admin only). */
-export function listAudit(page = 1, perPage = 20): Promise<{
+/** Body accepted by POST /admin/url-filters. */
+export interface CreateFilterRuleInput {
+  pattern: string;
+  reason_code: number;
+  description: string;
+}
+
+/** POST /admin/url-filters — create a URL filter rule (admin only); returns 201 with the new rule. */
+export function createFilterRule(input: CreateFilterRuleInput): Promise<FilterRule> {
+  return apiPost<FilterRule>('/admin/url-filters', input);
+}
+
+/** Fields PATCH /admin/url-filters/{id} can update (all optional). */
+export interface UpdateFilterRuleInput {
+  pattern?: string;
+  reason_code?: number;
+  description?: string;
+  active?: boolean;
+}
+
+/** PATCH /admin/url-filters/{id} — partial update of a rule (admin only). */
+export function updateFilterRule(id: number, input: UpdateFilterRuleInput): Promise<FilterRule> {
+  return apiPatch<FilterRule>(`/admin/url-filters/${id}`, input);
+}
+
+/** DELETE /admin/url-filters/{id} — remove a rule (admin only). */
+export function deleteFilterRule(id: number): Promise<{ message: string }> {
+  return apiDelete<{ message: string }>(`/admin/url-filters/${id}`);
+}
+
+/** Result of POST /admin/url-filters/test. */
+export interface FilterTestResult {
+  matched: boolean;
+  reason_code?: number;
+  rule_id?: number;
+}
+
+/**
+ * POST /admin/url-filters/test — evaluate a URL against the active rules (admin
+ * only). A dry run; never inserts a link. Returns whether it matched and, when
+ * it did, the matched rule id and reason code.
+ */
+export function testFilterRule(url: string): Promise<FilterTestResult> {
+  return apiPost<FilterTestResult>('/admin/url-filters/test', { url });
+}
+
+/** Envelope returned by GET /admin/audit. */
+export interface AuditPage {
   audit_log: AuditEntry[];
   total: number;
   page: number;
   per_page: number;
-}> {
-  return apiGet(`/admin/audit?page=${page}&per_page=${perPage}`);
+}
+
+/**
+ * GET /admin/audit — paginated audit log (admin only), newest-first. An optional
+ * `userId` narrows to a single actor/target via `?user_id=`.
+ */
+export function listAudit(page = 1, perPage = 50, userId?: number): Promise<AuditPage> {
+  let path = `/admin/audit?page=${page}&per_page=${perPage}`;
+  if (userId !== undefined) {
+    path += `&user_id=${userId}`;
+  }
+  return apiGet<AuditPage>(path);
 }
