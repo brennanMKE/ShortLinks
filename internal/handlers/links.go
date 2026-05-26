@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
+	"github.com/brennanMKE/ShortLinks/internal/events"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
@@ -69,6 +70,16 @@ type ruleProvider interface {
 	Rules(ctx context.Context) ([]filters.Rule, error)
 }
 
+// eventPublisher is the slice of the events broker the links handler needs: the
+// ability to broadcast a link.created event to a user's connected SSE clients
+// (#0026). *events.Broker satisfies it via Publish. It is optional — a nil
+// publisher (no broker wired) disables the SSE broadcast, so the create path
+// simply skips the publish. Taking an interface keeps the handler testable with
+// a fake broker and no real SSE plumbing.
+type eventPublisher interface {
+	Publish(userID int64, event events.Event)
+}
+
 // LinksHandler serves the authenticated link CRUD API:
 //
 //	POST   /api/links        — create a short link
@@ -93,15 +104,20 @@ type LinksHandler struct {
 	// auditor records the link.created/reactivated/denied/deactivated audit
 	// entries (#0025). May be nil in unit tests that do not assert audit rows.
 	auditor *audit.Logger
+	// broker broadcasts the #0026 link.created SSE event to the user's connected
+	// dashboard clients on a successful insert/reactivation. May be nil (no broker
+	// wired) in which case the broadcast is skipped.
+	broker eventPublisher
 }
 
 // NewLinksHandler constructs a LinksHandler over the data layer, the redirect
-// cache, the URL-filter rule cache, and the audit logger. Pass a nil
-// redirectCache to disable eviction, a nil ruleProvider to disable URL
-// filtering, and a nil auditor to disable audit writes (e.g. in unit tests that
-// do not exercise those paths); the handler then skips the respective steps.
-func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger) *LinksHandler {
-	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor}
+// cache, the URL-filter rule cache, the audit logger, and the SSE event broker.
+// Pass a nil redirectCache to disable eviction, a nil ruleProvider to disable
+// URL filtering, a nil auditor to disable audit writes, and a nil broker to
+// disable the #0026 SSE broadcast (e.g. in unit tests that do not exercise those
+// paths); the handler then skips the respective steps.
+func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger, broker eventPublisher) *LinksHandler {
+	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor, broker: broker}
 }
 
 // linkView is the JSON shape for a single link, shared by every endpoint. The
@@ -205,7 +221,7 @@ type listLinksResponse struct {
 //	   metadata {key, destination_url, title, duplicate} for inserts and active
 //	   duplicates, link.reactivated for the reactivation branch.
 //	── #0026 SSE ──── when broadcast, broker.Publish(u.ID, Event{Name:"link.created",
-//	   Payload:<link JSON>}) (insert or reactivation only).
+//	   Payload:<link JSON>}) (insert or reactivation only) — IMPLEMENTED.
 func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -356,9 +372,6 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// {key, destination_url}); link.created for inserts and active duplicates
 	// (metadata {key, destination_url, title, duplicate}). The link is already
 	// committed, so this is fire-and-forget.
-	// SEAM #0026 (SSE): when broadcast, broker.Publish(u.ID, Event{Name:
-	// "link.created", Payload:<created link JSON>}). Fires only on insert or
-	// reactivation, never on a pure active duplicate (PRD). Not implemented.
 	// ───────────────────────────────────────────────────────────────────────
 	if h.auditor != nil {
 		actor := u.ID
@@ -393,10 +406,23 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	_ = broadcast // wired for the #0026 SSE seam: true on insert/reactivation.
-
 	view := toLinkView(created)
 	view.Duplicate = &duplicate
+
+	// #0026 SSE: broadcast link.created to the user's connected dashboard clients
+	// on an insert or reactivation (broadcast == true), never on a pure
+	// active-duplicate or a filter-denied create (those return earlier / set
+	// broadcast == false). The payload is the SAME link object returned in the
+	// response, marshaled here so a subscriber renders an identical row. Skipped
+	// when no broker is wired (h.broker == nil). A marshal error (cannot occur for
+	// this fixed-shape value) is swallowed so a successful create never fails on
+	// the broadcast.
+	if h.broker != nil && broadcast {
+		if payload, err := json.Marshal(view); err == nil {
+			h.broker.Publish(u.ID, events.Event{Name: "link.created", Payload: payload})
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, view)
 }
 

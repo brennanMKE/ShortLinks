@@ -16,6 +16,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/cache"
 	"github.com/brennanMKE/ShortLinks/internal/config"
 	"github.com/brennanMKE/ShortLinks/internal/db"
+	"github.com/brennanMKE/ShortLinks/internal/events"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
 	"github.com/brennanMKE/ShortLinks/internal/links"
@@ -102,14 +103,23 @@ func serve() error {
 	})
 	urlFiltersH := handlers.NewURLFiltersHandler(filterStore, ruleCache, auditLogger)
 
+	// SSE event broker (#0026): the in-memory pub/sub singleton shared by the
+	// links handler (publisher) and the events handler (subscriber). A successful
+	// POST /api/links insert/reactivation publishes a link.created event that the
+	// broker fans out to every GET /api/events stream open for that user.
+	broker := events.NewBroker()
+	eventsH := handlers.NewEventsHandler(broker)
+
 	// Link CRUD API (#0022). The links store reuses the shared pgx pool. The
 	// redirect cache is not yet constructed/plumbed in serve() (the GET /u/{key}
 	// route is wired in a separate issue), so a nil cache is passed: the handler
 	// then skips eviction on PATCH/DELETE. The rule cache IS wired so the #0024
-	// URL filter check runs at the top of Create. TODO: once the redirect cache
-	// instance lives in serve(), pass it here so DELETE/PATCH evict the key.
+	// URL filter check runs at the top of Create. The broker is wired so a
+	// successful create broadcasts the #0026 link.created SSE event. TODO: once the
+	// redirect cache instance lives in serve(), pass it here so DELETE/PATCH evict
+	// the key.
 	linkStore := links.NewStore(pool)
-	linksH := handlers.NewLinksHandler(linkStore, nil, ruleCache, auditLogger)
+	linksH := handlers.NewLinksHandler(linkStore, nil, ruleCache, auditLogger, broker)
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
@@ -166,14 +176,17 @@ func serve() error {
 	mux.Handle("DELETE /admin/url-filters/{id}", requireAdmin(http.HandlerFunc(urlFiltersH.Delete)))
 
 	// Link CRUD API (#0022) — all behind RequireSession and scoped to the
-	// authenticated user in the store. Dedup (#0023), URL filtering (#0024), and
-	// audit (#0025, wired above) layer onto the create path; the #0026 SSE seam in
-	// handlers.LinksHandler.Create remains to be filled.
+	// authenticated user in the store. Dedup (#0023), URL filtering (#0024), audit
+	// (#0025), and the #0026 SSE broadcast all layer onto the create path.
 	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(linksH.Create)))
 	mux.Handle("GET /api/links", requireSession(http.HandlerFunc(linksH.List)))
 	mux.Handle("GET /api/links/{key}", requireSession(http.HandlerFunc(linksH.Get)))
 	mux.Handle("PATCH /api/links/{key}", requireSession(http.HandlerFunc(linksH.Patch)))
 	mux.Handle("DELETE /api/links/{key}", requireSession(http.HandlerFunc(linksH.Delete)))
+
+	// SSE stream (#0026) — behind RequireSession; pushes link.created events to
+	// the authenticated user's connected dashboard clients.
+	mux.Handle("GET /api/events", requireSession(http.HandlerFunc(eventsH.Stream)))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
