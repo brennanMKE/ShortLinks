@@ -18,9 +18,9 @@
      deactivate action calls deactivateLink and updates the row in place.
      Pagination via ?page=/?per_page= (the server's params).
 
-  The list is kept in the shared `links` store so the SSE issue (#0034) can
-  prepend live link.created events to it — see the clearly-marked SEAM below.
-  This issue loads the initial list via REST only; SSE is NOT implemented here.
+  The list is kept in the shared `links` store; on mount we subscribe to the
+  /api/events SSE stream (#0034) and prepend live link.created events to it
+  (deduped by key), closing the stream on unmount — see onMount below.
 
   Navigation tabs (Dashboard, Account, Admin-when-admin) and Sign out live in the
   header; we match Login.svelte's Svelte 5 runes + error-handling style.
@@ -51,6 +51,7 @@
     deniedReasonLabel,
     type CreateNotice,
   } from '../lib/links';
+  import { subscribeLinks, prependUniqueByKey } from '../lib/events';
   import type { Link } from '../lib/types';
 
   const PER_PAGE = 20;
@@ -229,17 +230,18 @@
   onMount(() => {
     loadPage(1);
 
-    // ────────────────────────────────────────────────────────────────────────
-    // SEAM #0034 (SSE): subscribe to /api/events here and prepend link.created
-    // events to the links store; close on unmount.
-    //
-    // #0034 will open `new EventSource('/api/events')`, listen for the
-    // 'link.created' event, JSON.parse the payload into a Link, and prepend it to
-    // the shared `links` store (deduping by key, exactly like handleCreate above
-    // does). The returned cleanup function from this onMount is where #0034 will
-    // call eventSource.close() so the stream is torn down when the Dashboard
-    // unmounts. This issue (#0033) loads the list via REST only — no SSE here.
-    // ────────────────────────────────────────────────────────────────────────
+    // #0034 SSE live updates: open the /api/events stream and prepend each
+    // link.created event to the shared store. We dedupe by key with the pure
+    // helper because the user's OWN creates already prepended optimistically in
+    // handleCreate above and ALSO arrive here over SSE — so the same link must
+    // replace its existing row (moving it to the front) rather than appear twice.
+    // The browser's EventSource reconnects on its own after a drop (no custom
+    // retry). The cleanup returned below closes the stream on unmount.
+    const unsubscribe = subscribeLinks((link) => {
+      links.update((cur) => prependUniqueByKey(cur, link));
+    });
+
+    return unsubscribe;
   });
 </script>
 
