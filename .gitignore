@@ -3,7 +3,7 @@
 /etc/shortlinks/
 
 # Go build output
-shortlinks
+/shortlinks
 *.exe
 *.test
 *.out
