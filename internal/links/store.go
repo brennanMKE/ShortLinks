@@ -144,6 +144,147 @@ func (s *Store) CreateLink(ctx context.Context, in NewLink) (Link, error) {
 	return link, nil
 }
 
+// CreateOutcome describes which branch CreateOrReactivateLink took, so the
+// handler can set the response's "duplicate" flag and decide whether to fire the
+// post-create seams (audit/SSE). The three outcomes mirror the PRD's
+// deduplication table.
+type CreateOutcome int
+
+const (
+	// OutcomeInserted means no matching non-denied link existed, so a brand-new
+	// link was inserted. duplicate=false; fires the SSE/audit (link.created) seams.
+	OutcomeInserted CreateOutcome = iota
+	// OutcomeActiveDuplicate means an active non-denied link for (user,dest)
+	// already existed; it was returned unchanged with NO write. duplicate=true;
+	// does NOT fire SSE (per PRD), only the link.created-with-{duplicate:true}
+	// audit seam.
+	OutcomeActiveDuplicate
+	// OutcomeReactivated means an inactive non-denied link for (user,dest) existed
+	// and was reactivated (active=true). duplicate=true; fires SSE (link.created)
+	// and the link.reactivated audit seam.
+	OutcomeReactivated
+)
+
+// CreateOrReactivateLink implements per-user URL deduplication for the
+// GENERATED-KEY create path (#0023). It runs the dedup decision and any write
+// inside a single transaction so two concurrent creates of the same URL cannot
+// both insert a duplicate.
+//
+// Within the transaction it looks up an existing non-denied link for
+// (userID, destinationURL) — the (user_id, destination_url) WHERE denied_reason=0
+// index backs this:
+//
+//   - active match found  → returned unchanged, OutcomeActiveDuplicate (no write).
+//   - inactive match found → reactivated (active=true), OutcomeReactivated.
+//   - no match            → genKey mints a unique key (collisions checked inside
+//     the tx) and a new active link is inserted, OutcomeInserted.
+//
+// This is ONLY for generated keys. Custom aliases bypass dedup entirely and the
+// handler calls CreateLink directly. The returned Link always carries a full,
+// authoritative row (ClickCount is 0 for a fresh insert; the dedup/reactivate
+// branches re-read the row's click count is left at the persisted aggregate via
+// the RETURNING-then-count path below).
+func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) (Link, CreateOutcome, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Link{}, 0, fmt.Errorf("links: begin dedup tx: %w", err)
+	}
+	// Rollback is a no-op after a successful Commit; this guards every error path.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Dedup lookup: an existing non-denied link for this user + destination. The
+	// row is locked FOR UPDATE so a concurrent create of the same URL serializes
+	// behind this one rather than racing to a second insert.
+	existing, err := s.lockExisting(ctx, tx, in.UserID, in.DestinationURL)
+	switch {
+	case err == nil:
+		// A match exists. Active → return as-is; inactive → reactivate.
+		if existing.Active {
+			if err := tx.Commit(ctx); err != nil {
+				return Link{}, 0, fmt.Errorf("links: commit dedup tx: %w", err)
+			}
+			return existing, OutcomeActiveDuplicate, nil
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE links SET active = TRUE WHERE id = $1`, existing.ID,
+		); err != nil {
+			return Link{}, 0, fmt.Errorf("links: reactivating link: %w", err)
+		}
+		existing.Active = true
+		if err := tx.Commit(ctx); err != nil {
+			return Link{}, 0, fmt.Errorf("links: commit dedup tx: %w", err)
+		}
+		return existing, OutcomeReactivated, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// No match: fall through to the insert below.
+	default:
+		return Link{}, 0, fmt.Errorf("links: dedup lookup: %w", err)
+	}
+
+	// No existing link — mint a unique key and insert, all inside the tx so the
+	// key-collision check and the insert are consistent.
+	key, err := genKey(func(candidate string) (bool, error) {
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1)`, candidate,
+		).Scan(&exists); err != nil {
+			return false, fmt.Errorf("links: checking key exists in tx: %w", err)
+		}
+		return exists, nil
+	})
+	if err != nil {
+		return Link{}, 0, err
+	}
+
+	link := Link{
+		UserID:         in.UserID,
+		Key:            key,
+		DestinationURL: in.DestinationURL,
+		Title:          in.Title,
+		Active:         true,
+		DeniedReason:   0,
+	}
+	var title *string
+	if in.Title != "" {
+		title = &in.Title
+	}
+	err = tx.QueryRow(ctx,
+		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now())
+		 RETURNING id, created_at, expires_at`,
+		in.UserID, key, in.DestinationURL, title, in.ExpiresAt,
+	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return Link{}, 0, ErrKeyTaken
+		}
+		return Link{}, 0, fmt.Errorf("links: inserting link: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Link{}, 0, fmt.Errorf("links: commit dedup tx: %w", err)
+	}
+	return link, OutcomeInserted, nil
+}
+
+// lockExisting fetches and row-locks (FOR UPDATE) the user's existing non-denied
+// link for destinationURL, with its aggregated click count. ErrNoRows means no
+// such link exists. It runs inside the dedup transaction so the reactivate or
+// no-op decision is made against a row no concurrent create can change.
+func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, destinationURL string) (Link, error) {
+	row := q.QueryRow(ctx,
+		`SELECT l.id, l.user_id, l.key, l.destination_url, l.title,
+		        l.active, l.denied_reason, l.created_at, l.expires_at,
+		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id) AS click_count
+		   FROM links l
+		  WHERE l.user_id = $1 AND l.destination_url = $2 AND l.denied_reason = 0
+		  LIMIT 1
+		  FOR UPDATE`,
+		userID, destinationURL,
+	)
+	return scanLink(row)
+}
+
 // ListLinks returns one page of the user's links, most recent first (created_at
 // DESC, id DESC as a stable tiebreaker), each carrying its aggregated click
 // count. The result is strictly scoped to userID. limit and offset implement

@@ -31,6 +31,10 @@ const maxPerPage = 100
 type linkStore interface {
 	KeyExists(ctx context.Context, key string) (bool, error)
 	CreateLink(ctx context.Context, in links.NewLink) (links.Link, error)
+	// CreateOrReactivateLink is the generated-key create path with per-user URL
+	// deduplication (#0023): it runs the dedup lookup + decision + any write
+	// atomically and reports which branch it took via the CreateOutcome.
+	CreateOrReactivateLink(ctx context.Context, in links.NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) (links.Link, links.CreateOutcome, error)
 	ListLinks(ctx context.Context, userID int64, limit, offset int) ([]links.Link, error)
 	CountLinks(ctx context.Context, userID int64) (int64, error)
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
@@ -159,18 +163,22 @@ type listLinksResponse struct {
 //	URL is always re-evaluated.
 //
 //	── #0023 DEDUP CHECK (runs AFTER the filter, before insert) ──────────────
-//	Only for the generated-key path (custom aliases are NOT deduplicated):
-//	SELECT an existing non-denied link for (user_id, destination_url). If an
-//	active one exists → return it with duplicate=true (no insert, no SSE). If an
-//	inactive one exists → reactivate (active=true) and return it with
-//	duplicate=true (+ SSE). Otherwise fall through to the insert below. This is
-//	where the &duplicateFalse below becomes &true.
+//	Implemented (#0023) for the generated-key path only — custom aliases are NOT
+//	deduplicated. The store's CreateOrReactivateLink runs the dedup lookup +
+//	decision + any write atomically (in a transaction) and reports which branch
+//	it took: an active match is returned unchanged (duplicate=true, no write, no
+//	SSE), an inactive match is reactivated (duplicate=true, fires SSE), and no
+//	match inserts a fresh link (duplicate=false, fires SSE).
 //
-// After a successful create/reactivate (the seam-marked points below):
+// After a successful create/reactivate (the seam-marked points below). The
+// boolean `broadcast` distinguishes the cases per the PRD: an INSERT or a
+// REACTIVATION fires #0026 SSE; a pure ACTIVE-duplicate does NOT.
 //
-//	── #0025 AUDIT ── write a link.created entry attributed to u.ID with
-//	   metadata {key, destination_url, title, duplicate}.
-//	── #0026 SSE ──── broker.Publish(u.ID, Event{Name:"link.created", Payload:<link JSON>}).
+//	── #0025 AUDIT ── write an audit entry attributed to u.ID: link.created with
+//	   metadata {key, destination_url, title, duplicate} for inserts and active
+//	   duplicates, link.reactivated for the reactivation branch.
+//	── #0026 SSE ──── when broadcast, broker.Publish(u.ID, Event{Name:"link.created",
+//	   Payload:<link JSON>}) (insert or reactivation only).
 func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -199,11 +207,23 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	customKey := strings.TrimSpace(req.customKey())
 
-	// Track whether this create is a dedup hit. #0023 flips this to true on an
-	// existing/reactivated match; for #0022 it is always false.
-	duplicate := false
+	in := links.NewLink{
+		UserID:         u.ID,
+		DestinationURL: dest,
+		Title:          strings.TrimSpace(req.Title),
+		ExpiresAt:      req.ExpiresAt,
+	}
 
-	var key string
+	// duplicate is the create response's "duplicate" field: true for both the
+	// active-found and reactivated dedup branches, false for a fresh insert.
+	// broadcast records whether the post-create #0026 SSE seam should fire: an
+	// INSERT or a REACTIVATION broadcasts; a pure active-duplicate does NOT.
+	var (
+		created   links.Link
+		duplicate bool
+		broadcast bool
+	)
+
 	if customKey != "" {
 		// Custom aliases are NOT deduplicated (PRD) — attempt the insert with the
 		// supplied key directly; a clash surfaces as ErrKeyTaken → 409 below.
@@ -211,51 +231,58 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "custom key must be 1-12 url-safe characters")
 			return
 		}
-		key = customKey
-	} else {
-		// ───────────────────────────────────────────────────────────────────
-		// SEAM #0023 (dedup check — runs AFTER the filter, before insert): for
-		// the generated-key path only, look up an existing non-denied link for
-		// (u.ID, dest). Return it (active) or reactivate it (inactive) with
-		// duplicate=true and skip the GenerateUniqueKey + insert below. Not
-		// implemented in #0022.
-		// ───────────────────────────────────────────────────────────────────
-
-		generated, err := links.GenerateUniqueKey(func(candidate string) (bool, error) {
-			return h.store.KeyExists(r.Context(), candidate)
-		})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "could not generate a unique key")
+		in.Key = customKey
+		link, err := h.store.CreateLink(r.Context(), in)
+		switch {
+		case err == nil:
+			created = link
+			duplicate = false
+			broadcast = true // a fresh custom-alias insert fires SSE/audit.
+		case errors.Is(err, links.ErrKeyTaken):
+			writeError(w, http.StatusConflict, "key already taken")
+			return
+		default:
+			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		key = generated
-	}
-
-	created, err := h.store.CreateLink(r.Context(), links.NewLink{
-		UserID:         u.ID,
-		Key:            key,
-		DestinationURL: dest,
-		Title:          strings.TrimSpace(req.Title),
-		ExpiresAt:      req.ExpiresAt,
-	})
-	switch {
-	case err == nil:
-		// success — fall through.
-	case errors.Is(err, links.ErrKeyTaken):
-		writeError(w, http.StatusConflict, "key already taken")
-		return
-	default:
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+	} else {
+		// ───────────────────────────────────────────────────────────────────
+		// SEAM #0023 (dedup check — runs AFTER the filter, before insert):
+		// generated-key path only. The store runs the dedup lookup + decision +
+		// any write atomically and reports which branch it took. Key generation
+		// happens inside that transaction (only on the no-match/insert branch).
+		// ───────────────────────────────────────────────────────────────────
+		link, outcome, err := h.store.CreateOrReactivateLink(r.Context(), in, links.GenerateUniqueKey)
+		switch {
+		case err == nil:
+			created = link
+		default:
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		switch outcome {
+		case links.OutcomeInserted:
+			duplicate = false
+			broadcast = true
+		case links.OutcomeReactivated:
+			duplicate = true
+			broadcast = true // reactivation re-publishes link.created.
+		case links.OutcomeActiveDuplicate:
+			duplicate = true
+			broadcast = false // active duplicate: no insert, no SSE (PRD).
+		}
 	}
 
 	// ───────────────────────────────────────────────────────────────────────
-	// SEAM #0025 (audit): write a link.created entry for u.ID with metadata
-	// {key, destination_url, title, duplicate}. Not implemented in #0022.
-	// SEAM #0026 (SSE): broker.Publish(u.ID, Event{Name:"link.created",
-	// Payload:<created link JSON>}). Not implemented in #0022.
+	// SEAM #0025 (audit): write an audit entry for u.ID — link.created with
+	// metadata {key, destination_url, title, duplicate} for inserts/active
+	// duplicates, link.reactivated for the reactivation branch. Not implemented.
+	// SEAM #0026 (SSE): when broadcast, broker.Publish(u.ID, Event{Name:
+	// "link.created", Payload:<created link JSON>}). Fires only on insert or
+	// reactivation, never on a pure active duplicate (PRD). Not implemented.
 	// ───────────────────────────────────────────────────────────────────────
-	_ = u // retained for the #0025/#0026 seams above.
+	_ = u         // retained for the #0025/#0026 seams above.
+	_ = broadcast // wired for the #0026 SSE seam: true on insert/reactivation.
 
 	view := toLinkView(created)
 	view.Duplicate = &duplicate

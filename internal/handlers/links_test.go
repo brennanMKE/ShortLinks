@@ -129,6 +129,179 @@ func TestLinksCreate_GeneratedKey(t *testing.T) {
 	}
 }
 
+// countUserURLLinks returns how many non-denied links a user has to a given
+// destination — the dedup scope. It backs the "no new row inserted" assertions.
+func countUserURLLinks(t *testing.T, pool *pgxpool.Pool, userID int64, dest string) int {
+	t.Helper()
+	ctx := context.Background()
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM links WHERE user_id = $1 AND destination_url = $2 AND denied_reason = 0`,
+		userID, dest,
+	).Scan(&n); err != nil {
+		t.Fatalf("count links for user %d url %q: %v", userID, dest, err)
+	}
+	return n
+}
+
+// postLink POSTs the given JSON body as the session token and returns the
+// decoded link view plus the HTTP status.
+func postLink(t *testing.T, srv *httptest.Server, token, body string) (linkView, int) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/links", jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(withCookie(req, token))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	var v linkView
+	if resp.StatusCode == http.StatusCreated {
+		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	}
+	return v, resp.StatusCode
+}
+
+// TestLinksCreate_DedupActiveDuplicate asserts the PRD's three deduplication
+// branches for the generated-key path, plus per-user isolation:
+//   - first POST of a URL → 201, duplicate=false, one row.
+//   - second POST of the SAME URL by the SAME user → SAME link (id/key),
+//     duplicate=true, NO new row.
+//   - deactivate then POST again → REACTIVATED (active=true), same id,
+//     duplicate=true, still one row.
+//   - a DIFFERENT user POSTing the same URL → their OWN new link (two rows).
+func TestLinksCreate_DedupActiveDuplicate(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	seedSession(t, pool, bob, "bob-token")
+
+	const dest = "https://www.example.org/path"
+
+	// First POST → fresh insert.
+	first, status := postLink(t, srv, "alice-token", `{"destination_url":"`+dest+`","title":"First"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("first POST status = %d, want 201", status)
+	}
+	if first.Duplicate == nil || *first.Duplicate {
+		t.Errorf("first duplicate = %v, want false", first.Duplicate)
+	}
+	if n := countUserURLLinks(t, pool, alice, dest); n != 1 {
+		t.Fatalf("after first POST, row count = %d, want 1", n)
+	}
+
+	// Second POST of the SAME URL by the SAME user → active duplicate.
+	second, status := postLink(t, srv, "alice-token", `{"destination_url":"`+dest+`","title":"Second"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("second POST status = %d, want 201", status)
+	}
+	if second.Duplicate == nil || !*second.Duplicate {
+		t.Errorf("second duplicate = %v, want true", second.Duplicate)
+	}
+	if second.ID != first.ID || second.Key != first.Key {
+		t.Errorf("second link id=%d key=%q, want same as first id=%d key=%q",
+			second.ID, second.Key, first.ID, first.Key)
+	}
+	if n := countUserURLLinks(t, pool, alice, dest); n != 1 {
+		t.Fatalf("after second POST, row count = %d, want 1 (no new row)", n)
+	}
+
+	// Deactivate the link, then POST the same URL again → reactivation.
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE links SET active = FALSE WHERE id = $1`, first.ID); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	third, status := postLink(t, srv, "alice-token", `{"destination_url":"`+dest+`","title":"Third"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("reactivate POST status = %d, want 201", status)
+	}
+	if third.Duplicate == nil || !*third.Duplicate {
+		t.Errorf("reactivate duplicate = %v, want true", third.Duplicate)
+	}
+	if third.ID != first.ID {
+		t.Errorf("reactivate id=%d, want same as first id=%d", third.ID, first.ID)
+	}
+	if !third.Active {
+		t.Errorf("reactivate active = false, want true")
+	}
+	if n := countUserURLLinks(t, pool, alice, dest); n != 1 {
+		t.Fatalf("after reactivate, row count = %d, want 1 (same row)", n)
+	}
+
+	// A DIFFERENT user POSTing the same URL → their OWN new link (dedup is
+	// per-user).
+	bobLink, status := postLink(t, srv, "bob-token", `{"destination_url":"`+dest+`","title":"Bob"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("bob POST status = %d, want 201", status)
+	}
+	if bobLink.Duplicate == nil || *bobLink.Duplicate {
+		t.Errorf("bob duplicate = %v, want false", bobLink.Duplicate)
+	}
+	if bobLink.ID == first.ID {
+		t.Errorf("bob link id=%d collided with alice's id=%d", bobLink.ID, first.ID)
+	}
+	if n := countUserURLLinks(t, pool, bob, dest); n != 1 {
+		t.Errorf("bob row count = %d, want 1", n)
+	}
+	// Two distinct rows across users for the same URL.
+	var total int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM links WHERE destination_url = $1 AND denied_reason = 0`, dest,
+	).Scan(&total); err != nil {
+		t.Fatalf("count total: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("total rows across users = %d, want 2", total)
+	}
+}
+
+// TestLinksCreate_CustomAliasNotDeduped asserts a custom alias to an
+// already-shortened URL is NOT deduplicated: a new row with that alias is
+// created even though the user already has an active link to the same URL.
+func TestLinksCreate_CustomAliasNotDeduped(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+
+	const dest = "https://www.example.net/dup"
+
+	first, status := postLink(t, srv, "alice-token", `{"destination_url":"`+dest+`"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("first POST status = %d, want 201", status)
+	}
+	if n := countUserURLLinks(t, pool, alice, dest); n != 1 {
+		t.Fatalf("after first POST, row count = %d, want 1", n)
+	}
+
+	// Custom alias to the SAME URL → bypasses dedup, inserts a second row.
+	aliased, status := postLink(t, srv, "alice-token",
+		`{"destination_url":"`+dest+`","custom_key":"mybrand"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("custom-alias POST status = %d, want 201", status)
+	}
+	if aliased.Key != "mybrand" {
+		t.Errorf("alias key = %q, want mybrand", aliased.Key)
+	}
+	if aliased.Duplicate == nil || *aliased.Duplicate {
+		t.Errorf("custom-alias duplicate = %v, want false (no dedup)", aliased.Duplicate)
+	}
+	if aliased.ID == first.ID {
+		t.Errorf("custom-alias reused dedup row id=%d, want a new row", aliased.ID)
+	}
+	if n := countUserURLLinks(t, pool, alice, dest); n != 2 {
+		t.Errorf("after custom-alias POST, row count = %d, want 2 (alias not deduped)", n)
+	}
+}
+
 // TestLinksCreate_CustomAlias asserts a custom alias is accepted and stored.
 func TestLinksCreate_CustomAlias(t *testing.T) {
 	pool := credsTestPool(t)
