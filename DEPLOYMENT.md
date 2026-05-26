@@ -1,10 +1,11 @@
 # Deploying ShortLinks
 
-End-to-end instructions for deploying ShortLinks on a fresh AWS EC2 instance, and
-for redeploying after a code change. ShortLinks is a single Go binary (with the
-Svelte SPA embedded via `//go:embed`) sitting behind Apache 2, backed by
-PostgreSQL, and managed by systemd. The service listens on `127.0.0.1:8080`;
-Apache terminates TLS for `go.sstools.co` and reverse-proxies to it.
+End-to-end instructions for deploying ShortLinks on an AWS EC2 instance running
+**Amazon Linux 2023 (AL2023)**, and for redeploying after a code change.
+ShortLinks is a single Go binary (with the Svelte SPA embedded via `//go:embed`)
+sitting behind Apache (`httpd`), backed by PostgreSQL, and managed by systemd.
+The service listens on `127.0.0.1:8080`; Apache terminates TLS for
+`go.sstools.co` and reverse-proxies to it.
 
 If you are running your own instance under a different domain, substitute your
 domain wherever `go.sstools.co` appears and set `BASE_URL`, `WEBAUTHN_RP_ID`, and
@@ -16,19 +17,21 @@ domain wherever `go.sstools.co` appears and set `BASE_URL`, `WEBAUTHN_RP_ID`, an
 
 Provision and prepare the host before deploying:
 
-- **EC2 instance** running Ubuntu 22.04 LTS or newer.
-- **Apache 2** installed, with the proxy and SSL modules enabled:
+- **EC2 instance** running Amazon Linux 2023.
+- **Apache (`httpd`)** installed with SSL support. On AL2023 the proxy modules
+  are included in the base `httpd` package — no `a2enmod` step is needed:
 
   ```bash
-  sudo apt update
-  sudo apt install -y apache2
-  sudo a2enmod proxy proxy_http ssl
+  sudo dnf install -y httpd mod_ssl
+  sudo systemctl enable --now httpd
   ```
 
-- **PostgreSQL** installed and running:
+- **PostgreSQL** installed and initialised. AL2023 requires an explicit
+  `--initdb` before the first start:
 
   ```bash
-  sudo apt install -y postgresql
+  sudo dnf install -y postgresql15-server postgresql15
+  sudo postgresql-setup --initdb
   sudo systemctl enable --now postgresql
   ```
 
@@ -54,7 +57,7 @@ Provision and prepare the host before deploying:
 - **`openssl` and `certbot`** available:
 
   ```bash
-  sudo apt install -y openssl certbot python3-certbot-apache
+  sudo dnf install -y openssl certbot python3-certbot-apache
   ```
 
 Clone the repository onto the instance (e.g. into `/opt/shortlinks`) and run all
@@ -87,6 +90,11 @@ Then create the role and database as the `postgres` superuser:
 ```bash
 sudo -u postgres psql -f scripts/db/create.sql
 ```
+
+> On AL2023, the `postgres` system user is created by the `postgresql15-server`
+> package. If `sudo -u postgres psql` fails with "must be run as root", ensure
+> the PostgreSQL service is running (`sudo systemctl status postgresql`) and that
+> `postgresql-setup --initdb` completed successfully.
 
 The role creation is idempotent. `CREATE DATABASE` cannot be guarded with
 `IF NOT EXISTS` in PostgreSQL, so re-running against an existing database raises
@@ -223,19 +231,15 @@ curl -fsS http://127.0.0.1:8080/health
 
 ## 8. Apache
 
-Install the virtual host config from the repo, enable the site, and reload
-Apache. The vhost (`deploy/apache/go.sstools.co.conf`) terminates TLS and proxies
-all traffic to `127.0.0.1:8080`, with `/api/events` proxied using
-`flushpackets=on` so Server-Sent Events flush immediately. The SSE rule must
-appear before the wildcard `ProxyPass /`, which it already does in the shipped
-file.
-
-Ensure the required modules are enabled (from Prerequisites), then:
+Install the virtual host config from the repo and reload Apache. On AL2023,
+drop the file directly into `/etc/httpd/conf.d/` — any `.conf` file in that
+directory is loaded automatically; there is no `a2ensite` command. The vhost
+terminates TLS and proxies all traffic to `127.0.0.1:8080`, with `/api/events`
+proxied using `flushpackets=on` so Server-Sent Events flush immediately.
 
 ```bash
-sudo cp deploy/apache/go.sstools.co.conf /etc/apache2/sites-available/
-sudo a2ensite go.sstools.co
-sudo systemctl reload apache2
+sudo cp deploy/apache/go.sstools.co.conf /etc/httpd/conf.d/
+sudo systemctl reload httpd
 ```
 
 ---
@@ -254,7 +258,7 @@ Certbot installs a renewal timer automatically. After it completes, reload
 Apache once more if Certbot did not already do so:
 
 ```bash
-sudo systemctl reload apache2
+sudo systemctl reload httpd
 ```
 
 Verify HTTPS end to end:
