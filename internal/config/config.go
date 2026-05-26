@@ -96,6 +96,7 @@ func loadFromFile(path string) (*Config, error) {
 		name  string
 		value string
 	}{
+		{"BASE_URL", cfg.BaseURL},
 		{"DATABASE_URL", cfg.DatabaseURL},
 		{"WEBAUTHN_RP_ID", cfg.WebAuthnRPID},
 		{"WEBAUTHN_RP_ORIGIN", cfg.WebAuthnRPOrigin},

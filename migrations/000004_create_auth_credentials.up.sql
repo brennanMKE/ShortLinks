@@ -14,7 +14,7 @@ CREATE INDEX idx_pending_registrations_expires_at ON pending_registrations (expi
 -- passkey_credentials: one row per registered WebAuthn credential.
 CREATE TABLE passkey_credentials (
     id            BIGSERIAL PRIMARY KEY,
-    user_id       BIGINT REFERENCES users(id),
+    user_id       BIGINT NOT NULL REFERENCES users(id),
     credential_id BYTEA UNIQUE NOT NULL,
     public_key    BYTEA NOT NULL,
     aaguid        UUID,

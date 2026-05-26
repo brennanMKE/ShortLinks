@@ -248,7 +248,7 @@ func serve() error {
 	// hard refresh.
 	mux.Handle("GET /", handlers.NewSPAHandler(web.DistFS()))
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
 	return http.ListenAndServe(addr, mux)
 }

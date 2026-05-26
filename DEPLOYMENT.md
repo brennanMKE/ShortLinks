@@ -57,15 +57,19 @@ Provision and prepare the host before deploying:
   sudo rm -rf /usr/local/go
   sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-${GOARCH}.tar.gz
   echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
+  echo 'export PATH=$PATH:$(go env GOPATH)/bin' | sudo tee -a /etc/profile.d/go.sh
   source /etc/profile.d/go.sh
   go version   # go1.26.3 linux/arm64  (or amd64 on Intel/AMD instances)
   ```
+
+  Log out and back in after this step so the PATH change is picked up by all
+  future shells (including any deploy scripts that open a new session).
 
 - **`golang-migrate` CLI** installed (used to apply schema migrations):
 
   ```bash
   go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-  # ensure $(go env GOPATH)/bin is on your PATH so `migrate` is found
+  migrate --version   # confirms the binary is on PATH
   ```
 
 - **DNS**: the wildcard `*.sstools.co` (and therefore `go.sstools.co`) already
@@ -212,7 +216,7 @@ Create the admin user (from `ADMIN_EMAIL`) and a test link. The seed command is
 idempotent and safe to re-run:
 
 ```bash
-go run ./cmd/shortlinks seed
+/usr/local/bin/shortlinks seed
 ```
 
 This pre-authorizes the `ADMIN_EMAIL` address as the first admin and inserts a
@@ -223,14 +227,15 @@ redirect path works before registering.
 
 ## 7. systemd
 
-Install the service unit, then enable and start the service so it runs on boot
-and is restarted on failure.
+The service runs as an unprivileged `shortlinks` system user. Create it once
+before installing the service:
 
-> The unit file lives at `deploy/systemd/shortlinks.service` in the repo. It is
-> tracked by issue **#0012** and may not exist yet — once that issue lands, the
-> file at that path is what you install here. The unit runs
-> `/usr/local/bin/shortlinks`, loads `/etc/shortlinks/config.env` via
-> `EnvironmentFile=`, and listens on `127.0.0.1:8080`.
+```bash
+sudo useradd --system --no-create-home shortlinks
+```
+
+Then install the unit, reload systemd, and enable the service so it starts on
+boot and is restarted automatically on failure:
 
 ```bash
 sudo cp deploy/systemd/shortlinks.service /etc/systemd/system/shortlinks.service
