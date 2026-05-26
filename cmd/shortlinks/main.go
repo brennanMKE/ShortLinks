@@ -15,6 +15,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/config"
 	"github.com/brennanMKE/ShortLinks/internal/db"
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
+	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
 
@@ -78,6 +79,14 @@ func serve() error {
 	credsH := handlers.NewCredentialsHandler(store)
 	settingsH := handlers.NewSettingsHandler(store)
 
+	// Link CRUD API (#0022). The links store reuses the shared pgx pool. The
+	// redirect cache is not yet constructed/plumbed in serve() (the GET /u/{key}
+	// route is wired in a separate issue), so a nil cache is passed: the handler
+	// then skips eviction on PATCH/DELETE. TODO: once the redirect cache instance
+	// lives in serve(), pass it here so DELETE/PATCH evict the key per the PRD.
+	linkStore := links.NewStore(pool)
+	linksH := handlers.NewLinksHandler(linkStore, nil)
+
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
 	requireSession := middleware.RequireSession(store)
@@ -122,6 +131,16 @@ func serve() error {
 	// POST /auth/register/start, so a PATCH here takes effect immediately.
 	mux.Handle("GET /admin/settings", requireAdmin(http.HandlerFunc(settingsH.List)))
 	mux.Handle("PATCH /admin/settings", requireAdmin(http.HandlerFunc(settingsH.Patch)))
+
+	// Link CRUD API (#0022) — all behind RequireSession and scoped to the
+	// authenticated user in the store. Dedup (#0023), URL filtering (#0024),
+	// audit (#0025), and SSE (#0026) layer onto the create path via the seams
+	// marked in handlers.LinksHandler.Create.
+	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(linksH.Create)))
+	mux.Handle("GET /api/links", requireSession(http.HandlerFunc(linksH.List)))
+	mux.Handle("GET /api/links/{key}", requireSession(http.HandlerFunc(linksH.Get)))
+	mux.Handle("PATCH /api/links/{key}", requireSession(http.HandlerFunc(linksH.Patch)))
+	mux.Handle("DELETE /api/links/{key}", requireSession(http.HandlerFunc(linksH.Delete)))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
