@@ -82,6 +82,49 @@ func (u *RegistrationUser) WebAuthnCredentials() []webauthn.Credential { return 
 // WebAuthnIcon returns an empty icon URL, per the PRD.
 func (u *RegistrationUser) WebAuthnIcon() string { return "" }
 
+// LoginUser is the webauthn.User implementation used during the authentication
+// ceremony. Unlike RegistrationUser it is backed by an existing users row and
+// the credentials stored for that account in passkey_credentials, so
+// WebAuthnCredentials returns the user's real passkeys for go-webauthn to match
+// the incoming assertion against.
+//
+// It satisfies webauthn.User alongside RegistrationUser so both can be passed
+// interchangeably to the go-webauthn Begin*/Finish* calls.
+type LoginUser struct {
+	id          int64
+	handle      []byte
+	email       string
+	credentials []webauthn.Credential
+}
+
+// NewLoginUser builds a login user from a stored account and its credentials.
+// handle is the account's WebAuthn user handle (the value the discoverable
+// passkey returns as its userHandle).
+func NewLoginUser(id int64, handle []byte, email string, credentials []webauthn.Credential) *LoginUser {
+	return &LoginUser{id: id, handle: handle, email: email, credentials: credentials}
+}
+
+// ID returns the users.id primary key for the account, used to issue the
+// session and update last_login_at after a successful assertion.
+func (u *LoginUser) ID() int64 { return u.id }
+
+// WebAuthnID returns the account's stored WebAuthn user handle.
+func (u *LoginUser) WebAuthnID() []byte { return u.handle }
+
+// WebAuthnName returns the email, used as the human-palatable account name.
+func (u *LoginUser) WebAuthnName() string { return u.email }
+
+// WebAuthnDisplayName returns the email, used as the display name.
+func (u *LoginUser) WebAuthnDisplayName() string { return u.email }
+
+// WebAuthnCredentials returns the account's stored passkeys so go-webauthn can
+// locate the credential the assertion was produced with and verify its
+// signature.
+func (u *LoginUser) WebAuthnCredentials() []webauthn.Credential { return u.credentials }
+
+// WebAuthnIcon returns an empty icon URL, per the PRD.
+func (u *LoginUser) WebAuthnIcon() string { return "" }
+
 // registrationOptions returns the RegistrationOptions enforcing the PRD's
 // passkey policy:
 //   - residentKey "required" + userVerification "required" → a true

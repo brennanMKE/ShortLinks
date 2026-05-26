@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -67,13 +68,17 @@ func serve() error {
 
 	store := auth.NewStore(pool)
 	regSvc := auth.NewRegistrationService(store, wa, mailer, cfg)
-	authH := handlers.NewAuthHandler(regSvc)
+	loginSvc := auth.NewLoginService(store, wa, slog.Default())
+	authH := handlers.NewAuthHandler(regSvc, loginSvc)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", handlers.NewHealthHandler(pool))
 	mux.HandleFunc("POST /auth/register/start", authH.RegisterStart)
 	mux.HandleFunc("GET /auth/register/verify", authH.RegisterVerify)
 	mux.HandleFunc("POST /auth/register/finish", authH.RegisterFinish)
+	mux.HandleFunc("GET /auth/login/start", authH.LoginStart)
+	mux.HandleFunc("POST /auth/login/finish", authH.LoginFinish)
+	mux.HandleFunc("POST /auth/logout", authH.Logout)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)

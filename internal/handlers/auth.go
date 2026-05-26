@@ -26,21 +26,36 @@ type registrar interface {
 	FinishRegistration(ctx context.Context, token, deviceName string, r *http.Request) (auth.FinishResult, error)
 }
 
-// AuthHandler serves the passkey registration ceremony routes:
+// authenticator is the behavior the auth handler needs from the login service.
+// As with registrar, depending on an interface keeps the handler unit-testable
+// with a fake.
+type authenticator interface {
+	StartLogin(ctx context.Context, email string) (*protocol.CredentialAssertion, error)
+	FinishLogin(ctx context.Context, r *http.Request) (auth.LoginResult, error)
+	Logout(ctx context.Context, token string) error
+}
+
+// AuthHandler serves the passkey registration and login ceremony routes:
 //
 //	POST /auth/register/start   — submit email, send magic link
 //	GET  /auth/register/verify  — validate token, return WebAuthn options
 //	POST /auth/register/finish  — submit attestation, create account + session
+//	GET  /auth/login/start      — issue an assertion challenge (optional ?email=)
+//	POST /auth/login/finish     — submit assertion, verify, create session
+//	POST /auth/logout           — delete the session, clear the cookie
 //
-// Login (#0016) and recovery (#0017) routes will be added to this handler (or a
-// sibling) reusing the same service and JSON helpers.
+// Recovery (#0017) routes will be added reusing the same services and JSON
+// helpers.
 type AuthHandler struct {
-	reg registrar
+	reg   registrar
+	login authenticator
 }
 
-// NewAuthHandler constructs an AuthHandler over the registration service.
-func NewAuthHandler(reg registrar) *AuthHandler {
-	return &AuthHandler{reg: reg}
+// NewAuthHandler constructs an AuthHandler over the registration and login
+// services. login may be nil where only registration routes are exercised
+// (e.g. existing registration handler tests).
+func NewAuthHandler(reg registrar, login authenticator) *AuthHandler {
+	return &AuthHandler{reg: reg, login: login}
 }
 
 // startRequest is the POST /auth/register/start body.
@@ -134,6 +149,82 @@ func (h *AuthHandler) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 		// detail to the client.
 		writeError(w, http.StatusBadRequest, "registration failed")
 	}
+}
+
+// loginStartRequest is the optional POST /auth/login/start body. The email may
+// also arrive as a ?email= query parameter; either is optional.
+type loginStartRequest struct {
+	Email string `json:"email"`
+}
+
+// LoginStart handles GET (or POST) /auth/login/start. An optional email narrows
+// the prompt via allowCredentials; absent it, a discoverable (conditional-UI)
+// challenge is issued. The response is the PublicKeyCredentialRequestOptions
+// JSON and is identical regardless of whether the email is registered, so it
+// never leaks account existence.
+func (h *AuthHandler) LoginStart(w http.ResponseWriter, r *http.Request) {
+	email := r.URL.Query().Get("email")
+	// Accept an optional JSON body too, but only if one was actually sent.
+	if email == "" && r.Body != nil && r.ContentLength != 0 {
+		var req loginStartRequest
+		if err := decodeJSON(w, r, &req); err == nil {
+			email = req.Email
+		}
+	}
+
+	assertion, err := h.login.StartLogin(r.Context(), email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, assertion)
+}
+
+// LoginFinish handles POST /auth/login/finish. The body is the WebAuthn
+// assertion. On success it sets the session cookie and returns 200; a
+// deactivated account yields 403; any verification failure yields a generic 401.
+func (h *AuthHandler) LoginFinish(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)
+
+	result, err := h.login.FinishLogin(r.Context(), r)
+	switch {
+	case err == nil:
+		auth.SetSessionCookie(w, result.SessionToken, result.SessionExpires)
+		writeJSON(w, http.StatusOK, map[string]any{"user_id": result.UserID})
+	case errors.Is(err, auth.ErrAccountDeactivated):
+		writeError(w, http.StatusForbidden, "Account deactivated")
+	default:
+		// Unknown credential, bad signature, consumed/expired challenge, ...:
+		// never reveal which case occurred.
+		writeError(w, http.StatusUnauthorized, "authentication failed")
+	}
+}
+
+// Logout handles POST /auth/logout. It deletes the session row for the cookie
+// (if present) and clears the cookie. It is idempotent and always returns 200.
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
+		if derr := h.login.Logout(r.Context(), c.Value); derr != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+	clearSessionCookie(w)
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Signed out"})
+}
+
+// clearSessionCookie expires the session cookie in the browser, mirroring the
+// attributes set by auth.SetSessionCookie so the deletion is accepted.
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     auth.SessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
 }
 
 // decodeJSON reads a JSON body into v with a size cap, rejecting unknown fields
