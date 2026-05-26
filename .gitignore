@@ -12,7 +12,12 @@
 /tmp/
 
 # Svelte / Vite build output (embedded into Go binary at compile time)
-web/dist/
+# The committed dist/index.html placeholder keeps `//go:embed all:dist` and
+# therefore `go build ./...` compiling from a clean checkout before any
+# `npm run build` has run. The real build overwrites index.html and emits the
+# hashed dist/assets/*, which stay ignored.
+web/dist/*
+!web/dist/index.html
 web/node_modules/
 web/.svelte-kit/
 

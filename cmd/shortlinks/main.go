@@ -22,6 +22,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
+	"github.com/brennanMKE/ShortLinks/web"
 )
 
 const version = "0.1.0"
@@ -239,6 +240,13 @@ func serve() error {
 	// SSE stream (#0026) — behind RequireSession; pushes link.created events to
 	// the authenticated user's connected dashboard clients.
 	mux.Handle("GET /api/events", requireSession(http.HandlerFunc(eventsH.Stream)))
+
+	// Svelte SPA (#0038) — the catch-all served LAST. Under the Go 1.22 mux this
+	// "GET /" pattern is the least specific, so every explicit route above wins
+	// over it. It serves hashed assets from the embedded web/dist directly and
+	// falls back to index.html for any other path, so SPA deep links survive a
+	// hard refresh.
+	mux.Handle("GET /", handlers.NewSPAHandler(web.DistFS()))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
