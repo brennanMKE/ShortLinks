@@ -76,10 +76,18 @@ func serve() error {
 	recoverSvc := auth.NewRecoveryService(store, wa, mailer)
 	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc)
 	credsH := handlers.NewCredentialsHandler(store)
+	settingsH := handlers.NewSettingsHandler(store)
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
 	requireSession := middleware.RequireSession(store)
+	// requireAdmin composes the session guard with the admin check; admin-only
+	// routes wrap their handler with requireAdmin(...). RequireSession runs
+	// first (attaching the user / answering 401), then RequireAdmin (403 for a
+	// non-admin), per #0017.
+	requireAdmin := func(next http.Handler) http.Handler {
+		return requireSession(middleware.RequireAdmin(next))
+	}
 
 	// Per-IP rate limiters for the abuse-prone public auth endpoints (PRD Phase
 	// 2). Burst equals the per-window allowance so a fresh IP gets its full
@@ -107,6 +115,13 @@ func serve() error {
 	mux.Handle("GET /account/credentials", requireSession(http.HandlerFunc(credsH.List)))
 	mux.Handle("PATCH /account/credentials/{id}", requireSession(http.HandlerFunc(credsH.Rename)))
 	mux.Handle("DELETE /account/credentials/{id}", requireSession(http.HandlerFunc(credsH.Revoke)))
+
+	// Admin-only runtime settings (#0021): read all settings and update one.
+	// Both behind RequireSession + RequireAdmin. The registration gate
+	// (registrations_enabled) is read fresh from the DB on each
+	// POST /auth/register/start, so a PATCH here takes effect immediately.
+	mux.Handle("GET /admin/settings", requireAdmin(http.HandlerFunc(settingsH.List)))
+	mux.Handle("PATCH /admin/settings", requireAdmin(http.HandlerFunc(settingsH.Patch)))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
