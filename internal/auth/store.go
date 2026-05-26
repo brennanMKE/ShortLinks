@@ -619,6 +619,174 @@ func (s *Store) CreateSession(ctx context.Context, q querier, userID int64, toke
 	return expiresAt, nil
 }
 
+// ManagedCredential is the account-settings view of a registered passkey,
+// returned by ListCredentialsForUser. It deliberately omits the public_key and
+// the raw credential_id bytes — the management UI needs only display metadata,
+// never the secret material used to verify assertions. The AAGUID is exposed as
+// its canonical string form (or "" when NULL) so the handler can map it to a
+// human device hint without re-encoding.
+type ManagedCredential struct {
+	ID         int64
+	DeviceName string     // user-assigned label; may be empty
+	AAGUID     string     // canonical UUID string, or "" when NULL/absent
+	SignCount  int64      // clone-detection counter (0 for synced passkeys)
+	CreatedAt  time.Time  // when the credential was registered
+	LastUsedAt *time.Time // last successful assertion; nil if never used since column add
+}
+
+// ListCredentialsForUser returns every passkey owned by userID as display-only
+// metadata, newest first. It powers GET /account/credentials. The public_key
+// and raw credential_id are never selected, so they cannot leak through the
+// management API. Scoped strictly to the caller's own rows.
+func (s *Store) ListCredentialsForUser(ctx context.Context, userID int64) ([]ManagedCredential, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, device_name, aaguid, sign_count, created_at, last_used_at
+		   FROM passkey_credentials
+		  WHERE user_id = $1
+		  ORDER BY created_at DESC, id DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("auth: listing credentials for user: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ManagedCredential
+	for rows.Next() {
+		var c ManagedCredential
+		var deviceName *string
+		var aaguid *[16]byte
+		var createdAt *time.Time
+		var lastUsedAt *time.Time
+		if err := rows.Scan(&c.ID, &deviceName, &aaguid, &c.SignCount, &createdAt, &lastUsedAt); err != nil {
+			return nil, fmt.Errorf("auth: scanning managed credential row: %w", err)
+		}
+		if deviceName != nil {
+			c.DeviceName = *deviceName
+		}
+		if aaguid != nil {
+			c.AAGUID = uuidString(*aaguid)
+		}
+		if createdAt != nil {
+			c.CreatedAt = *createdAt
+		}
+		c.LastUsedAt = lastUsedAt
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("auth: iterating managed credential rows: %w", err)
+	}
+	return out, nil
+}
+
+// RenameCredential sets device_name for the credential identified by id, but
+// only when it belongs to userID. The user-scoped WHERE clause is the
+// authorization boundary: a credential owned by another account simply does not
+// match, so the update affects zero rows and ErrCredentialNotFound is returned —
+// the handler maps that to 404 without revealing the credential exists.
+func (s *Store) RenameCredential(ctx context.Context, userID, id int64, deviceName string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE passkey_credentials SET device_name = $1
+		  WHERE id = $2 AND user_id = $3`,
+		deviceName, id, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("auth: renaming credential: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrCredentialNotFound
+	}
+	return nil
+}
+
+// ErrLastCredential is returned by RevokeCredential when the targeted credential
+// is the account's only remaining passkey. The PRD forbids revoking the last
+// credential: the user must register a replacement first, otherwise they would
+// lock themselves out. The handler maps this to 409 Conflict.
+var ErrLastCredential = errors.New("auth: cannot revoke last credential")
+
+// RevokeCredential deletes the passkey identified by id when it belongs to
+// userID and is not the account's last remaining credential. It runs inside a
+// transaction so the "is this the last one?" count and the delete are atomic —
+// two concurrent revoke requests cannot both observe two credentials and each
+// delete one, leaving the account with zero. Returns ErrCredentialNotFound when
+// the credential is absent or owned by another account (the handler answers
+// 404, leaking nothing), and ErrLastCredential when it is the only one.
+//
+// NOTE: the credential.revoked audit-log write is #0025 and is intentionally
+// not emitted here yet.
+func (s *Store) RevokeCredential(ctx context.Context, userID, id int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("auth: begin revoke tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock the user's credential rows for the duration of the transaction so a
+	// concurrent revoke cannot race the count, then count and check ownership
+	// from the locked set. (FOR UPDATE cannot be combined with an aggregate, so
+	// the rows are gathered first and tallied in Go.)
+	rows, err := tx.Query(ctx,
+		`SELECT id FROM passkey_credentials WHERE user_id = $1 FOR UPDATE`, userID)
+	if err != nil {
+		return fmt.Errorf("auth: locking credentials for revoke: %w", err)
+	}
+	var total int64
+	var owns bool
+	for rows.Next() {
+		var rowID int64
+		if err := rows.Scan(&rowID); err != nil {
+			rows.Close()
+			return fmt.Errorf("auth: scanning credential id for revoke: %w", err)
+		}
+		total++
+		if rowID == id {
+			owns = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("auth: iterating credentials for revoke: %w", err)
+	}
+
+	// Verify the target belongs to this user before deciding anything else, so
+	// a request for someone else's credential 404s rather than being treated as
+	// a last-credential conflict.
+	if !owns {
+		return ErrCredentialNotFound
+	}
+
+	if total <= 1 {
+		return ErrLastCredential
+	}
+
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM passkey_credentials WHERE id = $1 AND user_id = $2`,
+		id, userID,
+	); err != nil {
+		return fmt.Errorf("auth: deleting credential: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("auth: commit revoke tx: %w", err)
+	}
+	return nil
+}
+
+// uuidString renders a 16-byte UUID in canonical 8-4-4-4-12 hyphenated form.
+func uuidString(u [16]byte) string {
+	const hex = "0123456789abcdef"
+	var buf [36]byte
+	j := 0
+	for i := 0; i < 16; i++ {
+		if i == 4 || i == 6 || i == 8 || i == 10 {
+			buf[j] = '-'
+			j++
+		}
+		buf[j] = hex[u[i]>>4]
+		buf[j+1] = hex[u[i]&0x0f]
+		j += 2
+	}
+	return string(buf[:])
+}
+
 // aaguidArg maps a raw AAGUID to a value pgx encodes as a UUID, or NULL when the
 // AAGUID is absent or all zeros (synced platform passkeys often report zeros).
 func aaguidArg(aaguid []byte) any {
