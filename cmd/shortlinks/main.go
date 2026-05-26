@@ -69,7 +69,8 @@ func serve() error {
 	store := auth.NewStore(pool)
 	regSvc := auth.NewRegistrationService(store, wa, mailer, cfg)
 	loginSvc := auth.NewLoginService(store, wa, slog.Default())
-	authH := handlers.NewAuthHandler(regSvc, loginSvc)
+	recoverSvc := auth.NewRecoveryService(store, wa, mailer)
+	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", handlers.NewHealthHandler(pool))
@@ -79,6 +80,9 @@ func serve() error {
 	mux.HandleFunc("GET /auth/login/start", authH.LoginStart)
 	mux.HandleFunc("POST /auth/login/finish", authH.LoginFinish)
 	mux.HandleFunc("POST /auth/logout", authH.Logout)
+	mux.HandleFunc("POST /auth/recover", authH.RecoverStart)
+	mux.HandleFunc("GET /auth/recover/verify", authH.RecoverVerify)
+	mux.HandleFunc("POST /auth/recover/finish", authH.RecoverFinish)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
