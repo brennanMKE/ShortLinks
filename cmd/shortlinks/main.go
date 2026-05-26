@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/config"
@@ -78,15 +81,24 @@ func serve() error {
 	// store satisfies middleware.SessionResolver via ResolveSession.
 	requireSession := middleware.RequireSession(store)
 
+	// Per-IP rate limiters for the abuse-prone public auth endpoints (PRD Phase
+	// 2). Burst equals the per-window allowance so a fresh IP gets its full
+	// quota immediately, then refills at the sustained rate.
+	registerLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)   // 3 / hour / IP
+	loginLimiter := middleware.NewRateLimiter(rate.Every(time.Minute/10), 10)  // 10 / minute / IP
+	recoverLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)    // 3 / hour / IP
+
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", handlers.NewHealthHandler(pool))
-	mux.HandleFunc("POST /auth/register/start", authH.RegisterStart)
+	mux.Handle("POST /auth/register/start", registerLimiter.Middleware(http.HandlerFunc(authH.RegisterStart)))
 	mux.HandleFunc("GET /auth/register/verify", authH.RegisterVerify)
 	mux.HandleFunc("POST /auth/register/finish", authH.RegisterFinish)
-	mux.HandleFunc("GET /auth/login/start", authH.LoginStart)
+	// The PRD lists login/start as the rate-limited login endpoint; it is
+	// registered here as GET, so the 10/min limiter is attached to that route.
+	mux.Handle("GET /auth/login/start", loginLimiter.Middleware(http.HandlerFunc(authH.LoginStart)))
 	mux.HandleFunc("POST /auth/login/finish", authH.LoginFinish)
 	mux.HandleFunc("POST /auth/logout", authH.Logout)
-	mux.HandleFunc("POST /auth/recover", authH.RecoverStart)
+	mux.Handle("POST /auth/recover", recoverLimiter.Middleware(http.HandlerFunc(authH.RecoverStart)))
 	mux.HandleFunc("GET /auth/recover/verify", authH.RecoverVerify)
 	mux.HandleFunc("POST /auth/recover/finish", authH.RecoverFinish)
 
