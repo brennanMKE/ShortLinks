@@ -1,0 +1,41 @@
+[Unit]
+Description=ShortLinks URL shortener service
+Documentation=https://github.com/brennanMKE/ShortLinks
+# The service binds a TCP socket and talks to a local PostgreSQL instance, so it
+# must come up after the network and after the database it depends on.
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=shortlinks
+Group=shortlinks
+
+# Runtime configuration (DB DSN, port, SES credentials, secrets) is supplied by
+# the operator-managed env file, not committed to source control.
+EnvironmentFile=/etc/shortlinks/config.env
+
+# Installed binary location (see DEPLOYMENT.md step 4: `sudo install -m 0755
+# shortlinks /usr/local/bin/shortlinks`). The `serve` subcommand starts the
+# HTTP server; it listens on 127.0.0.1:8080 behind the Apache reverse proxy.
+ExecStart=/usr/local/bin/shortlinks serve
+
+# Always bring the service back if it crashes; wait 5s between restarts.
+Restart=on-failure
+RestartSec=5
+
+# Hardening: run unprivileged with a minimal, read-only view of the host.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
