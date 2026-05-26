@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
+	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/events"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
@@ -70,6 +71,15 @@ type ruleProvider interface {
 	Rules(ctx context.Context) ([]filters.Rule, error)
 }
 
+// statsProvider is the slice of the click-analytics store the links handler
+// needs: the per-link UTM breakdown (#0030). *clicks.StatsStore satisfies it via
+// UTMStatsForLink. It is optional — a nil provider (no stats store wired) omits
+// the utm_stats field from the link-detail response, so the handler stays
+// testable without a DB and degrades gracefully if analytics are not wired.
+type statsProvider interface {
+	UTMStatsForLink(ctx context.Context, linkID int64) (clicks.UTMStats, error)
+}
+
 // eventPublisher is the slice of the events broker the links handler needs: the
 // ability to broadcast a link.created event to a user's connected SSE clients
 // (#0026). *events.Broker satisfies it via Publish. It is optional — a nil
@@ -108,16 +118,21 @@ type LinksHandler struct {
 	// dashboard clients on a successful insert/reactivation. May be nil (no broker
 	// wired) in which case the broadcast is skipped.
 	broker eventPublisher
+	// stats provides the per-link UTM analytics breakdown enriching the
+	// link-detail response (#0030). May be nil (no stats store wired) in which
+	// case the utm_stats field is omitted.
+	stats statsProvider
 }
 
 // NewLinksHandler constructs a LinksHandler over the data layer, the redirect
-// cache, the URL-filter rule cache, the audit logger, and the SSE event broker.
-// Pass a nil redirectCache to disable eviction, a nil ruleProvider to disable
-// URL filtering, a nil auditor to disable audit writes, and a nil broker to
-// disable the #0026 SSE broadcast (e.g. in unit tests that do not exercise those
+// cache, the URL-filter rule cache, the audit logger, the SSE event broker, and
+// the click-analytics store. Pass a nil redirectCache to disable eviction, a nil
+// ruleProvider to disable URL filtering, a nil auditor to disable audit writes, a
+// nil broker to disable the #0026 SSE broadcast, and a nil stats provider to omit
+// the #0030 utm_stats field (e.g. in unit tests that do not exercise those
 // paths); the handler then skips the respective steps.
-func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger, broker eventPublisher) *LinksHandler {
-	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor, broker: broker}
+func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger, broker eventPublisher, stats statsProvider) *LinksHandler {
+	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor, broker: broker, stats: stats}
 }
 
 // linkView is the JSON shape for a single link, shared by every endpoint. The
@@ -463,10 +478,22 @@ func (h *LinksHandler) List(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// linkDetailView is the GET /api/links/{key} body: a single link's fields plus
+// the #0030 UTM analytics breakdown. It embeds linkView so the link fields keep
+// their existing JSON shape, and adds utm_stats. utm_stats is omitted (nil) when
+// no analytics store is wired.
+type linkDetailView struct {
+	linkView
+	UTMStats *clicks.UTMStats `json:"utm_stats,omitempty"`
+}
+
 // Get handles GET /api/links/{key}. It returns the caller's link detail with its
-// click stats. A key that does not exist OR belongs to another user yields 404 —
-// the same response in both cases so the endpoint never reveals another user's
-// link.
+// click stats, enriched (#0030) with a utm_stats breakdown aggregated by
+// utm_source/medium/campaign. A key that does not exist OR belongs to another
+// user yields 404 — the same response in both cases so the endpoint never reveals
+// another user's link. Ownership is enforced by GetLink (user-scoped) before the
+// analytics query runs against the resolved link id, so a non-owner can never see
+// another user's breakdown.
 func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -482,12 +509,31 @@ func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 	link, err := h.store.GetLink(r.Context(), u.ID, key)
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, toLinkView(link))
+		// fall through to build the detail view.
 	case errors.Is(err, links.ErrLinkNotFound):
 		writeError(w, http.StatusNotFound, "link not found")
+		return
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
+
+	detail := linkDetailView{linkView: toLinkView(link)}
+
+	// #0030: enrich with the UTM breakdown when an analytics store is wired. The
+	// link was resolved scoped to the caller above, so passing link.ID here cannot
+	// leak another user's data. A stats failure is fatal to the detail response
+	// (the click_count in the breakdown must agree with the row count).
+	if h.stats != nil {
+		st, err := h.stats.UTMStatsForLink(r.Context(), link.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		detail.UTMStats = &st
+	}
+
+	writeJSON(w, http.StatusOK, detail)
 }
 
 // patchLinkRequest is the PATCH /api/links/{key} body. Every field is a pointer

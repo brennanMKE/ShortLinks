@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/cache"
+	"github.com/brennanMKE/ShortLinks/internal/clicks"
 )
 
 // utmParams are the five UTM query keys forwarded to the destination and
@@ -56,6 +57,41 @@ type ClickInfo struct {
 // concurrent use and must not assume the request is still in flight.
 type ClickRecorder interface {
 	RecordClick(info ClickInfo)
+}
+
+// clickSink is the behavior of the DB-backed click recorder
+// (*clicks.Recorder). Depending on it through an interface keeps the adapter
+// testable and avoids a hard handler→concrete coupling.
+type clickSink interface {
+	RecordClick(c clicks.Click)
+}
+
+// NewClickRecorder adapts a *clicks.Recorder (which speaks clicks.Click) to the
+// handler's ClickRecorder interface (which speaks ClickInfo). The redirect
+// handler depends only on ClickRecorder, so the clicks package never needs to
+// import handlers; this thin adapter bridges the two value shapes at the wiring
+// boundary.
+func NewClickRecorder(sink clickSink) ClickRecorder {
+	return clickRecorderAdapter{sink: sink}
+}
+
+type clickRecorderAdapter struct {
+	sink clickSink
+}
+
+func (a clickRecorderAdapter) RecordClick(info ClickInfo) {
+	a.sink.RecordClick(clicks.Click{
+		Key:         info.Key,
+		ClickedAt:   info.ClickedAt,
+		IPAddress:   info.IPAddress,
+		UserAgent:   info.UserAgent,
+		Referer:     info.Referer,
+		UTMSource:   info.UTMSource,
+		UTMMedium:   info.UTMMedium,
+		UTMCampaign: info.UTMCampaign,
+		UTMTerm:     info.UTMTerm,
+		UTMContent:  info.UTMContent,
+	})
 }
 
 // RedirectHandler serves GET /u/{key}: it resolves the key, enforces the
