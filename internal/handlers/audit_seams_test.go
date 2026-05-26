@@ -64,7 +64,7 @@ func auditLinksMux(t *testing.T, pool *pgxpool.Pool, ruleCache *cache.RuleCache)
 	if ruleCache != nil {
 		rules = ruleCache
 	}
-	h := NewLinksHandler(links.NewStore(pool), nil, rules, audit.New(pool), nil)
+	h := NewLinksHandler(links.NewStore(pool), nil, rules, audit.New(pool), nil, nil)
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(h.Create)))

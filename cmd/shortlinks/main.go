@@ -14,6 +14,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/cache"
+	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/config"
 	"github.com/brennanMKE/ShortLinks/internal/db"
 	"github.com/brennanMKE/ShortLinks/internal/events"
@@ -118,16 +119,30 @@ func serve() error {
 	broker := events.NewBroker()
 	eventsH := handlers.NewEventsHandler(broker)
 
-	// Link CRUD API (#0022). The links store reuses the shared pgx pool. The
-	// redirect cache is not yet constructed/plumbed in serve() (the GET /u/{key}
-	// route is wired in a separate issue), so a nil cache is passed: the handler
-	// then skips eviction on PATCH/DELETE. The rule cache IS wired so the #0024
-	// URL filter check runs at the top of Create. The broker is wired so a
-	// successful create broadcasts the #0026 link.created SSE event. TODO: once the
-	// redirect cache instance lives in serve(), pass it here so DELETE/PATCH evict
-	// the key.
+	// Redirect path (#0007 cache / #0009 redirect / #0030 click recording). The
+	// redirect cache fronts the hot GET /u/{key} lookup; the resolver checks it
+	// then falls back to the link store (caching positive hits and short-TTL
+	// negative entries for absent keys). The clicks recorder persists each click
+	// best-effort off the redirect goroutine, and the stats store backs the #0030
+	// UTM analytics on the link-detail endpoint.
 	linkStore := links.NewStore(pool)
-	linksH := handlers.NewLinksHandler(linkStore, nil, ruleCache, auditLogger, broker)
+	redirectCache, err := cache.New(int64(cfg.CacheMaxCost), time.Duration(cfg.CacheTTLSeconds)*time.Second)
+	if err != nil {
+		return err
+	}
+	defer redirectCache.Close()
+	resolver := links.NewResolver(redirectCache, linkStore)
+	clickRecorder := clicks.NewRecorder(pool, slog.Default())
+	statsStore := clicks.NewStatsStore(pool)
+	redirectH := handlers.NewRedirectHandler(resolver, handlers.NewClickRecorder(clickRecorder))
+
+	// Link CRUD API (#0022). The links store reuses the shared pgx pool. The
+	// redirect cache constructed above is now wired as the cache-evictor so a
+	// PATCH/DELETE drops the key and the next redirect re-reads the DB. The rule
+	// cache is wired so the #0024 URL filter check runs at the top of Create, the
+	// broker so a successful create broadcasts the #0026 link.created SSE event,
+	// and the stats store so GET /api/links/{key} returns the #0030 utm_stats.
+	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore)
 
 	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
 	// read straight off the RequireSession-attached context, so the Svelte SPA
@@ -154,6 +169,10 @@ func serve() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", handlers.NewHealthHandler(pool))
+
+	// Public redirect path (#0009): resolve key → 302 to destination with inbound
+	// UTM merged, recording the click asynchronously (#0030). No session required.
+	mux.Handle("GET /u/{key}", redirectH)
 	mux.Handle("POST /auth/register/start", registerLimiter.Middleware(http.HandlerFunc(authH.RegisterStart)))
 	mux.HandleFunc("GET /auth/register/verify", authH.RegisterVerify)
 	mux.HandleFunc("POST /auth/register/finish", authH.RegisterFinish)

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/brennanMKE/ShortLinks/internal/auth"
+	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
@@ -22,7 +23,7 @@ import (
 func linksMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewLinksHandler(links.NewStore(pool), nil, nil, nil, nil)
+	h := NewLinksHandler(links.NewStore(pool), nil, nil, nil, nil, clicks.NewStatsStore(pool))
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(h.Create)))
