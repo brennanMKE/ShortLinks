@@ -1,0 +1,31 @@
+# Normalize line endings to LF on commit
+* text=auto eol=lf
+
+# Go source
+*.go text eol=lf
+
+# SQL migrations
+*.sql text eol=lf
+
+# Svelte / TypeScript
+*.svelte text eol=lf
+*.ts text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+
+# Markdown and docs
+*.md text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# Binary files — no line-ending conversion
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

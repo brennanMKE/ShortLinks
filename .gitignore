@@ -1,0 +1,27 @@
+# Environment / secrets — never commit real values
+.env
+/etc/shortlinks/
+
+# Go build output
+shortlinks
+*.exe
+*.test
+*.out
+
+# Go test cache
+/tmp/
+
+# Svelte / Vite build output (embedded into Go binary at compile time)
+web/dist/
+web/node_modules/
+web/.svelte-kit/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
