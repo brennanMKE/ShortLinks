@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/config"
 	"github.com/brennanMKE/ShortLinks/internal/db"
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
@@ -52,8 +53,27 @@ func serve() error {
 	}
 	defer pool.Close()
 
+	wa, err := auth.NewWebAuthn(cfg)
+	if err != nil {
+		return err
+	}
+
+	// Choose the mailer: real SES transport when SMTP credentials are present,
+	// otherwise a stdout NoOpMailer for local development.
+	var mailer auth.Mailer = auth.NoOpMailer{BaseURL: cfg.BaseURL}
+	if cfg.SESSmtpUsername != "" && cfg.SESSmtpPassword != "" {
+		mailer = auth.NewSESMailer(cfg)
+	}
+
+	store := auth.NewStore(pool)
+	regSvc := auth.NewRegistrationService(store, wa, mailer, cfg)
+	authH := handlers.NewAuthHandler(regSvc)
+
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", handlers.NewHealthHandler(pool))
+	mux.HandleFunc("POST /auth/register/start", authH.RegisterStart)
+	mux.HandleFunc("GET /auth/register/verify", authH.RegisterVerify)
+	mux.HandleFunc("POST /auth/register/finish", authH.RegisterFinish)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
