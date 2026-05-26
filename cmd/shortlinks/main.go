@@ -12,6 +12,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/config"
 	"github.com/brennanMKE/ShortLinks/internal/db"
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
+	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
 
 const version = "0.1.0"
@@ -71,6 +72,11 @@ func serve() error {
 	loginSvc := auth.NewLoginService(store, wa, slog.Default())
 	recoverSvc := auth.NewRecoveryService(store, wa, mailer)
 	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc)
+	credsH := handlers.NewCredentialsHandler(store)
+
+	// requireSession guards the authenticated account-management routes; the
+	// store satisfies middleware.SessionResolver via ResolveSession.
+	requireSession := middleware.RequireSession(store)
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", handlers.NewHealthHandler(pool))
@@ -83,6 +89,12 @@ func serve() error {
 	mux.HandleFunc("POST /auth/recover", authH.RecoverStart)
 	mux.HandleFunc("GET /auth/recover/verify", authH.RecoverVerify)
 	mux.HandleFunc("POST /auth/recover/finish", authH.RecoverFinish)
+
+	// Passkey credential management — authenticated, operates only on the
+	// caller's own credentials (#0019).
+	mux.Handle("GET /account/credentials", requireSession(http.HandlerFunc(credsH.List)))
+	mux.Handle("PATCH /account/credentials/{id}", requireSession(http.HandlerFunc(credsH.Rename)))
+	mux.Handle("DELETE /account/credentials/{id}", requireSession(http.HandlerFunc(credsH.Revoke)))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
