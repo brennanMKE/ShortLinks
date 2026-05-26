@@ -81,6 +81,94 @@ func (s *Store) RegistrationsEnabled(ctx context.Context) (bool, error) {
 	return value == "true", nil
 }
 
+// ErrSettingNotFound is returned by UpdateSetting when the key does not already
+// exist in the settings table. The admin settings endpoint forbids creating
+// arbitrary keys, so an update to an unknown key is rejected (the handler maps
+// this to 400) rather than inserting a new row.
+var ErrSettingNotFound = errors.New("auth: setting not found")
+
+// Setting is a single row of the settings table: a key, its text value, and
+// when it was last changed.
+type Setting struct {
+	Key       string
+	Value     string
+	UpdatedAt *time.Time
+}
+
+// ListSettings returns every row in the settings table ordered by key. It backs
+// GET /admin/settings. Values are always text (the column is TEXT NOT NULL); the
+// caller decides how to interpret each key.
+func (s *Store) ListSettings(ctx context.Context) ([]Setting, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT key, value, updated_at FROM settings ORDER BY key`)
+	if err != nil {
+		return nil, fmt.Errorf("auth: listing settings: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Setting
+	for rows.Next() {
+		var st Setting
+		var updatedAt *time.Time
+		if err := rows.Scan(&st.Key, &st.Value, &updatedAt); err != nil {
+			return nil, fmt.Errorf("auth: scanning setting row: %w", err)
+		}
+		st.UpdatedAt = updatedAt
+		out = append(out, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("auth: iterating setting rows: %w", err)
+	}
+	return out, nil
+}
+
+// GetSetting reads a single setting's value. ErrSettingNotFound is returned when
+// the key is absent so callers can distinguish "missing" from a real error.
+func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.pool.QueryRow(ctx,
+		`SELECT value FROM settings WHERE key = $1`, key,
+	).Scan(&value)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", ErrSettingNotFound
+	case err != nil:
+		return "", fmt.Errorf("auth: reading setting %q: %w", key, err)
+	}
+	return value, nil
+}
+
+// UpdateSetting changes the value of an EXISTING setting key and bumps
+// updated_at to now, returning the previous value so the caller can write a
+// settings.updated audit entry (#0025). The PRD/issue forbid creating arbitrary
+// keys through the admin endpoint, so a key that does not already exist yields
+// ErrSettingNotFound (the handler maps this to 400) instead of being inserted.
+//
+// The UPDATE ... RETURNING is atomic: it both detects the missing key (zero rows
+// affected → ErrSettingNotFound) and reports the old value in a single round
+// trip. RETURNING returns the new (already-updated) value, so the old value is
+// read first under the same statement via a CTE.
+func (s *Store) UpdateSetting(ctx context.Context, key, value string, now time.Time) (oldValue string, err error) {
+	err = s.pool.QueryRow(ctx,
+		`WITH prev AS (
+		     SELECT value AS old_value FROM settings WHERE key = $1
+		 )
+		 UPDATE settings
+		    SET value = $2, updated_at = $3
+		   FROM prev
+		  WHERE settings.key = $1
+		 RETURNING prev.old_value`,
+		key, value, now,
+	).Scan(&oldValue)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", ErrSettingNotFound
+	case err != nil:
+		return "", fmt.Errorf("auth: updating setting %q: %w", key, err)
+	}
+	return oldValue, nil
+}
+
 // EmailRegistered reports whether a users row already exists for the given
 // (already-lowercased) email.
 func (s *Store) EmailRegistered(ctx context.Context, email string) (bool, error) {
