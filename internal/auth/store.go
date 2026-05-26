@@ -423,6 +423,103 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	return nil
 }
 
+// ErrSessionInvalid is returned when a session token is unknown or its session
+// has expired. The two cases are deliberately collapsed so the auth middleware
+// can map both to a single 401 without leaking which occurred.
+var ErrSessionInvalid = errors.New("auth: session invalid or expired")
+
+// ErrAccountInactive is returned when a valid session belongs to a deactivated
+// account. Deactivated users must not be able to use the API even while a
+// previously issued session cookie is still live.
+var ErrAccountInactive = errors.New("auth: account inactive")
+
+// SessionUser is the authenticated principal resolved from a session cookie:
+// the owning account's id, email, and admin flag. It carries exactly what the
+// middleware attaches to the request context.
+type SessionUser struct {
+	ID      int64
+	Email   string
+	IsAdmin bool
+}
+
+// ResolveSession validates a raw session cookie value and, on success, applies
+// the 30-day sliding window in the same statement before returning the
+// authenticated user. It is the single per-request entry point for the session
+// auth middleware (#0017).
+//
+// The session token is the raw random value stored directly in the cookie (see
+// NewSessionToken / SetSessionCookie), so this is a direct lookup by token. In
+// one round-trip it:
+//   - joins sessions → users by the cookie value,
+//   - rejects an unknown token or one whose expires_at is already in the past
+//     (ErrSessionInvalid),
+//   - rejects a session whose owner is deactivated (ErrAccountInactive),
+//   - otherwise bumps last_seen_at to now and extends expires_at to now+30d
+//     (the sliding window) and returns the user.
+//
+// The expiry check, the active check, and the bump are all evaluated against
+// the row as it exists at call time: the UPDATE's WHERE clause re-checks
+// expires_at so a row that expired between the read and the write is not
+// silently revived. A missing/expired row yields no UPDATE; the function then
+// distinguishes "expired" from "inactive" with a follow-up read so the caller
+// gets the right error (and can delete the dead row).
+func (s *Store) ResolveSession(ctx context.Context, token string, now time.Time) (SessionUser, error) {
+	if token == "" {
+		return SessionUser{}, ErrSessionInvalid
+	}
+	newExpiry := now.Add(sessionTTL)
+
+	var u SessionUser
+	err := s.pool.QueryRow(ctx,
+		`UPDATE sessions s
+		    SET last_seen_at = $2, expires_at = $3
+		   FROM users u
+		  WHERE s.token = $1
+		    AND s.user_id = u.id
+		    AND s.expires_at > $2
+		    AND u.active = TRUE
+		RETURNING u.id, u.email, u.is_admin`,
+		token, now, newExpiry,
+	).Scan(&u.ID, &u.Email, &u.IsAdmin)
+	if err == nil {
+		return u, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return SessionUser{}, fmt.Errorf("auth: resolving session: %w", err)
+	}
+
+	// No row was updated. Determine why so the caller gets a precise error and
+	// expired rows can be reaped: read the live row's expiry and owner active
+	// flag without mutating it.
+	var expiresAt time.Time
+	var active bool
+	derr := s.pool.QueryRow(ctx,
+		`SELECT s.expires_at, u.active
+		   FROM sessions s
+		   JOIN users u ON u.id = s.user_id
+		  WHERE s.token = $1`,
+		token,
+	).Scan(&expiresAt, &active)
+	switch {
+	case errors.Is(derr, pgx.ErrNoRows):
+		return SessionUser{}, ErrSessionInvalid
+	case derr != nil:
+		return SessionUser{}, fmt.Errorf("auth: diagnosing session: %w", derr)
+	}
+	if !expiresAt.After(now) {
+		// Expired: best-effort delete the dead row. A failure here must not
+		// mask the 401, so the delete error is ignored.
+		_ = s.DeleteSession(ctx, token)
+		return SessionUser{}, ErrSessionInvalid
+	}
+	if !active {
+		return SessionUser{}, ErrAccountInactive
+	}
+	// Live, active, but the UPDATE matched nothing — should not happen; treat as
+	// invalid rather than panicking.
+	return SessionUser{}, ErrSessionInvalid
+}
+
 // CreateSession inserts a sessions row with the given token and a 30-day expiry
 // and returns the expiry. Reused by the login ceremony in #0016.
 func (s *Store) CreateSession(ctx context.Context, q querier, userID int64, token string, now time.Time) (time.Time, error) {
