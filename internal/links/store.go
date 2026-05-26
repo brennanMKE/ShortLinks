@@ -144,6 +144,54 @@ func (s *Store) CreateLink(ctx context.Context, in NewLink) (Link, error) {
 	return link, nil
 }
 
+// CreateDeniedLink inserts a denied link row (active=false, denied_reason=code)
+// and returns the full row. It is the data-layer side of the #0024 URL-filter
+// check: when a destination URL matches an active filter rule the handler
+// records the denied attempt here BEFORE the dedup path runs, so the admin audit
+// log accrues one row per blocked submission (the PRD's intentional per-attempt
+// count). A generated, unique key is minted via genKey so the denied row does
+// not collide with the global UNIQUE(key) constraint; reasonCode must be a
+// non-zero denial code.
+//
+// Denied links never participate in deduplication (the dedup index is partial on
+// denied_reason = 0), so each call inserts a fresh row — re-submitting a blocked
+// URL is re-evaluated against the current rules rather than reactivated.
+func (s *Store) CreateDeniedLink(ctx context.Context, in NewLink, reasonCode int16, genKey func(exists func(key string) (bool, error)) (string, error)) (Link, error) {
+	key, err := genKey(func(candidate string) (bool, error) {
+		return s.KeyExists(ctx, candidate)
+	})
+	if err != nil {
+		return Link{}, err
+	}
+
+	link := Link{
+		UserID:         in.UserID,
+		Key:            key,
+		DestinationURL: in.DestinationURL,
+		Title:          in.Title,
+		Active:         false,
+		DeniedReason:   reasonCode,
+	}
+	var title *string
+	if in.Title != "" {
+		title = &in.Title
+	}
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at)
+		 VALUES ($1, $2, $3, $4, $5, FALSE, $6, now())
+		 RETURNING id, created_at, expires_at`,
+		in.UserID, key, in.DestinationURL, title, in.ExpiresAt, reasonCode,
+	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return Link{}, ErrKeyTaken
+		}
+		return Link{}, fmt.Errorf("links: inserting denied link: %w", err)
+	}
+	return link, nil
+}
+
 // CreateOutcome describes which branch CreateOrReactivateLink took, so the
 // handler can set the response's "duplicate" flag and decide whether to fire the
 // post-create seams (audit/SSE). The three outcomes mirror the PRD's
