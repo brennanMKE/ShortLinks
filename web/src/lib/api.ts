@@ -14,6 +14,10 @@ import type {
   AdminUser,
   Setting,
 } from './types';
+import type {
+  ServerCredentialAssertion,
+  AssertionFinishPayload,
+} from './webauthn';
 
 /**
  * Thrown by every helper on a non-2xx response. Carries the HTTP status and, when
@@ -148,6 +152,44 @@ export function deactivateLink(key: string): Promise<{ message: string }> {
 /** POST /auth/logout — invalidate the current session. */
 export function logout(): Promise<void> {
   return apiPost<void>('/auth/logout');
+}
+
+// ── Auth ceremony (login + registration entry) ──────────────────────────────
+
+/**
+ * GET /auth/login/start — issue a WebAuthn assertion challenge. An optional
+ * email narrows the prompt via `allowCredentials`; absent it the server issues a
+ * discoverable (conditional-UI) challenge. The response is the
+ * `CredentialAssertion` JSON (`{publicKey, mediation?}`) the browser glue
+ * decodes; the shape is identical whether or not the email is registered, so it
+ * never leaks account existence.
+ */
+export function loginStart(email?: string): Promise<ServerCredentialAssertion> {
+  const trimmed = email?.trim();
+  const path = trimmed
+    ? `/auth/login/start?email=${encodeURIComponent(trimmed)}`
+    : '/auth/login/start';
+  return apiGet<ServerCredentialAssertion>(path);
+}
+
+/**
+ * POST /auth/login/finish — submit the serialized assertion. On success the
+ * server sets the session cookie and returns `{user_id}`; a deactivated account
+ * yields ApiError(403) and any verification failure yields ApiError(401).
+ */
+export function loginFinish(
+  assertion: AssertionFinishPayload,
+): Promise<{ user_id: number }> {
+  return apiPost<{ user_id: number }>('/auth/login/finish', assertion);
+}
+
+/**
+ * POST /auth/register/start — submit an email to begin registration. The server
+ * returns a generic `{message}` (200) whether or not the email is already
+ * registered, or ApiError(403) when registration is closed.
+ */
+export function registerStart(email: string): Promise<{ message: string }> {
+  return apiPost<{ message: string }>('/auth/register/start', { email });
 }
 
 // ── Account (passkeys) ──────────────────────────────────────────────────────
