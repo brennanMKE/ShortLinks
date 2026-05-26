@@ -11,6 +11,8 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 )
 
 // RecoveryService orchestrates the account-recovery ceremony (start, verify,
@@ -29,18 +31,23 @@ type RecoveryService struct {
 	store  *Store
 	wa     *webauthn.WebAuthn
 	mailer Mailer
+	// auditor records the account.recovery_started, account.recovered, and
+	// credential.added audit entries (#0025). May be nil in unit tests.
+	auditor *audit.Logger
 	// now is injectable so TTLs are deterministic in tests; defaults to
 	// time.Now.
 	now func() time.Time
 }
 
-// NewRecoveryService wires the recovery ceremony from its dependencies.
-func NewRecoveryService(store *Store, wa *webauthn.WebAuthn, mailer Mailer) *RecoveryService {
+// NewRecoveryService wires the recovery ceremony from its dependencies. A nil
+// auditor disables audit writes (the ceremony still completes).
+func NewRecoveryService(store *Store, wa *webauthn.WebAuthn, mailer Mailer, auditor *audit.Logger) *RecoveryService {
 	return &RecoveryService{
-		store:  store,
-		wa:     wa,
-		mailer: mailer,
-		now:    time.Now,
+		store:   store,
+		wa:      wa,
+		mailer:  mailer,
+		auditor: auditor,
+		now:     time.Now,
 	}
 }
 
@@ -54,7 +61,7 @@ func NewRecoveryService(store *Store, wa *webauthn.WebAuthn, mailer Mailer) *Rec
 // the response identical whether or not the account exists. Genuine
 // infrastructure failures during token creation or mail delivery are surfaced
 // so the handler can return a 500, since those cannot leak account existence.
-func (s *RecoveryService) StartRecovery(ctx context.Context, rawEmail string) error {
+func (s *RecoveryService) StartRecovery(ctx context.Context, rawEmail, ip string) error {
 	email, err := normalizeEmail(rawEmail)
 	if err != nil {
 		// Malformed email: respond as if sent. No leak, no work.
@@ -81,8 +88,20 @@ func (s *RecoveryService) StartRecovery(ctx context.Context, rawEmail string) er
 		return err
 	}
 
-	// TODO(#0025): write an account.recovery_started audit entry (actor_id NULL)
-	// here once the audit write path lands. No-op for now.
+	// account.recovery_started: a pre-auth event, so actor_id is NULL (the PRD
+	// catalogue). The affected account is known, so user_id/target are set. Fire-
+	// and-forget: the recovery token is already committed and a failed audit write
+	// must not block the email.
+	if s.auditor != nil {
+		uid := account.ID
+		s.auditor.Record(ctx, audit.Entry{
+			UserID:     &uid,
+			Action:     audit.ActionAccountRecoveryStarted,
+			TargetType: audit.TargetUser,
+			TargetID:   &uid,
+			IP:         ip,
+		})
+	}
 
 	return s.mailer.SendRecovery(ctx, email, token)
 }
@@ -155,8 +174,9 @@ type RecoveryResult struct {
 // NOT touch or remove existing credentials. The returned session token must be
 // written to the cookie by the caller.
 //
-// deviceName is an optional client-supplied label for the new credential.
-func (s *RecoveryService) FinishRecovery(ctx context.Context, token, deviceName string, r *http.Request) (RecoveryResult, error) {
+// deviceName is an optional client-supplied label for the new credential. ip is
+// the actor's client IP, recorded on the audit entries.
+func (s *RecoveryService) FinishRecovery(ctx context.Context, token, deviceName, ip string, r *http.Request) (RecoveryResult, error) {
 	now := s.now()
 
 	tx, err := s.store.Pool().Begin(ctx)
@@ -213,8 +233,32 @@ func (s *RecoveryService) FinishRecovery(ctx context.Context, token, deviceName 
 		return RecoveryResult{}, err
 	}
 
-	// TODO(#0025): write account.recovered and credential.added audit entries
-	// (the latter with {device_name, aaguid}) once the audit write path lands.
+	// account.recovered + credential.added. After recovery the user is both the
+	// actor and the affected user. Written inside the ceremony transaction so a
+	// committed recovery always carries its audit rows.
+	if s.auditor != nil {
+		actor := userID
+		if err := s.auditor.WriteTx(ctx, tx, audit.Entry{
+			ActorID:    &actor,
+			UserID:     &actor,
+			Action:     audit.ActionAccountRecovered,
+			TargetType: audit.TargetUser,
+			TargetID:   &actor,
+			IP:         ip,
+		}); err != nil {
+			return RecoveryResult{}, err
+		}
+		if err := s.auditor.WriteTx(ctx, tx, audit.Entry{
+			ActorID:    &actor,
+			UserID:     &actor,
+			Action:     audit.ActionCredentialAdded,
+			TargetType: audit.TargetCredential,
+			Metadata:   credentialMetadata(deviceName, credential.Authenticator.AAGUID),
+			IP:         ip,
+		}); err != nil {
+			return RecoveryResult{}, err
+		}
+	}
 
 	if err := s.store.DeletePendingRegistration(ctx, tx, token); err != nil {
 		return RecoveryResult{}, err

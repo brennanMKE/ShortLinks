@@ -71,7 +71,7 @@ func countDeniedLinks(t *testing.T, pool *pgxpool.Pool, userID int64, dest strin
 func filterLinksMux(t *testing.T, pool *pgxpool.Pool, ruleCache *cache.RuleCache) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewLinksHandler(links.NewStore(pool), nil, ruleCache)
+	h := NewLinksHandler(links.NewStore(pool), nil, ruleCache, nil)
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(h.Create)))
@@ -170,7 +170,7 @@ func TestLinksCreate_FilterDeniesAndRecords(t *testing.T) {
 func adminURLFiltersMux(t *testing.T, pool *pgxpool.Pool, ruleCache *cache.RuleCache) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewURLFiltersHandler(filters.NewStore(pool), ruleCache)
+	h := NewURLFiltersHandler(filters.NewStore(pool), ruleCache, nil)
 	requireSession := middleware.RequireSession(authStore)
 	requireAdmin := func(next http.Handler) http.Handler {
 		return requireSession(middleware.RequireAdmin(next))

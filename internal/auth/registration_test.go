@@ -128,7 +128,7 @@ func newService(t *testing.T, pool *pgxpool.Pool, mailer Mailer, adminEmail stri
 	if err != nil {
 		t.Fatalf("NewWebAuthn: %v", err)
 	}
-	return NewRegistrationService(NewStore(pool), wa, mailer, cfg)
+	return NewRegistrationService(NewStore(pool), wa, mailer, nil, cfg)
 }
 
 // TestStartRegistration_DisabledReturns403 confirms the registrations_enabled
@@ -139,7 +139,7 @@ func TestStartRegistration_DisabledReturns403(t *testing.T) {
 	mailer := &recordingMailer{}
 	svc := newService(t, pool, mailer, "")
 
-	err := svc.StartRegistration(context.Background(), "alice@example.com")
+	err := svc.StartRegistration(context.Background(), "alice@example.com", "")
 	if err != ErrRegistrationsDisabled {
 		t.Fatalf("StartRegistration error = %v, want ErrRegistrationsDisabled", err)
 	}
@@ -159,7 +159,7 @@ func TestStartRegistration_EnabledCreatesPendingAndMails(t *testing.T) {
 	mailer := &recordingMailer{}
 	svc := newService(t, pool, mailer, "")
 
-	if err := svc.StartRegistration(context.Background(), "Bob@Example.com"); err != nil {
+	if err := svc.StartRegistration(context.Background(), "Bob@Example.com", ""); err != nil {
 		t.Fatalf("StartRegistration: %v", err)
 	}
 
@@ -188,7 +188,7 @@ func TestStartRegistration_DuplicateEmailNoLeak(t *testing.T) {
 	mailer := &recordingMailer{}
 	svc := newService(t, pool, mailer, "")
 
-	if err := svc.StartRegistration(context.Background(), "carol@example.com"); err != ErrEmailRegistered {
+	if err := svc.StartRegistration(context.Background(), "carol@example.com", ""); err != ErrEmailRegistered {
 		t.Fatalf("StartRegistration error = %v, want ErrEmailRegistered", err)
 	}
 	if calls, _, _ := mailer.recorded(); calls != 0 {
@@ -215,7 +215,7 @@ func TestVerifyRegistration_ExpiredToken(t *testing.T) {
 
 	// Backdate the clock so the pending row's expiry is already in the past.
 	svc.now = func() time.Time { return time.Now().Add(-10 * time.Minute) }
-	if err := svc.StartRegistration(context.Background(), "dave@example.com"); err != nil {
+	if err := svc.StartRegistration(context.Background(), "dave@example.com", ""); err != nil {
 		t.Fatalf("StartRegistration: %v", err)
 	}
 	token := lastPendingToken(t, pool, "dave@example.com")
@@ -235,7 +235,7 @@ func TestVerifyRegistration_OptionsShape(t *testing.T) {
 	setRegistrationsEnabled(t, pool, true)
 	svc := newService(t, pool, &recordingMailer{}, "")
 
-	if err := svc.StartRegistration(context.Background(), "erin@example.com"); err != nil {
+	if err := svc.StartRegistration(context.Background(), "erin@example.com", ""); err != nil {
 		t.Fatalf("StartRegistration: %v", err)
 	}
 	token := lastPendingToken(t, pool, "erin@example.com")
@@ -300,7 +300,7 @@ func TestFullCeremony_EndToEnd(t *testing.T) {
 	ctx := context.Background()
 
 	// Step 1: start.
-	if err := svc.StartRegistration(ctx, email); err != nil {
+	if err := svc.StartRegistration(ctx, email, ""); err != nil {
 		t.Fatalf("StartRegistration: %v", err)
 	}
 	token := lastPendingToken(t, pool, email)
@@ -330,7 +330,7 @@ func TestFullCeremony_EndToEnd(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost,
 		"/auth/register/finish?token="+token+"&device_name=Test+Key",
 		bytes.NewReader([]byte(attestationResponse)))
-	result, err := svc.FinishRegistration(ctx, token, "Test Key", req)
+	result, err := svc.FinishRegistration(ctx, token, "Test Key", "", req)
 	if err != nil {
 		t.Fatalf("FinishRegistration: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestFullCeremony_AdminEmailPromotion(t *testing.T) {
 func runCeremony(t *testing.T, svc *RegistrationService, pool *pgxpool.Pool, email string) CreatedUser {
 	t.Helper()
 	ctx := context.Background()
-	if err := svc.StartRegistration(ctx, email); err != nil {
+	if err := svc.StartRegistration(ctx, email, ""); err != nil {
 		t.Fatalf("StartRegistration(%s): %v", email, err)
 	}
 	token := lastPendingToken(t, pool, email)
@@ -426,7 +426,7 @@ func runCeremony(t *testing.T, svc *RegistrationService, pool *pgxpool.Pool, ema
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/register/finish?token="+token,
 		bytes.NewReader([]byte(attestationResponse)))
-	result, err := svc.FinishRegistration(ctx, token, "", req)
+	result, err := svc.FinishRegistration(ctx, token, "", "", req)
 	if err != nil {
 		t.Fatalf("FinishRegistration(%s): %v", email, err)
 	}

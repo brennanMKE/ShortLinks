@@ -118,7 +118,7 @@ func seedSession(t *testing.T, pool *pgxpool.Pool, userID int64, token string) {
 // guarded by RequireSession backed by the real *auth.Store. Requests therefore
 // flow through the genuine session middleware, proving the routes are protected.
 func credsMux(store *auth.Store) http.Handler {
-	h := NewCredentialsHandler(store)
+	h := NewCredentialsHandler(store, nil)
 	requireSession := middleware.RequireSession(store)
 	mux := http.NewServeMux()
 	mux.Handle("GET /account/credentials", requireSession(http.HandlerFunc(h.List)))

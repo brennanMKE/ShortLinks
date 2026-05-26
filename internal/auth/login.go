@@ -12,6 +12,8 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 )
 
 // ErrAccountDeactivated is returned by FinishLogin when the assertion verifies
@@ -33,18 +35,21 @@ type LoginService struct {
 	store *Store
 	wa    *webauthn.WebAuthn
 	log   *slog.Logger
+	// auditor records the account.login and account.logout audit entries
+	// (#0025). May be nil in unit tests that do not assert audit rows.
+	auditor *audit.Logger
 	// now is injectable so TTLs and timestamps are deterministic in tests;
 	// defaults to time.Now.
 	now func() time.Time
 }
 
 // NewLoginService wires the login ceremony from its dependencies. A nil logger
-// falls back to the default slog logger.
-func NewLoginService(store *Store, wa *webauthn.WebAuthn, logger *slog.Logger) *LoginService {
+// falls back to the default slog logger; a nil auditor disables audit writes.
+func NewLoginService(store *Store, wa *webauthn.WebAuthn, auditor *audit.Logger, logger *slog.Logger) *LoginService {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &LoginService{store: store, wa: wa, log: logger, now: time.Now}
+	return &LoginService{store: store, wa: wa, log: logger, auditor: auditor, now: time.Now}
 }
 
 // StartLogin is step 1. It issues an assertion challenge and returns the
@@ -129,7 +134,7 @@ type LoginResult struct {
 // login: the credential id always arrives in the assertion's rawID, and the
 // account's WebAuthn handle is mirrored from the assertion's userHandle (the
 // signature over the stored public key is the real proof of possession).
-func (s *LoginService) FinishLogin(ctx context.Context, r *http.Request) (LoginResult, error) {
+func (s *LoginService) FinishLogin(ctx context.Context, ip string, r *http.Request) (LoginResult, error) {
 	now := s.now()
 
 	parsed, err := protocol.ParseCredentialRequestResponse(r)
@@ -220,8 +225,22 @@ func (s *LoginService) FinishLogin(ctx context.Context, r *http.Request) (LoginR
 		return LoginResult{}, err
 	}
 
-	// TODO(#0025): write an account.login audit entry here once the audit write
-	// path lands. No-op for now.
+	// account.login: the authenticated user is both actor and affected user.
+	// Written inside the ceremony transaction so a committed login always carries
+	// its audit row.
+	if s.auditor != nil {
+		actor := rec.UserID
+		if err := s.auditor.WriteTx(ctx, tx, audit.Entry{
+			ActorID:    &actor,
+			UserID:     &actor,
+			Action:     audit.ActionAccountLogin,
+			TargetType: audit.TargetUser,
+			TargetID:   &actor,
+			IP:         ip,
+		}); err != nil {
+			return LoginResult{}, err
+		}
+	}
 
 	sessionToken, err := NewSessionToken()
 	if err != nil {
@@ -245,14 +264,31 @@ func (s *LoginService) FinishLogin(ctx context.Context, r *http.Request) (LoginR
 
 // Logout deletes the session row for the given cookie token. It is idempotent:
 // an unknown or empty token is not an error, so a stale cookie still yields a
-// clean 200. Cookie clearing is the handler's responsibility.
-func (s *LoginService) Logout(ctx context.Context, token string) error {
+// clean 200. Cookie clearing is the handler's responsibility. ip is the actor's
+// client IP, recorded on the account.logout audit entry.
+func (s *LoginService) Logout(ctx context.Context, token, ip string) error {
 	if token == "" {
 		return nil
 	}
-	// TODO(#0025): write an account.logout audit entry here once the audit write
-	// path lands. No-op for now.
-	return s.store.DeleteSession(ctx, token)
+	userID, err := s.store.DeleteSession(ctx, token)
+	if err != nil {
+		return err
+	}
+	// account.logout: only attribute the entry when a real session was deleted
+	// (a stale/unknown cookie deletes nothing → userID 0 → no entry). Fire-and-
+	// forget: the session is already gone, so a failed audit write must not fail
+	// logout.
+	if s.auditor != nil && userID != 0 {
+		s.auditor.Record(ctx, audit.Entry{
+			ActorID:    &userID,
+			UserID:     &userID,
+			Action:     audit.ActionAccountLogout,
+			TargetType: audit.TargetUser,
+			TargetID:   &userID,
+			IP:         ip,
+		})
+	}
+	return nil
 }
 
 // credentialFromRecord rebuilds a webauthn.Credential from a stored row for use

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
@@ -31,14 +32,18 @@ type settingStore interface {
 // can attribute the (future #0025) audit entry; it does not re-check admin.
 type SettingsHandler struct {
 	store settingStore
+	// auditor records the settings.updated audit entry (#0025). May be nil in
+	// unit tests that do not assert audit rows.
+	auditor *audit.Logger
 	// now is injectable so updated_at and the audit timestamp are deterministic
 	// in tests; defaults to time.Now.
 	now func() time.Time
 }
 
-// NewSettingsHandler constructs a SettingsHandler over the data layer.
-func NewSettingsHandler(store settingStore) *SettingsHandler {
-	return &SettingsHandler{store: store, now: time.Now}
+// NewSettingsHandler constructs a SettingsHandler over the data layer. A nil
+// auditor disables audit writes.
+func NewSettingsHandler(store settingStore, auditor *audit.Logger) *SettingsHandler {
+	return &SettingsHandler{store: store, auditor: auditor, now: time.Now}
 }
 
 // settingView is the JSON shape for one settings row. updated_at is omitted when
@@ -114,13 +119,24 @@ func (h *SettingsHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO(#0025): write a settings.updated audit-log entry attributed to the
-	// admin (actor_id = u.ID) with metadata {key, old_value, new_value}. The
-	// audit write path does not exist yet, so this is a no-op; the old value is
-	// already captured above so the entry can be emitted verbatim once #0025
-	// lands.
-	_ = u
-	_ = oldValue
+	// #0025 audit: settings.updated attributed to the admin (actor_id = u.ID)
+	// with {key, old_value, new_value}. target_type is "settings"; settings rows
+	// are keyed by a TEXT primary key, not a bigint, so target_id is left NULL.
+	// The setting is already updated, so this is fire-and-forget.
+	if h.auditor != nil {
+		actor := u.ID
+		h.auditor.Record(r.Context(), audit.Entry{
+			ActorID:    &actor,
+			Action:     audit.ActionSettingsUpdated,
+			TargetType: audit.TargetSettings,
+			Metadata: map[string]any{
+				"key":       req.Key,
+				"old_value": oldValue,
+				"new_value": req.Value,
+			},
+			IP: clientIP(r),
+		})
+	}
 
 	// Return the authoritative updated settings list so the client refreshes its
 	// full view in one round trip.

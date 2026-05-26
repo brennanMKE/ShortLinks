@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
@@ -89,15 +90,18 @@ type LinksHandler struct {
 	// at the top of Create; may be nil (no filter cache wired) in which case URL
 	// filtering is skipped and every URL proceeds to the dedup/insert path.
 	rules ruleProvider
+	// auditor records the link.created/reactivated/denied/deactivated audit
+	// entries (#0025). May be nil in unit tests that do not assert audit rows.
+	auditor *audit.Logger
 }
 
 // NewLinksHandler constructs a LinksHandler over the data layer, the redirect
-// cache, and the URL-filter rule cache. Pass a nil redirectCache to disable
-// eviction and a nil ruleProvider to disable URL filtering (e.g. in unit tests
-// that do not exercise those paths); the handler then skips the respective
-// steps.
-func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider) *LinksHandler {
-	return &LinksHandler{store: store, cache: redirectCache, rules: rules}
+// cache, the URL-filter rule cache, and the audit logger. Pass a nil
+// redirectCache to disable eviction, a nil ruleProvider to disable URL
+// filtering, and a nil auditor to disable audit writes (e.g. in unit tests that
+// do not exercise those paths); the handler then skips the respective steps.
+func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger) *LinksHandler {
+	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor}
 }
 
 // linkView is the JSON shape for a single link, shared by every endpoint. The
@@ -253,14 +257,29 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 			}
 			label := filters.ReasonLabel(code)
 
-			// SEAM #0025 (audit): write a link.denied entry attributed to u.ID with
-			// metadata {destination_url, reason_code, reason_label, matched_rule_id}.
-			// The audit write path does not exist yet, so this is a no-op; the values
-			// are captured here so the entry can be emitted verbatim once #0025 lands.
-			// SEAM #0026 (SSE): NOT fired for a denial — only successful
-			// inserts/reactivations broadcast (see below).
-			_ = denied
-			_ = ruleID
+			// #0025 audit: link.denied attributed to u.ID with
+			// {destination_url, reason_code, reason_label, matched_rule_id}. The
+			// denied row is already committed, so this is fire-and-forget. #0026 SSE
+			// is NOT fired for a denial — only successful inserts/reactivations
+			// broadcast (see below).
+			if h.auditor != nil {
+				actor := u.ID
+				lid := denied.ID
+				h.auditor.Record(r.Context(), audit.Entry{
+					ActorID:    &actor,
+					UserID:     &actor,
+					Action:     audit.ActionLinkDenied,
+					TargetType: audit.TargetLink,
+					TargetID:   &lid,
+					Metadata: map[string]any{
+						"destination_url": dest,
+						"reason_code":     code,
+						"reason_label":    label,
+						"matched_rule_id": ruleID,
+					},
+					IP: clientIP(r),
+				})
+			}
 
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 				"error":  "url_denied",
@@ -276,9 +295,10 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// broadcast records whether the post-create #0026 SSE seam should fire: an
 	// INSERT or a REACTIVATION broadcasts; a pure active-duplicate does NOT.
 	var (
-		created   links.Link
-		duplicate bool
-		broadcast bool
+		created     links.Link
+		duplicate   bool
+		broadcast   bool
+		reactivated bool
 	)
 
 	if customKey != "" {
@@ -324,6 +344,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		case links.OutcomeReactivated:
 			duplicate = true
 			broadcast = true // reactivation re-publishes link.created.
+			reactivated = true
 		case links.OutcomeActiveDuplicate:
 			duplicate = true
 			broadcast = false // active duplicate: no insert, no SSE (PRD).
@@ -331,14 +352,47 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ───────────────────────────────────────────────────────────────────────
-	// SEAM #0025 (audit): write an audit entry for u.ID — link.created with
-	// metadata {key, destination_url, title, duplicate} for inserts/active
-	// duplicates, link.reactivated for the reactivation branch. Not implemented.
+	// #0025 audit: link.reactivated for the reactivation branch (metadata
+	// {key, destination_url}); link.created for inserts and active duplicates
+	// (metadata {key, destination_url, title, duplicate}). The link is already
+	// committed, so this is fire-and-forget.
 	// SEAM #0026 (SSE): when broadcast, broker.Publish(u.ID, Event{Name:
 	// "link.created", Payload:<created link JSON>}). Fires only on insert or
 	// reactivation, never on a pure active duplicate (PRD). Not implemented.
 	// ───────────────────────────────────────────────────────────────────────
-	_ = u         // retained for the #0025/#0026 seams above.
+	if h.auditor != nil {
+		actor := u.ID
+		lid := created.ID
+		if reactivated {
+			h.auditor.Record(r.Context(), audit.Entry{
+				ActorID:    &actor,
+				UserID:     &actor,
+				Action:     audit.ActionLinkReactivated,
+				TargetType: audit.TargetLink,
+				TargetID:   &lid,
+				Metadata: map[string]any{
+					"key":             created.Key,
+					"destination_url": created.DestinationURL,
+				},
+				IP: clientIP(r),
+			})
+		} else {
+			h.auditor.Record(r.Context(), audit.Entry{
+				ActorID:    &actor,
+				UserID:     &actor,
+				Action:     audit.ActionLinkCreated,
+				TargetType: audit.TargetLink,
+				TargetID:   &lid,
+				Metadata: map[string]any{
+					"key":             created.Key,
+					"destination_url": created.DestinationURL,
+					"title":           created.Title,
+					"duplicate":       duplicate,
+				},
+				IP: clientIP(r),
+			})
+		}
+	}
 	_ = broadcast // wired for the #0026 SSE seam: true on insert/reactivation.
 
 	view := toLinkView(created)
@@ -511,8 +565,8 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 // key from the redirect cache so subsequent redirects 404. A key not owned by
 // the caller yields 404.
 //
-// SEAM #0025 (audit): write a link.deactivated entry for u.ID with metadata
-// {key, destination_url}. Not implemented in #0022.
+// #0025 audit: a link.deactivated entry for u.ID with metadata
+// {key, destination_url} is written after a successful deactivation.
 func (h *LinksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -524,6 +578,11 @@ func (h *LinksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key is required")
 		return
 	}
+
+	// Read the link (scoped to the caller) BEFORE deactivating so the audit
+	// metadata carries its id and destination_url. A miss here only weakens the
+	// audit entry; the deactivation below still runs and returns the right status.
+	existing, existingErr := h.store.GetLink(r.Context(), u.ID, key)
 
 	err := h.store.DeactivateLink(r.Context(), u.ID, key)
 	switch {
@@ -542,8 +601,24 @@ func (h *LinksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// is wired.
 	h.evict(key)
 
-	// SEAM #0025 (audit): link.deactivated for u.ID with {key, destination_url}.
-	_ = u
+	// #0025 audit: link.deactivated for u.ID with {key, destination_url}. The row
+	// is already deactivated, so this is fire-and-forget.
+	if h.auditor != nil && existingErr == nil {
+		actor := u.ID
+		lid := existing.ID
+		h.auditor.Record(r.Context(), audit.Entry{
+			ActorID:    &actor,
+			UserID:     &actor,
+			Action:     audit.ActionLinkDeactivated,
+			TargetType: audit.TargetLink,
+			TargetID:   &lid,
+			Metadata: map[string]any{
+				"key":             existing.Key,
+				"destination_url": existing.DestinationURL,
+			},
+			IP: clientIP(r),
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Link deactivated"})
 }
