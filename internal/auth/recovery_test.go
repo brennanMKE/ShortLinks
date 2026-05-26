@@ -62,7 +62,7 @@ func newRecoveryService(t *testing.T, pool *pgxpool.Pool, mailer Mailer) *Recove
 	if err != nil {
 		t.Fatalf("NewWebAuthn: %v", err)
 	}
-	return NewRecoveryService(NewStore(pool), wa, mailer)
+	return NewRecoveryService(NewStore(pool), wa, mailer, nil)
 }
 
 // TestStartRecovery_UnknownEmailNoLeak confirms a recovery request for an
@@ -73,7 +73,7 @@ func TestStartRecovery_UnknownEmailNoLeak(t *testing.T) {
 	mailer := &recoveryRecordingMailer{}
 	svc := newRecoveryService(t, pool, mailer)
 
-	if err := svc.StartRecovery(context.Background(), "ghost@example.com"); err != nil {
+	if err := svc.StartRecovery(context.Background(), "ghost@example.com", ""); err != nil {
 		t.Fatalf("StartRecovery for unknown email error = %v, want nil (generic success)", err)
 	}
 
@@ -94,7 +94,7 @@ func TestStartRecovery_InactiveUserNoLeak(t *testing.T) {
 	mailer := &recoveryRecordingMailer{}
 	svc := newRecoveryService(t, pool, mailer)
 
-	if err := svc.StartRecovery(context.Background(), "frozen@example.com"); err != nil {
+	if err := svc.StartRecovery(context.Background(), "frozen@example.com", ""); err != nil {
 		t.Fatalf("StartRecovery for inactive user error = %v, want nil", err)
 	}
 
@@ -115,7 +115,7 @@ func TestStartRecovery_ActiveUserCreatesTokenAndMails(t *testing.T) {
 	mailer := &recoveryRecordingMailer{}
 	svc := newRecoveryService(t, pool, mailer)
 
-	if err := svc.StartRecovery(context.Background(), "User@Example.com"); err != nil {
+	if err := svc.StartRecovery(context.Background(), "User@Example.com", ""); err != nil {
 		t.Fatalf("StartRecovery: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestVerifyRecovery_ExpiredToken(t *testing.T) {
 	// Backdate the clock so the token's expiry is already in the past (older than
 	// the 15-minute recovery TTL).
 	svc.now = func() time.Time { return time.Now().Add(-20 * time.Minute) }
-	if err := svc.StartRecovery(context.Background(), "expire@example.com"); err != nil {
+	if err := svc.StartRecovery(context.Background(), "expire@example.com", ""); err != nil {
 		t.Fatalf("StartRecovery: %v", err)
 	}
 	token := lastPendingToken(t, pool, "expire@example.com")
@@ -184,7 +184,7 @@ func TestRecoveryEndToEnd_AddsCredentialToExistingUser(t *testing.T) {
 
 	// --- Build an existing account with one credential via #0015's ceremony. ---
 	regSvc := newService(t, pool, &recordingMailer{}, "")
-	if err := regSvc.StartRegistration(ctx, email); err != nil {
+	if err := regSvc.StartRegistration(ctx, email, ""); err != nil {
 		t.Fatalf("StartRegistration: %v", err)
 	}
 	regToken := lastPendingToken(t, pool, email)
@@ -208,7 +208,7 @@ func TestRecoveryEndToEnd_AddsCredentialToExistingUser(t *testing.T) {
 	attResp := virtualwebauthn.CreateAttestationResponse(rp, oldAuth, oldCred, *attOpts)
 	regReq := httptest.NewRequest(http.MethodPost, "/auth/register/finish?token="+regToken,
 		bytes.NewReader([]byte(attResp)))
-	regResult, err := regSvc.FinishRegistration(ctx, regToken, "Original Key", regReq)
+	regResult, err := regSvc.FinishRegistration(ctx, regToken, "Original Key", "", regReq)
 	if err != nil {
 		t.Fatalf("FinishRegistration: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestRecoveryEndToEnd_AddsCredentialToExistingUser(t *testing.T) {
 	mailer := &recoveryRecordingMailer{}
 	recSvc := newRecoveryService(t, pool, mailer)
 
-	if err := recSvc.StartRecovery(ctx, email); err != nil {
+	if err := recSvc.StartRecovery(ctx, email, ""); err != nil {
 		t.Fatalf("StartRecovery: %v", err)
 	}
 	_, _, _, recToken := mailer.recorded()
@@ -251,7 +251,7 @@ func TestRecoveryEndToEnd_AddsCredentialToExistingUser(t *testing.T) {
 	recReq := httptest.NewRequest(http.MethodPost,
 		"/auth/recover/finish?token="+recToken+"&device_name=Recovered+Key",
 		bytes.NewReader([]byte(recAttResp)))
-	recResult, err := recSvc.FinishRecovery(ctx, recToken, "Recovered Key", recReq)
+	recResult, err := recSvc.FinishRecovery(ctx, recToken, "Recovered Key", "", recReq)
 	if err != nil {
 		t.Fatalf("FinishRecovery: %v", err)
 	}

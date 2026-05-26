@@ -139,8 +139,8 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
 }
 
 // UpdateSetting changes the value of an EXISTING setting key and bumps
-// updated_at to now, returning the previous value so the caller can write a
-// settings.updated audit entry (#0025). The PRD/issue forbid creating arbitrary
+// updated_at to now, returning the previous value so the caller (the settings
+// handler) can write the settings.updated audit entry. The PRD/issue forbid creating arbitrary
 // keys through the admin endpoint, so a key that does not already exist yields
 // ErrSettingNotFound (the handler maps this to 400) instead of being inserted.
 //
@@ -586,14 +586,22 @@ func (s *Store) UpdateLastLogin(ctx context.Context, q querier, userID int64, no
 }
 
 // DeleteSession removes the sessions row for a token. Used by logout. It is not
-// an error to delete a token that does not exist (idempotent logout).
-func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	if _, err := s.pool.Exec(ctx,
-		`DELETE FROM sessions WHERE token = $1`, token,
-	); err != nil {
-		return fmt.Errorf("auth: deleting session: %w", err)
+// an error to delete a token that does not exist (idempotent logout). It returns
+// the deleted session's user_id so the caller can attribute the account.logout
+// audit entry; a zero id (with nil error) means no matching session existed.
+func (s *Store) DeleteSession(ctx context.Context, token string) (int64, error) {
+	var userID int64
+	err := s.pool.QueryRow(ctx,
+		`DELETE FROM sessions WHERE token = $1 RETURNING user_id`, token,
+	).Scan(&userID)
+	switch {
+	case err == nil:
+		return userID, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("auth: deleting session: %w", err)
 	}
-	return nil
 }
 
 // ErrSessionInvalid is returned when a session token is unknown or its session
@@ -682,7 +690,7 @@ func (s *Store) ResolveSession(ctx context.Context, token string, now time.Time)
 	if !expiresAt.After(now) {
 		// Expired: best-effort delete the dead row. A failure here must not
 		// mask the 401, so the delete error is ignored.
-		_ = s.DeleteSession(ctx, token)
+		_, _ = s.DeleteSession(ctx, token)
 		return SessionUser{}, ErrSessionInvalid
 	}
 	if !active {
@@ -799,8 +807,8 @@ var ErrLastCredential = errors.New("auth: cannot revoke last credential")
 // the credential is absent or owned by another account (the handler answers
 // 404, leaking nothing), and ErrLastCredential when it is the only one.
 //
-// NOTE: the credential.revoked audit-log write is #0025 and is intentionally
-// not emitted here yet.
+// The credential.revoked audit-log entry is written by the credentials handler
+// after a successful revoke, not here.
 func (s *Store) RevokeCredential(ctx context.Context, userID, id int64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

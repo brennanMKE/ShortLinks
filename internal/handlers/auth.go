@@ -21,9 +21,9 @@ const maxAuthBodyBytes = 1 << 20 // 1 MiB
 // service. Depending on the interface (rather than the concrete
 // *auth.RegistrationService) keeps the handler unit-testable with a fake.
 type registrar interface {
-	StartRegistration(ctx context.Context, email string) error
+	StartRegistration(ctx context.Context, email, ip string) error
 	VerifyRegistration(ctx context.Context, token string) (*protocol.CredentialCreation, error)
-	FinishRegistration(ctx context.Context, token, deviceName string, r *http.Request) (auth.FinishResult, error)
+	FinishRegistration(ctx context.Context, token, deviceName, ip string, r *http.Request) (auth.FinishResult, error)
 }
 
 // authenticator is the behavior the auth handler needs from the login service.
@@ -31,17 +31,17 @@ type registrar interface {
 // with a fake.
 type authenticator interface {
 	StartLogin(ctx context.Context, email string) (*protocol.CredentialAssertion, error)
-	FinishLogin(ctx context.Context, r *http.Request) (auth.LoginResult, error)
-	Logout(ctx context.Context, token string) error
+	FinishLogin(ctx context.Context, ip string, r *http.Request) (auth.LoginResult, error)
+	Logout(ctx context.Context, token, ip string) error
 }
 
 // recoverer is the behavior the auth handler needs from the recovery service.
 // As with registrar/authenticator, depending on an interface keeps the handler
 // unit-testable with a fake.
 type recoverer interface {
-	StartRecovery(ctx context.Context, email string) error
+	StartRecovery(ctx context.Context, email, ip string) error
 	VerifyRecovery(ctx context.Context, token string) (*protocol.CredentialCreation, error)
-	FinishRecovery(ctx context.Context, token, deviceName string, r *http.Request) (auth.RecoveryResult, error)
+	FinishRecovery(ctx context.Context, token, deviceName, ip string, r *http.Request) (auth.RecoveryResult, error)
 }
 
 // AuthHandler serves the passkey registration, login, and recovery ceremony
@@ -83,7 +83,7 @@ func (h *AuthHandler) RegisterStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.reg.StartRegistration(r.Context(), req.Email)
+	err := h.reg.StartRegistration(r.Context(), req.Email, clientIP(r))
 	switch {
 	case err == nil:
 		// Success — always the same generic message.
@@ -145,7 +145,7 @@ func (h *AuthHandler) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	result, err := h.reg.FinishRegistration(r.Context(), token, deviceName, r)
+	result, err := h.reg.FinishRegistration(r.Context(), token, deviceName, clientIP(r), r)
 	switch {
 	case err == nil:
 		auth.SetSessionCookie(w, result.SessionToken, result.SessionExpires)
@@ -198,7 +198,7 @@ func (h *AuthHandler) LoginStart(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) LoginFinish(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)
 
-	result, err := h.login.FinishLogin(r.Context(), r)
+	result, err := h.login.FinishLogin(r.Context(), clientIP(r), r)
 	switch {
 	case err == nil:
 		auth.SetSessionCookie(w, result.SessionToken, result.SessionExpires)
@@ -216,7 +216,7 @@ func (h *AuthHandler) LoginFinish(w http.ResponseWriter, r *http.Request) {
 // (if present) and clears the cookie. It is idempotent and always returns 200.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
-		if derr := h.login.Logout(r.Context(), c.Value); derr != nil {
+		if derr := h.login.Logout(r.Context(), c.Value, clientIP(r)); derr != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
@@ -246,7 +246,7 @@ func (h *AuthHandler) RecoverStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.recovery.StartRecovery(r.Context(), req.Email); err != nil {
+	if err := h.recovery.StartRecovery(r.Context(), req.Email, clientIP(r)); err != nil {
 		// The service swallows unknown/inactive/invalid emails (returning nil);
 		// any error here is a real failure (token creation or mail delivery).
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -300,7 +300,7 @@ func (h *AuthHandler) RecoverFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	result, err := h.recovery.FinishRecovery(r.Context(), token, deviceName, r)
+	result, err := h.recovery.FinishRecovery(r.Context(), token, deviceName, clientIP(r), r)
 	switch {
 	case err == nil:
 		auth.SetSessionCookie(w, result.SessionToken, result.SessionExpires)

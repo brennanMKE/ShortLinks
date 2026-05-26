@@ -31,7 +31,7 @@ type fakeRegistrar struct {
 	finishDevice string
 }
 
-func (f *fakeRegistrar) StartRegistration(_ context.Context, email string) error {
+func (f *fakeRegistrar) StartRegistration(_ context.Context, email, _ string) error {
 	f.startGot = email
 	return f.startErr
 }
@@ -41,7 +41,7 @@ func (f *fakeRegistrar) VerifyRegistration(_ context.Context, token string) (*pr
 	return f.verifyResp, f.verifyErr
 }
 
-func (f *fakeRegistrar) FinishRegistration(_ context.Context, token, deviceName string, _ *http.Request) (auth.FinishResult, error) {
+func (f *fakeRegistrar) FinishRegistration(_ context.Context, token, deviceName, _ string, _ *http.Request) (auth.FinishResult, error) {
 	f.finishToken = token
 	f.finishDevice = deviceName
 	return f.finishResult, f.finishErr
@@ -65,11 +65,11 @@ func (f *fakeAuthenticator) StartLogin(_ context.Context, email string) (*protoc
 	return f.startResp, f.startErr
 }
 
-func (f *fakeAuthenticator) FinishLogin(_ context.Context, _ *http.Request) (auth.LoginResult, error) {
+func (f *fakeAuthenticator) FinishLogin(_ context.Context, _ string, _ *http.Request) (auth.LoginResult, error) {
 	return f.finishResult, f.finishErr
 }
 
-func (f *fakeAuthenticator) Logout(_ context.Context, token string) error {
+func (f *fakeAuthenticator) Logout(_ context.Context, token, _ string) error {
 	f.logoutGot = token
 	return f.logoutErr
 }
@@ -89,7 +89,7 @@ type fakeRecoverer struct {
 	finishDevice string
 }
 
-func (f *fakeRecoverer) StartRecovery(_ context.Context, email string) error {
+func (f *fakeRecoverer) StartRecovery(_ context.Context, email, _ string) error {
 	f.startGot = email
 	return f.startErr
 }
@@ -99,7 +99,7 @@ func (f *fakeRecoverer) VerifyRecovery(_ context.Context, token string) (*protoc
 	return f.verifyResp, f.verifyErr
 }
 
-func (f *fakeRecoverer) FinishRecovery(_ context.Context, token, deviceName string, _ *http.Request) (auth.RecoveryResult, error) {
+func (f *fakeRecoverer) FinishRecovery(_ context.Context, token, deviceName, _ string, _ *http.Request) (auth.RecoveryResult, error) {
 	f.finishToken = token
 	f.finishDevice = deviceName
 	return f.finishResult, f.finishErr

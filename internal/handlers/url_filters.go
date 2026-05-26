@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
@@ -49,13 +50,17 @@ type ruleCacheInvalidator interface {
 type URLFiltersHandler struct {
 	store filterRuleStore
 	cache ruleCacheInvalidator
-	now   func() time.Time
+	// auditor records the url_filter.created/updated/deleted audit entries
+	// (#0025). May be nil in unit tests that do not assert audit rows.
+	auditor *audit.Logger
+	now     func() time.Time
 }
 
 // NewURLFiltersHandler constructs a URLFiltersHandler. Pass a nil cache to
-// disable invalidation (tests that do not exercise the cache).
-func NewURLFiltersHandler(store filterRuleStore, ruleCache ruleCacheInvalidator) *URLFiltersHandler {
-	return &URLFiltersHandler{store: store, cache: ruleCache, now: time.Now}
+// disable invalidation and a nil auditor to disable audit writes (tests that do
+// not exercise those paths).
+func NewURLFiltersHandler(store filterRuleStore, ruleCache ruleCacheInvalidator, auditor *audit.Logger) *URLFiltersHandler {
+	return &URLFiltersHandler{store: store, cache: ruleCache, auditor: auditor, now: time.Now}
 }
 
 // ruleView is the JSON shape for one url_filter_rules row.
@@ -152,9 +157,25 @@ func (h *URLFiltersHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// A new rule changes evaluation immediately — drop the cached snapshot.
 	h.invalidate()
 
-	// SEAM #0025 (audit): write a url_filter.created entry attributed to u.ID with
-	// metadata {pattern, reason_code, description}. Audit write path not yet built.
-	_ = u
+	// #0025 audit: url_filter.created attributed to the admin (u.ID) with
+	// {pattern, reason_code, description}. The rule is already committed, so this
+	// is fire-and-forget.
+	if h.auditor != nil {
+		actor := u.ID
+		rid := rule.ID
+		h.auditor.Record(r.Context(), audit.Entry{
+			ActorID:    &actor,
+			Action:     audit.ActionURLFilterCreated,
+			TargetType: audit.TargetURLFilter,
+			TargetID:   &rid,
+			Metadata: map[string]any{
+				"pattern":     rule.Pattern,
+				"reason_code": rule.ReasonCode,
+				"description": rule.Description,
+			},
+			IP: clientIP(r),
+		})
+	}
 
 	writeJSON(w, http.StatusCreated, toRuleView(rule))
 }
@@ -202,6 +223,11 @@ func (h *URLFiltersHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the pre-update rule so the audit metadata can carry the old
+	// pattern/reason_code. A miss only weakens the audit entry; the update below
+	// still determines the response status.
+	before, beforeErr := h.store.Get(r.Context(), id)
+
 	rule, err := h.store.Update(r.Context(), id, filters.RuleUpdate{
 		Pattern:     req.Pattern,
 		ReasonCode:  req.ReasonCode,
@@ -221,9 +247,26 @@ func (h *URLFiltersHandler) Patch(w http.ResponseWriter, r *http.Request) {
 
 	h.invalidate()
 
-	// SEAM #0025 (audit): url_filter.updated for u.ID with metadata
-	// {old_pattern, new_pattern, old_reason_code, new_reason_code}. Not built yet.
-	_ = u
+	// #0025 audit: url_filter.updated for the admin (u.ID) with
+	// {old_pattern, new_pattern, old_reason_code, new_reason_code}. The update is
+	// already committed, so this is fire-and-forget.
+	if h.auditor != nil && beforeErr == nil {
+		actor := u.ID
+		rid := rule.ID
+		h.auditor.Record(r.Context(), audit.Entry{
+			ActorID:    &actor,
+			Action:     audit.ActionURLFilterUpdated,
+			TargetType: audit.TargetURLFilter,
+			TargetID:   &rid,
+			Metadata: map[string]any{
+				"old_pattern":     before.Pattern,
+				"new_pattern":     rule.Pattern,
+				"old_reason_code": before.ReasonCode,
+				"new_reason_code": rule.ReasonCode,
+			},
+			IP: clientIP(r),
+		})
+	}
 
 	writeJSON(w, http.StatusOK, toRuleView(rule))
 }
@@ -241,6 +284,11 @@ func (h *URLFiltersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the rule before deleting so the audit metadata can carry its
+	// pattern/reason_code/description (the row is gone afterward). A miss only
+	// weakens the audit entry; the delete below still determines the status.
+	deleted, deletedErr := h.store.Get(r.Context(), id)
+
 	err := h.store.Delete(r.Context(), id)
 	switch {
 	case err == nil:
@@ -255,9 +303,25 @@ func (h *URLFiltersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	h.invalidate()
 
-	// SEAM #0025 (audit): url_filter.deleted for u.ID with metadata
-	// {pattern, reason_code, description}. Not built yet.
-	_ = u
+	// #0025 audit: url_filter.deleted for the admin (u.ID) with
+	// {pattern, reason_code, description}. The rule is already deleted, so this is
+	// fire-and-forget.
+	if h.auditor != nil && deletedErr == nil {
+		actor := u.ID
+		rid := id
+		h.auditor.Record(r.Context(), audit.Entry{
+			ActorID:    &actor,
+			Action:     audit.ActionURLFilterDeleted,
+			TargetType: audit.TargetURLFilter,
+			TargetID:   &rid,
+			Metadata: map[string]any{
+				"pattern":     deleted.Pattern,
+				"reason_code": deleted.ReasonCode,
+				"description": deleted.Description,
+			},
+			IP: clientIP(r),
+		})
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Rule deleted"})
 }

@@ -112,7 +112,7 @@ func settingUpdatedAt(t *testing.T, pool *pgxpool.Pool, key string) time.Time {
 // through the genuine session + admin middleware, proving the routes are
 // protected exactly as wired in main.go.
 func adminMux(store *auth.Store) http.Handler {
-	h := NewSettingsHandler(store)
+	h := NewSettingsHandler(store, nil)
 	requireSession := middleware.RequireSession(store)
 	requireAdmin := func(next http.Handler) http.Handler {
 		return requireSession(middleware.RequireAdmin(next))
@@ -368,10 +368,10 @@ func TestAdminSettings_PatchOpensRegistrationGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWebAuthn: %v", err)
 	}
-	regSvc := auth.NewRegistrationService(store, wa, &gateMailer{}, cfg)
+	regSvc := auth.NewRegistrationService(store, wa, &gateMailer{}, nil, cfg)
 	authH := NewAuthHandler(regSvc, nil, nil)
 
-	settingsH := NewSettingsHandler(store)
+	settingsH := NewSettingsHandler(store, nil)
 	requireSession := middleware.RequireSession(store)
 	requireAdmin := func(next http.Handler) http.Handler {
 		return requireSession(middleware.RequireAdmin(next))
@@ -436,4 +436,4 @@ func TestAdminSettings_PatchOpensRegistrationGate(t *testing.T) {
 type gateMailer struct{}
 
 func (gateMailer) SendVerification(context.Context, string, string) error { return nil }
-func (gateMailer) SendRecovery(context.Context, string, string) error      { return nil }
+func (gateMailer) SendRecovery(context.Context, string, string) error     { return nil }

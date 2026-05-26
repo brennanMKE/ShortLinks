@@ -36,7 +36,7 @@ func registerWithAuthenticator(t *testing.T, svc *RegistrationService, pool *pgx
 	t.Helper()
 	ctx := context.Background()
 
-	if err := svc.StartRegistration(ctx, email); err != nil {
+	if err := svc.StartRegistration(ctx, email, ""); err != nil {
 		t.Fatalf("StartRegistration(%s): %v", email, err)
 	}
 	token := lastPendingToken(t, pool, email)
@@ -69,7 +69,7 @@ func registerWithAuthenticator(t *testing.T, svc *RegistrationService, pool *pgx
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/register/finish?token="+token,
 		bytes.NewReader([]byte(attestationResponse)))
-	result, err := svc.FinishRegistration(ctx, token, "Synced Passkey", req)
+	result, err := svc.FinishRegistration(ctx, token, "Synced Passkey", "", req)
 	if err != nil {
 		t.Fatalf("FinishRegistration(%s): %v", email, err)
 	}
@@ -101,7 +101,7 @@ func driveLogin(t *testing.T, loginSvc *LoginService, acct registeredAccount, em
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/finish",
 		bytes.NewReader([]byte(assertionResponse)))
-	return loginSvc.FinishLogin(ctx, req)
+	return loginSvc.FinishLogin(ctx, "", req)
 }
 
 // newLoginService builds a LoginService over the same test pool and RP config as
@@ -113,7 +113,7 @@ func newLoginService(t *testing.T, pool *pgxpool.Pool) *LoginService {
 	if err != nil {
 		t.Fatalf("NewWebAuthn: %v", err)
 	}
-	return NewLoginService(NewStore(pool), wa, nil)
+	return NewLoginService(NewStore(pool), wa, nil, nil)
 }
 
 // TestLogin_EndToEnd_DiscoverableCreatesSession is the key proof: a credential
@@ -273,7 +273,7 @@ func TestLogout_DeletesSessionRow(t *testing.T) {
 		t.Fatalf("precondition: sessions = %d, want 1", n)
 	}
 
-	if err := loginSvc.Logout(context.Background(), result.SessionToken); err != nil {
+	if err := loginSvc.Logout(context.Background(), result.SessionToken, ""); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
 	if n := countSessions(t, pool, result.SessionToken); n != 0 {
@@ -281,10 +281,10 @@ func TestLogout_DeletesSessionRow(t *testing.T) {
 	}
 
 	// Logout is idempotent: a second call (or unknown token) is not an error.
-	if err := loginSvc.Logout(context.Background(), result.SessionToken); err != nil {
+	if err := loginSvc.Logout(context.Background(), result.SessionToken, ""); err != nil {
 		t.Errorf("idempotent Logout returned error: %v", err)
 	}
-	if err := loginSvc.Logout(context.Background(), ""); err != nil {
+	if err := loginSvc.Logout(context.Background(), "", ""); err != nil {
 		t.Errorf("Logout(empty) returned error: %v", err)
 	}
 }

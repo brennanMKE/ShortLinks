@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
@@ -38,11 +39,15 @@ type credentialStore interface {
 // own credentials.
 type CredentialsHandler struct {
 	store credentialStore
+	// auditor records the credential.revoked audit entry (#0025). May be nil in
+	// unit tests that do not assert audit rows.
+	auditor *audit.Logger
 }
 
-// NewCredentialsHandler constructs a CredentialsHandler over the data layer.
-func NewCredentialsHandler(store credentialStore) *CredentialsHandler {
-	return &CredentialsHandler{store: store}
+// NewCredentialsHandler constructs a CredentialsHandler over the data layer. A
+// nil auditor disables audit writes.
+func NewCredentialsHandler(store credentialStore, auditor *audit.Logger) *CredentialsHandler {
+	return &CredentialsHandler{store: store, auditor: auditor}
 }
 
 // credentialView is the JSON shape returned for a single passkey. It carries
@@ -176,9 +181,6 @@ func (h *CredentialsHandler) Rename(w http.ResponseWriter, r *http.Request) {
 // does not exist) yields 404. If the credential is the account's only remaining
 // passkey the request is refused with 409 {"error":"cannot_revoke_last_credential"}
 // — the user must register a replacement first, per the PRD.
-//
-// NOTE: the credential.revoked audit-log entry is #0025 and is not written here
-// yet (no-op until that issue lands).
 func (h *CredentialsHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -192,10 +194,30 @@ func (h *CredentialsHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the device_name for the audit metadata BEFORE the revoke (the row is
+	// gone afterward). Scoped to the caller, so this never reveals another user's
+	// credential. A lookup error here only loses the metadata label, not the
+	// revoke itself.
+	deviceName := h.deviceNameFor(r, u.ID, id)
+
 	err := h.store.RevokeCredential(r.Context(), u.ID, id)
 	switch {
 	case err == nil:
-		// TODO(#0025): write credential.revoked audit-log entry here.
+		// credential.revoked, attributed to the caller, with {device_name}. The
+		// credential is already deleted, so this is fire-and-forget.
+		if h.auditor != nil {
+			actor := u.ID
+			cid := id
+			h.auditor.Record(r.Context(), audit.Entry{
+				ActorID:    &actor,
+				UserID:     &actor,
+				Action:     audit.ActionCredentialRevoked,
+				TargetType: audit.TargetCredential,
+				TargetID:   &cid,
+				Metadata:   map[string]any{"device_name": deviceName},
+				IP:         clientIP(r),
+			})
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"message": "Credential revoked"})
 	case errors.Is(err, auth.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "credential not found")
@@ -204,6 +226,22 @@ func (h *CredentialsHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
+}
+
+// deviceNameFor returns the device_name of the caller's credential id for audit
+// metadata, or "" when it cannot be resolved (not found or lookup error). It is
+// best-effort: a miss only weakens the audit label, never the revoke.
+func (h *CredentialsHandler) deviceNameFor(r *http.Request, userID, id int64) string {
+	creds, err := h.store.ListCredentialsForUser(r.Context(), userID)
+	if err != nil {
+		return ""
+	}
+	for _, c := range creds {
+		if c.ID == id {
+			return c.DeviceName
+		}
+	}
+	return ""
 }
 
 // parseCredentialID reads the {id} path value (Go 1.22 routing) and parses it as

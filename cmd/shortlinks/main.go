@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/cache"
 	"github.com/brennanMKE/ShortLinks/internal/config"
@@ -73,13 +74,19 @@ func serve() error {
 		mailer = auth.NewSESMailer(cfg)
 	}
 
+	// Append-only audit log writer (#0025), shared by every service/handler that
+	// records an action. Auth ceremonies write their entries inside their own
+	// transaction (WriteTx); API/admin handlers log-and-continue (Record) since
+	// their action has already committed.
+	auditLogger := audit.New(pool)
+
 	store := auth.NewStore(pool)
-	regSvc := auth.NewRegistrationService(store, wa, mailer, cfg)
-	loginSvc := auth.NewLoginService(store, wa, slog.Default())
-	recoverSvc := auth.NewRecoveryService(store, wa, mailer)
+	regSvc := auth.NewRegistrationService(store, wa, mailer, auditLogger, cfg)
+	loginSvc := auth.NewLoginService(store, wa, auditLogger, slog.Default())
+	recoverSvc := auth.NewRecoveryService(store, wa, mailer, auditLogger)
 	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc)
-	credsH := handlers.NewCredentialsHandler(store)
-	settingsH := handlers.NewSettingsHandler(store)
+	credsH := handlers.NewCredentialsHandler(store, auditLogger)
+	settingsH := handlers.NewSettingsHandler(store, auditLogger)
 
 	// URL filtering (#0024): the rule store + a 60s-TTL cache of the active,
 	// compiled rules. The cache loads from the DB on a miss/expiry and is
@@ -93,7 +100,7 @@ func serve() error {
 		}
 		return filters.CompileRules(rules, slog.Default()), nil
 	})
-	urlFiltersH := handlers.NewURLFiltersHandler(filterStore, ruleCache)
+	urlFiltersH := handlers.NewURLFiltersHandler(filterStore, ruleCache, auditLogger)
 
 	// Link CRUD API (#0022). The links store reuses the shared pgx pool. The
 	// redirect cache is not yet constructed/plumbed in serve() (the GET /u/{key}
@@ -102,7 +109,7 @@ func serve() error {
 	// URL filter check runs at the top of Create. TODO: once the redirect cache
 	// instance lives in serve(), pass it here so DELETE/PATCH evict the key.
 	linkStore := links.NewStore(pool)
-	linksH := handlers.NewLinksHandler(linkStore, nil, ruleCache)
+	linksH := handlers.NewLinksHandler(linkStore, nil, ruleCache, auditLogger)
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
@@ -118,9 +125,9 @@ func serve() error {
 	// Per-IP rate limiters for the abuse-prone public auth endpoints (PRD Phase
 	// 2). Burst equals the per-window allowance so a fresh IP gets its full
 	// quota immediately, then refills at the sustained rate.
-	registerLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)   // 3 / hour / IP
-	loginLimiter := middleware.NewRateLimiter(rate.Every(time.Minute/10), 10)  // 10 / minute / IP
-	recoverLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)    // 3 / hour / IP
+	registerLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)  // 3 / hour / IP
+	loginLimiter := middleware.NewRateLimiter(rate.Every(time.Minute/10), 10) // 10 / minute / IP
+	recoverLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)   // 3 / hour / IP
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /health", handlers.NewHealthHandler(pool))
@@ -159,9 +166,9 @@ func serve() error {
 	mux.Handle("DELETE /admin/url-filters/{id}", requireAdmin(http.HandlerFunc(urlFiltersH.Delete)))
 
 	// Link CRUD API (#0022) — all behind RequireSession and scoped to the
-	// authenticated user in the store. Dedup (#0023), URL filtering (#0024),
-	// audit (#0025), and SSE (#0026) layer onto the create path via the seams
-	// marked in handlers.LinksHandler.Create.
+	// authenticated user in the store. Dedup (#0023), URL filtering (#0024), and
+	// audit (#0025, wired above) layer onto the create path; the #0026 SSE seam in
+	// handlers.LinksHandler.Create remains to be filled.
 	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(linksH.Create)))
 	mux.Handle("GET /api/links", requireSession(http.HandlerFunc(linksH.List)))
 	mux.Handle("GET /api/links/{key}", requireSession(http.HandlerFunc(linksH.Get)))
