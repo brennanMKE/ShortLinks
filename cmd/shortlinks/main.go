@@ -15,7 +15,8 @@ import (
 const version = "0.1.0"
 
 func main() {
-	// Subcommand routing: `shortlinks serve` starts the HTTP server; anything
+	// Subcommand routing: `shortlinks serve` starts the HTTP server;
+	// `shortlinks seed` bootstraps the admin user and a test link; anything
 	// else (including no argument or `version`) prints the version.
 	cmd := ""
 	if len(os.Args) > 1 {
@@ -25,6 +26,10 @@ func main() {
 	switch cmd {
 	case "serve":
 		if err := serve(); err != nil {
+			log.Fatalf("shortlinks: %v", err)
+		}
+	case "seed":
+		if err := seed(); err != nil {
 			log.Fatalf("shortlinks: %v", err)
 		}
 	default:
