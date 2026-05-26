@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
@@ -35,6 +36,11 @@ type linkStore interface {
 	// deduplication (#0023): it runs the dedup lookup + decision + any write
 	// atomically and reports which branch it took via the CreateOutcome.
 	CreateOrReactivateLink(ctx context.Context, in links.NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) (links.Link, links.CreateOutcome, error)
+	// CreateDeniedLink inserts a denied link row (active=false,
+	// denied_reason=code) for the #0024 URL-filter check. It mints a unique
+	// generated key via genKey so the denied row does not collide with the global
+	// UNIQUE(key) constraint.
+	CreateDeniedLink(ctx context.Context, in links.NewLink, reasonCode int16, genKey func(exists func(key string) (bool, error)) (string, error)) (links.Link, error)
 	ListLinks(ctx context.Context, userID int64, limit, offset int) ([]links.Link, error)
 	CountLinks(ctx context.Context, userID int64) (int64, error)
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
@@ -50,6 +56,16 @@ type linkStore interface {
 // handler testable without a real Ristretto cache.
 type cacheEvictor interface {
 	Delete(key string)
+}
+
+// ruleProvider is the slice of the filter-rule cache the links handler needs:
+// the active, compiled URL filter rules (refreshed from the DB on a 60s TTL).
+// *cache.RuleCache satisfies it via Rules. It is optional — a nil provider (no
+// filter cache wired) disables URL filtering, so the handler falls through to
+// the normal dedup/insert path. Taking an interface keeps the handler testable
+// with a fake rule set and no DB.
+type ruleProvider interface {
+	Rules(ctx context.Context) ([]filters.Rule, error)
 }
 
 // LinksHandler serves the authenticated link CRUD API:
@@ -69,13 +85,19 @@ type LinksHandler struct {
 	// cache is the redirect cache to evict from on update/deactivate; may be nil
 	// (no cache wired) in which case eviction is skipped.
 	cache cacheEvictor
+	// rules is the active-URL-filter-rule provider used by the #0024 filter check
+	// at the top of Create; may be nil (no filter cache wired) in which case URL
+	// filtering is skipped and every URL proceeds to the dedup/insert path.
+	rules ruleProvider
 }
 
-// NewLinksHandler constructs a LinksHandler over the data layer and the redirect
-// cache. Pass a nil cache to disable eviction (e.g. in unit tests that do not
-// exercise the cache); the handler then skips the Delete calls.
-func NewLinksHandler(store linkStore, redirectCache cacheEvictor) *LinksHandler {
-	return &LinksHandler{store: store, cache: redirectCache}
+// NewLinksHandler constructs a LinksHandler over the data layer, the redirect
+// cache, and the URL-filter rule cache. Pass a nil redirectCache to disable
+// eviction and a nil ruleProvider to disable URL filtering (e.g. in unit tests
+// that do not exercise those paths); the handler then skips the respective
+// steps.
+func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider) *LinksHandler {
+	return &LinksHandler{store: store, cache: redirectCache, rules: rules}
 }
 
 // linkView is the JSON shape for a single link, shared by every endpoint. The
@@ -154,13 +176,14 @@ type listLinksResponse struct {
 // SEAMS — the layered issues slot into this method in the following ORDER,
 // between request validation and the insert. None are implemented here:
 //
-//	── #0024 URL FILTER CHECK (runs FIRST) ───────────────────────────────────
-//	Load active filter rules (cache/DB) and test req.DestinationURL. On a match:
-//	insert a denied link (active=false, denied_reason=<code>), write a
-//	link.denied audit entry (#0025), and return 422
-//	{error:"url_denied", reason:<code>, label:<label>}. Only runs for the
-//	GENERATED-key path; the PRD evaluates the filter before dedup so a blocked
-//	URL is always re-evaluated.
+//	── #0024 URL FILTER CHECK (runs FIRST) — IMPLEMENTED ─────────────────────
+//	Loads the active filter rules (cache→DB, 60s TTL) and tests
+//	req.DestinationURL in BOTH the generated-key and custom-alias branches. On a
+//	match it inserts a denied link (active=false, denied_reason=<code>), leaves
+//	the link.denied audit seam (#0025), and returns 422
+//	{error:"url_denied", reason:<code>, label:<label>}. The PRD evaluates the
+//	filter before dedup so a blocked URL is always re-evaluated, and #0026 SSE
+//	never fires for a denial.
 //
 //	── #0023 DEDUP CHECK (runs AFTER the filter, before insert) ──────────────
 //	Implemented (#0023) for the generated-key path only — custom aliases are NOT
@@ -198,13 +221,6 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ───────────────────────────────────────────────────────────────────────
-	// SEAM #0024 (URL filter check — runs FIRST): evaluate dest against the
-	// active filter rules here, BEFORE dedup and BEFORE the insert. On a match,
-	// insert a denied link, write link.denied audit (#0025), and return 422.
-	// Not implemented in #0022.
-	// ───────────────────────────────────────────────────────────────────────
-
 	customKey := strings.TrimSpace(req.customKey())
 
 	in := links.NewLink{
@@ -212,6 +228,47 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		DestinationURL: dest,
 		Title:          strings.TrimSpace(req.Title),
 		ExpiresAt:      req.ExpiresAt,
+	}
+
+	// ───────────────────────────────────────────────────────────────────────
+	// #0024 URL FILTER CHECK — runs FIRST, before dedup and before any insert,
+	// in BOTH the generated-key and custom-alias branches: a denied URL is denied
+	// regardless of alias. Load the active filter rules (cache → DB, 60s TTL) and
+	// evaluate dest. On a match, record a denied link row (active=false,
+	// denied_reason=code), leave the #0025 audit seam, and return 422 — the
+	// dedup/insert path below never runs and #0026 SSE never fires for a denial.
+	// When no rule cache is wired (h.rules == nil) the check is skipped.
+	// ───────────────────────────────────────────────────────────────────────
+	if h.rules != nil {
+		rules, err := h.rules.Rules(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if code, ruleID, matched := filters.Evaluate(rules, dest); matched {
+			denied, err := h.store.CreateDeniedLink(r.Context(), in, int16(code), links.GenerateUniqueKey)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal server error")
+				return
+			}
+			label := filters.ReasonLabel(code)
+
+			// SEAM #0025 (audit): write a link.denied entry attributed to u.ID with
+			// metadata {destination_url, reason_code, reason_label, matched_rule_id}.
+			// The audit write path does not exist yet, so this is a no-op; the values
+			// are captured here so the entry can be emitted verbatim once #0025 lands.
+			// SEAM #0026 (SSE): NOT fired for a denial — only successful
+			// inserts/reactivations broadcast (see below).
+			_ = denied
+			_ = ruleID
+
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"error":  "url_denied",
+				"reason": code,
+				"label":  label,
+			})
+			return
+		}
 	}
 
 	// duplicate is the create response's "duplicate" field: true for both the

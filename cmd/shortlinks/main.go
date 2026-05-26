@@ -12,8 +12,10 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/brennanMKE/ShortLinks/internal/auth"
+	"github.com/brennanMKE/ShortLinks/internal/cache"
 	"github.com/brennanMKE/ShortLinks/internal/config"
 	"github.com/brennanMKE/ShortLinks/internal/db"
+	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
@@ -79,13 +81,28 @@ func serve() error {
 	credsH := handlers.NewCredentialsHandler(store)
 	settingsH := handlers.NewSettingsHandler(store)
 
+	// URL filtering (#0024): the rule store + a 60s-TTL cache of the active,
+	// compiled rules. The cache loads from the DB on a miss/expiry and is
+	// invalidated immediately by the admin CRUD handler on any mutation. The
+	// loader compiles the rules once (uncompilable patterns are skipped + logged).
+	filterStore := filters.NewStore(pool)
+	ruleCache := cache.NewRuleCache(func(ctx context.Context) ([]filters.Rule, error) {
+		rules, err := filterStore.LoadActive(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return filters.CompileRules(rules, slog.Default()), nil
+	})
+	urlFiltersH := handlers.NewURLFiltersHandler(filterStore, ruleCache)
+
 	// Link CRUD API (#0022). The links store reuses the shared pgx pool. The
 	// redirect cache is not yet constructed/plumbed in serve() (the GET /u/{key}
 	// route is wired in a separate issue), so a nil cache is passed: the handler
-	// then skips eviction on PATCH/DELETE. TODO: once the redirect cache instance
-	// lives in serve(), pass it here so DELETE/PATCH evict the key per the PRD.
+	// then skips eviction on PATCH/DELETE. The rule cache IS wired so the #0024
+	// URL filter check runs at the top of Create. TODO: once the redirect cache
+	// instance lives in serve(), pass it here so DELETE/PATCH evict the key.
 	linkStore := links.NewStore(pool)
-	linksH := handlers.NewLinksHandler(linkStore, nil)
+	linksH := handlers.NewLinksHandler(linkStore, nil, ruleCache)
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
@@ -131,6 +148,15 @@ func serve() error {
 	// POST /auth/register/start, so a PATCH here takes effect immediately.
 	mux.Handle("GET /admin/settings", requireAdmin(http.HandlerFunc(settingsH.List)))
 	mux.Handle("PATCH /admin/settings", requireAdmin(http.HandlerFunc(settingsH.Patch)))
+
+	// Admin-only URL filter rules (#0024): CRUD + a dry-run test endpoint. All
+	// behind RequireSession + RequireAdmin. Every mutation invalidates the 60s
+	// rule cache so the change takes effect on the next link creation at once.
+	mux.Handle("GET /admin/url-filters", requireAdmin(http.HandlerFunc(urlFiltersH.List)))
+	mux.Handle("POST /admin/url-filters", requireAdmin(http.HandlerFunc(urlFiltersH.Create)))
+	mux.Handle("POST /admin/url-filters/test", requireAdmin(http.HandlerFunc(urlFiltersH.Test)))
+	mux.Handle("PATCH /admin/url-filters/{id}", requireAdmin(http.HandlerFunc(urlFiltersH.Patch)))
+	mux.Handle("DELETE /admin/url-filters/{id}", requireAdmin(http.HandlerFunc(urlFiltersH.Delete)))
 
 	// Link CRUD API (#0022) — all behind RequireSession and scoped to the
 	// authenticated user in the store. Dedup (#0023), URL filtering (#0024),
