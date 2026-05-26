@@ -88,6 +88,11 @@ func serve() error {
 	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc)
 	credsH := handlers.NewCredentialsHandler(store, auditLogger)
 	settingsH := handlers.NewSettingsHandler(store, auditLogger)
+	// Admin user management (#0028): list/detail/deactivate/reactivate. The
+	// deactivate/reactivate paths write their account.deactivated/reactivated audit
+	// row inside the store's transaction (WriteTx) so it commits atomically with
+	// the active flip and session deletion.
+	adminUsersH := handlers.NewAdminUsersHandler(store, auditLogger)
 
 	// URL filtering (#0024): the rule store + a 60s-TTL cache of the active,
 	// compiled rules. The cache loads from the DB on a miss/expiry and is
@@ -170,6 +175,16 @@ func serve() error {
 	// POST /auth/register/start, so a PATCH here takes effect immediately.
 	mux.Handle("GET /admin/settings", requireAdmin(http.HandlerFunc(settingsH.List)))
 	mux.Handle("PATCH /admin/settings", requireAdmin(http.HandlerFunc(settingsH.Patch)))
+
+	// Admin-only user management (#0028): list users (status + last login), user
+	// detail (+ link/passkey counts), deactivate a non-admin user (sets
+	// active=false, deletes all their sessions, audits account.deactivated), and
+	// reactivate (sets active=true, audits account.reactivated). All behind
+	// RequireSession + RequireAdmin.
+	mux.Handle("GET /admin/users", requireAdmin(http.HandlerFunc(adminUsersH.List)))
+	mux.Handle("GET /admin/users/{id}", requireAdmin(http.HandlerFunc(adminUsersH.Get)))
+	mux.Handle("POST /admin/users/{id}/deactivate", requireAdmin(http.HandlerFunc(adminUsersH.Deactivate)))
+	mux.Handle("POST /admin/users/{id}/reactivate", requireAdmin(http.HandlerFunc(adminUsersH.Reactivate)))
 
 	// Admin-only URL filter rules (#0024): CRUD + a dry-run test endpoint. All
 	// behind RequireSession + RequireAdmin. Every mutation invalidates the 60s
