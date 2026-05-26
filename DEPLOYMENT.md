@@ -44,22 +44,22 @@ Provision and prepare the host before deploying:
   node --version   # should print v20.x or newer
   ```
 
-- **Go 1.22+** — used to compile the Go binary. AL2023's `dnf` ships an older
-  Go version; install the latest release from the official tarball instead.
-  Check the current release at <https://go.dev/dl/> and substitute the version
-  number below:
+- **Go 1.26+** — used to compile the Go binary. AL2023's `dnf` ships an older
+  Go version; install from the official tarball instead. The snippet below
+  auto-detects the CPU architecture (`amd64` for Intel/AMD, `arm64` for
+  Graviton) and downloads the matching tarball. Check <https://go.dev/dl/> for
+  the current stable version and update `GO_VERSION` accordingly:
 
   ```bash
-  curl -OL https://go.dev/dl/go1.24.3.linux-amd64.tar.gz
+  GO_VERSION=1.26.3
+  GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+  curl -OL https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz
   sudo rm -rf /usr/local/go
-  sudo tar -C /usr/local -xzf go1.24.3.linux-amd64.tar.gz
+  sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-${GOARCH}.tar.gz
   echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
   source /etc/profile.d/go.sh
-  go version       # should print go1.24.x or newer
+  go version   # go1.26.3 linux/arm64  (or amd64 on Intel/AMD instances)
   ```
-
-  > If your EC2 instance uses a Graviton (Arm) processor, download the
-  > `linux-arm64` tarball instead of `linux-amd64`.
 
 - **`golang-migrate` CLI** installed (used to apply schema migrations):
 
