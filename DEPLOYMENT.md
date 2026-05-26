@@ -35,13 +35,31 @@ Provision and prepare the host before deploying:
   sudo systemctl enable --now postgresql
   ```
 
-- **Node.js 20+** and **Go 1.22+** installed (used to build the SPA and the Go
-  binary). Verify with:
+- **Node.js 20+** — used only at build time to compile the Svelte SPA; not
+  needed at runtime. Install via NodeSource:
 
   ```bash
-  node --version   # v20.x or newer
-  go version       # go1.22 or newer
+  curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+  sudo dnf install -y nodejs
+  node --version   # should print v20.x or newer
   ```
+
+- **Go 1.22+** — used to compile the Go binary. AL2023's `dnf` ships an older
+  Go version; install the latest release from the official tarball instead.
+  Check the current release at <https://go.dev/dl/> and substitute the version
+  number below:
+
+  ```bash
+  curl -OL https://go.dev/dl/go1.24.3.linux-amd64.tar.gz
+  sudo rm -rf /usr/local/go
+  sudo tar -C /usr/local -xzf go1.24.3.linux-amd64.tar.gz
+  echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
+  source /etc/profile.d/go.sh
+  go version       # should print go1.24.x or newer
+  ```
+
+  > If your EC2 instance uses a Graviton (Arm) processor, download the
+  > `linux-arm64` tarball instead of `linux-amd64`.
 
 - **`golang-migrate` CLI** installed (used to apply schema migrations):
 
