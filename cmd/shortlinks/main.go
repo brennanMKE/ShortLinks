@@ -93,6 +93,9 @@ func serve() error {
 	// row inside the store's transaction (WriteTx) so it commits atomically with
 	// the active flip and session deletion.
 	adminUsersH := handlers.NewAdminUsersHandler(store, auditLogger)
+	// Admin audit log view (#0029): paginated, newest-first, optional ?user_id=
+	// filter. Reads through audit.Reader over the same shared pool as the writer.
+	adminAuditH := handlers.NewAdminAuditHandler(audit.NewReader(pool))
 
 	// URL filtering (#0024): the rule store + a 60s-TTL cache of the active,
 	// compiled rules. The cache loads from the DB on a miss/expiry and is
@@ -185,6 +188,12 @@ func serve() error {
 	mux.Handle("GET /admin/users/{id}", requireAdmin(http.HandlerFunc(adminUsersH.Get)))
 	mux.Handle("POST /admin/users/{id}/deactivate", requireAdmin(http.HandlerFunc(adminUsersH.Deactivate)))
 	mux.Handle("POST /admin/users/{id}/reactivate", requireAdmin(http.HandlerFunc(adminUsersH.Reactivate)))
+
+	// Admin-only audit log (#0029): GET /admin/audit returns the append-only
+	// audit_log newest-first, paginated via ?page=&per_page= (default 50, capped
+	// at 200), with an optional ?user_id= filter scoped to one user's rows. Behind
+	// RequireSession + RequireAdmin.
+	mux.Handle("GET /admin/audit", requireAdmin(http.HandlerFunc(adminAuditH.List)))
 
 	// Admin-only URL filter rules (#0024): CRUD + a dry-run test endpoint. All
 	// behind RequireSession + RequireAdmin. Every mutation invalidates the 60s
