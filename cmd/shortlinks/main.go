@@ -121,6 +121,11 @@ func serve() error {
 	linkStore := links.NewStore(pool)
 	linksH := handlers.NewLinksHandler(linkStore, nil, ruleCache, auditLogger, broker)
 
+	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
+	// read straight off the RequireSession-attached context, so the Svelte SPA
+	// can gate the admin view. Stateless — no data-layer dependency.
+	meH := handlers.NewMeHandler()
+
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
 	requireSession := middleware.RequireSession(store)
@@ -183,6 +188,10 @@ func serve() error {
 	mux.Handle("GET /api/links/{key}", requireSession(http.HandlerFunc(linksH.Get)))
 	mux.Handle("PATCH /api/links/{key}", requireSession(http.HandlerFunc(linksH.Patch)))
 	mux.Handle("DELETE /api/links/{key}", requireSession(http.HandlerFunc(linksH.Delete)))
+
+	// Current user profile (#0027) — behind RequireSession; returns the caller's
+	// {id, email, is_admin} for the SPA to gate the admin view.
+	mux.Handle("GET /api/me", requireSession(http.HandlerFunc(meH.Me)))
 
 	// SSE stream (#0026) — behind RequireSession; pushes link.created events to
 	// the authenticated user's connected dashboard clients.
