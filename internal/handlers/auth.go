@@ -35,7 +35,17 @@ type authenticator interface {
 	Logout(ctx context.Context, token string) error
 }
 
-// AuthHandler serves the passkey registration and login ceremony routes:
+// recoverer is the behavior the auth handler needs from the recovery service.
+// As with registrar/authenticator, depending on an interface keeps the handler
+// unit-testable with a fake.
+type recoverer interface {
+	StartRecovery(ctx context.Context, email string) error
+	VerifyRecovery(ctx context.Context, token string) (*protocol.CredentialCreation, error)
+	FinishRecovery(ctx context.Context, token, deviceName string, r *http.Request) (auth.RecoveryResult, error)
+}
+
+// AuthHandler serves the passkey registration, login, and recovery ceremony
+// routes:
 //
 //	POST /auth/register/start   — submit email, send magic link
 //	GET  /auth/register/verify  — validate token, return WebAuthn options
@@ -43,19 +53,21 @@ type authenticator interface {
 //	GET  /auth/login/start      — issue an assertion challenge (optional ?email=)
 //	POST /auth/login/finish     — submit assertion, verify, create session
 //	POST /auth/logout           — delete the session, clear the cookie
-//
-// Recovery (#0017) routes will be added reusing the same services and JSON
-// helpers.
+//	POST /auth/recover          — submit email, send recovery link (generic 200)
+//	GET  /auth/recover/verify   — validate recovery token, return WebAuthn options
+//	POST /auth/recover/finish   — submit attestation, add credential + session
 type AuthHandler struct {
-	reg   registrar
-	login authenticator
+	reg      registrar
+	login    authenticator
+	recovery recoverer
 }
 
-// NewAuthHandler constructs an AuthHandler over the registration and login
-// services. login may be nil where only registration routes are exercised
-// (e.g. existing registration handler tests).
-func NewAuthHandler(reg registrar, login authenticator) *AuthHandler {
-	return &AuthHandler{reg: reg, login: login}
+// NewAuthHandler constructs an AuthHandler over the registration, login, and
+// recovery services. Any dependency may be nil where only a subset of routes is
+// exercised (e.g. existing registration handler tests pass nil for login and
+// recovery).
+func NewAuthHandler(reg registrar, login authenticator, recovery recoverer) *AuthHandler {
+	return &AuthHandler{reg: reg, login: login, recovery: recovery}
 }
 
 // startRequest is the POST /auth/register/start body.
@@ -211,6 +223,94 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearSessionCookie(w)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Signed out"})
+}
+
+// recoverRequest is the POST /auth/recover body.
+type recoverRequest struct {
+	Email string `json:"email"`
+}
+
+// recoverGenericMessage is the single response returned by RecoverStart in
+// every case (account exists or not) so the endpoint never leaks which emails
+// are registered.
+const recoverGenericMessage = "If that email is registered, a recovery link has been sent"
+
+// RecoverStart handles POST /auth/recover. It accepts an email and, only when
+// the account exists and is active, sends a single-use recovery link. The
+// response is always the same generic 200 to prevent account enumeration; only
+// a genuine infrastructure error yields a 500.
+func (h *AuthHandler) RecoverStart(w http.ResponseWriter, r *http.Request) {
+	var req recoverRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := h.recovery.StartRecovery(r.Context(), req.Email); err != nil {
+		// The service swallows unknown/inactive/invalid emails (returning nil);
+		// any error here is a real failure (token creation or mail delivery).
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": recoverGenericMessage})
+}
+
+// RecoverVerify handles GET /auth/recover/verify?token=... It validates the
+// recovery token and returns the WebAuthn options for adding a new credential
+// to the existing account.
+func (h *AuthHandler) RecoverVerify(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		writeError(w, http.StatusBadRequest, "missing token")
+		return
+	}
+
+	creation, err := h.recovery.VerifyRecovery(r.Context(), token)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, creation)
+	case errors.Is(err, auth.ErrTokenInvalid):
+		writeError(w, http.StatusBadRequest, "token invalid or expired")
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+	}
+}
+
+// RecoverFinish handles POST /auth/recover/finish. The body is the WebAuthn
+// attestation; the recovery token is taken from the query string so the
+// attestation JSON is passed to FinishRecovery untouched. An optional
+// device_name query parameter labels the new credential. On success it adds the
+// credential to the existing account, sets the session cookie, and returns 200.
+func (h *AuthHandler) RecoverFinish(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		writeError(w, http.StatusBadRequest, "missing token")
+		return
+	}
+	deviceName := r.URL.Query().Get("device_name")
+
+	// Cap and buffer the body so FinishRecovery can read the attestation from a
+	// fresh reader (the service re-parses r.Body internally).
+	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	result, err := h.recovery.FinishRecovery(r.Context(), token, deviceName, r)
+	switch {
+	case err == nil:
+		auth.SetSessionCookie(w, result.SessionToken, result.SessionExpires)
+		writeJSON(w, http.StatusOK, map[string]any{"user_id": result.UserID})
+	case errors.Is(err, auth.ErrTokenInvalid):
+		writeError(w, http.StatusBadRequest, "token invalid or expired")
+	default:
+		// A failed attestation verification or any other error: do not leak detail.
+		writeError(w, http.StatusBadRequest, "recovery failed")
+	}
 }
 
 // clearSessionCookie expires the session cookie in the browser, mirroring the

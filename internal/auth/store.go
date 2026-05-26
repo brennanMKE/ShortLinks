@@ -246,6 +246,91 @@ func (s *Store) DeletePendingRegistration(ctx context.Context, q querier, token 
 // challenge. The PRD fixes it at the same 5-minute TTL as registration.
 const authenticationTTL = 5 * time.Minute
 
+// recoveryTTL is the lifetime of a recovery token and its associated WebAuthn
+// challenge. The PRD fixes account-recovery links at a 15-minute TTL.
+const recoveryTTL = 15 * time.Minute
+
+// CreateRecoveryToken inserts a pending_registrations row carrying the recovery
+// token with a 15-minute TTL and returns the expiry. The recovery flow reuses
+// the pending_registrations table (email + token + expires_at); the longer TTL
+// is what distinguishes a recovery token's lifetime from a registration one,
+// and the endpoint (not the row) disambiguates the flow.
+func (s *Store) CreateRecoveryToken(ctx context.Context, email, token string, now time.Time) (time.Time, error) {
+	expiresAt := now.Add(recoveryTTL)
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO pending_registrations (email, token, expires_at)
+		 VALUES ($1, $2, $3)`,
+		email, token, expiresAt,
+	); err != nil {
+		return time.Time{}, fmt.Errorf("auth: creating recovery token: %w", err)
+	}
+	return expiresAt, nil
+}
+
+// LookupRecoveryToken resolves a recovery token to its email, enforcing the
+// 15-minute TTL. ErrTokenInvalid is returned for an unknown or expired token so
+// callers can treat both identically. It mirrors LookupPendingRegistration but
+// applies the recovery TTL semantics (the row's own expires_at is authoritative,
+// so the check is the same; the distinct method documents intent and keeps the
+// recovery path independent of the registration TTL constant).
+func (s *Store) LookupRecoveryToken(ctx context.Context, token string, now time.Time) (email string, err error) {
+	var expiresAt time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT email, expires_at FROM pending_registrations WHERE token = $1`,
+		token,
+	).Scan(&email, &expiresAt)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", ErrTokenInvalid
+	case err != nil:
+		return "", fmt.Errorf("auth: looking up recovery token: %w", err)
+	}
+	if !expiresAt.After(now) {
+		return "", ErrTokenInvalid
+	}
+	return email, nil
+}
+
+// SaveRecoveryChallenge persists a recovery WebAuthn challenge linked to the
+// recovery token and bound to the existing user_id, with a 15-minute TTL. The
+// purpose is 'recovery' so it is consumed only by the recovery finish path and
+// never collides with a registration challenge for the same token.
+func (s *Store) SaveRecoveryChallenge(ctx context.Context, challenge []byte, userID int64, token string, now time.Time) error {
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO webauthn_challenges
+		     (challenge, user_id, pending_registration_token, purpose, expires_at)
+		 VALUES ($1, $2, $3, 'recovery', $4)`,
+		challenge, userID, token, now.Add(recoveryTTL),
+	); err != nil {
+		return fmt.Errorf("auth: saving recovery challenge: %w", err)
+	}
+	return nil
+}
+
+// ConsumeRecoveryChallenge atomically deletes and returns the recovery challenge
+// (and its bound user_id) for a recovery token, enforcing the TTL. Single-use
+// deletion prevents replay. ErrTokenInvalid is returned when no live recovery
+// challenge exists for the token.
+func (s *Store) ConsumeRecoveryChallenge(ctx context.Context, q querier, token string, now time.Time) (challenge []byte, userID int64, err error) {
+	var expiresAt time.Time
+	err = q.QueryRow(ctx,
+		`DELETE FROM webauthn_challenges
+		 WHERE pending_registration_token = $1 AND purpose = 'recovery'
+		 RETURNING challenge, user_id, expires_at`,
+		token,
+	).Scan(&challenge, &userID, &expiresAt)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, 0, ErrTokenInvalid
+	case err != nil:
+		return nil, 0, fmt.Errorf("auth: consuming recovery challenge: %w", err)
+	}
+	if !expiresAt.After(now) {
+		return nil, 0, ErrTokenInvalid
+	}
+	return challenge, userID, nil
+}
+
 // AccountByEmail is a lightweight view of a users row used by the login
 // ceremony to decide whether to populate allowCredentials and, after a verified
 // assertion, whether the account is active.

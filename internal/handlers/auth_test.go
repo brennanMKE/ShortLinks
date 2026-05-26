@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,6 +74,37 @@ func (f *fakeAuthenticator) Logout(_ context.Context, token string) error {
 	return f.logoutErr
 }
 
+// fakeRecoverer is an in-memory recovery service for handler tests.
+type fakeRecoverer struct {
+	startErr error
+	startGot string
+
+	verifyResp *protocol.CredentialCreation
+	verifyErr  error
+	verifyGot  string
+
+	finishResult auth.RecoveryResult
+	finishErr    error
+	finishToken  string
+	finishDevice string
+}
+
+func (f *fakeRecoverer) StartRecovery(_ context.Context, email string) error {
+	f.startGot = email
+	return f.startErr
+}
+
+func (f *fakeRecoverer) VerifyRecovery(_ context.Context, token string) (*protocol.CredentialCreation, error) {
+	f.verifyGot = token
+	return f.verifyResp, f.verifyErr
+}
+
+func (f *fakeRecoverer) FinishRecovery(_ context.Context, token, deviceName string, _ *http.Request) (auth.RecoveryResult, error) {
+	f.finishToken = token
+	f.finishDevice = deviceName
+	return f.finishResult, f.finishErr
+}
+
 func decodeBody(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var m map[string]any
@@ -86,7 +118,7 @@ func decodeBody(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
 // the email reaches the service.
 func TestRegisterStart_Success(t *testing.T) {
 	f := &fakeRegistrar{}
-	h := NewAuthHandler(f, nil)
+	h := NewAuthHandler(f, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/register/start",
 		strings.NewReader(`{"email":"alice@example.com"}`))
@@ -107,7 +139,7 @@ func TestRegisterStart_Success(t *testing.T) {
 // TestRegisterStart_Disabled asserts a 403 when registrations are closed.
 func TestRegisterStart_Disabled(t *testing.T) {
 	f := &fakeRegistrar{startErr: auth.ErrRegistrationsDisabled}
-	h := NewAuthHandler(f, nil)
+	h := NewAuthHandler(f, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/register/start",
 		strings.NewReader(`{"email":"alice@example.com"}`))
@@ -123,7 +155,7 @@ func TestRegisterStart_Disabled(t *testing.T) {
 // email yields the same 200 message (no account-existence leak).
 func TestRegisterStart_DuplicateLooksLikeSuccess(t *testing.T) {
 	f := &fakeRegistrar{startErr: auth.ErrEmailRegistered}
-	h := NewAuthHandler(f, nil)
+	h := NewAuthHandler(f, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/register/start",
 		strings.NewReader(`{"email":"taken@example.com"}`))
@@ -141,7 +173,7 @@ func TestRegisterStart_DuplicateLooksLikeSuccess(t *testing.T) {
 // TestRegisterStart_BadBody asserts malformed JSON yields 400.
 func TestRegisterStart_BadBody(t *testing.T) {
 	f := &fakeRegistrar{}
-	h := NewAuthHandler(f, nil)
+	h := NewAuthHandler(f, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/register/start",
 		strings.NewReader(`{not json`))
@@ -158,7 +190,7 @@ func TestRegisterVerify_Success(t *testing.T) {
 	creation := &protocol.CredentialCreation{}
 	creation.Response.Challenge = protocol.URLEncodedBase64("challenge-bytes")
 	f := &fakeRegistrar{verifyResp: creation}
-	h := NewAuthHandler(f, nil)
+	h := NewAuthHandler(f, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/auth/register/verify?token=tok123", nil)
 
@@ -178,7 +210,7 @@ func TestRegisterVerify_Success(t *testing.T) {
 
 // TestRegisterVerify_MissingToken asserts 400 when no token is supplied.
 func TestRegisterVerify_MissingToken(t *testing.T) {
-	h := NewAuthHandler(&fakeRegistrar{}, nil)
+	h := NewAuthHandler(&fakeRegistrar{}, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/auth/register/verify", nil)
 
@@ -192,7 +224,7 @@ func TestRegisterVerify_MissingToken(t *testing.T) {
 // TestRegisterVerify_InvalidToken asserts 400 for an unknown/expired token.
 func TestRegisterVerify_InvalidToken(t *testing.T) {
 	f := &fakeRegistrar{verifyErr: auth.ErrTokenInvalid}
-	h := NewAuthHandler(f, nil)
+	h := NewAuthHandler(f, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/auth/register/verify?token=bad", nil)
 
@@ -211,7 +243,7 @@ func TestRegisterFinish_Success(t *testing.T) {
 		SessionToken:   "sess-token",
 		SessionExpires: time.Now().Add(30 * 24 * time.Hour),
 	}}
-	h := NewAuthHandler(f, nil)
+	h := NewAuthHandler(f, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost,
 		"/auth/register/finish?token=tok123&device_name=MacBook",
@@ -252,7 +284,7 @@ func TestRegisterFinish_Success(t *testing.T) {
 
 // TestRegisterFinish_MissingToken asserts 400 when no token is supplied.
 func TestRegisterFinish_MissingToken(t *testing.T) {
-	h := NewAuthHandler(&fakeRegistrar{}, nil)
+	h := NewAuthHandler(&fakeRegistrar{}, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/register/finish",
 		strings.NewReader(`{}`))
@@ -267,7 +299,7 @@ func TestRegisterFinish_MissingToken(t *testing.T) {
 // TestRegisterFinish_InvalidToken asserts 400 when the challenge/token is gone.
 func TestRegisterFinish_InvalidToken(t *testing.T) {
 	f := &fakeRegistrar{finishErr: auth.ErrTokenInvalid}
-	h := NewAuthHandler(f, nil)
+	h := NewAuthHandler(f, nil, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/register/finish?token=bad",
 		strings.NewReader(`{}`))
@@ -289,7 +321,7 @@ func TestLoginStart_PassesEmailAndReturnsOptions(t *testing.T) {
 	assertion := &protocol.CredentialAssertion{}
 	assertion.Response.Challenge = protocol.URLEncodedBase64("challenge-bytes")
 	a := &fakeAuthenticator{startResp: assertion}
-	h := NewAuthHandler(&fakeRegistrar{}, a)
+	h := NewAuthHandler(&fakeRegistrar{}, a, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/auth/login/start?email=alice@example.com", nil)
 
@@ -310,7 +342,7 @@ func TestLoginStart_PassesEmailAndReturnsOptions(t *testing.T) {
 // generic options (conditional UI / discoverable login).
 func TestLoginStart_NoEmailDiscoverable(t *testing.T) {
 	a := &fakeAuthenticator{startResp: &protocol.CredentialAssertion{}}
-	h := NewAuthHandler(&fakeRegistrar{}, a)
+	h := NewAuthHandler(&fakeRegistrar{}, a, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/auth/login/start", nil)
 
@@ -332,7 +364,7 @@ func TestLoginFinish_Success(t *testing.T) {
 		SessionToken:   "sess-token",
 		SessionExpires: time.Now().Add(30 * 24 * time.Hour),
 	}}
-	h := NewAuthHandler(&fakeRegistrar{}, a)
+	h := NewAuthHandler(&fakeRegistrar{}, a, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/finish",
 		strings.NewReader(`{"id":"x","response":{}}`))
@@ -362,7 +394,7 @@ func TestLoginFinish_Success(t *testing.T) {
 // PRD message and no session cookie.
 func TestLoginFinish_Deactivated(t *testing.T) {
 	a := &fakeAuthenticator{finishErr: auth.ErrAccountDeactivated}
-	h := NewAuthHandler(&fakeRegistrar{}, a)
+	h := NewAuthHandler(&fakeRegistrar{}, a, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/finish",
 		strings.NewReader(`{}`))
@@ -384,7 +416,7 @@ func TestLoginFinish_Deactivated(t *testing.T) {
 // no cookie.
 func TestLoginFinish_Failure(t *testing.T) {
 	a := &fakeAuthenticator{finishErr: auth.ErrLoginFailed}
-	h := NewAuthHandler(&fakeRegistrar{}, a)
+	h := NewAuthHandler(&fakeRegistrar{}, a, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login/finish",
 		strings.NewReader(`{}`))
@@ -403,7 +435,7 @@ func TestLoginFinish_Failure(t *testing.T) {
 // an expiring cookie is set.
 func TestLogout_DeletesAndClears(t *testing.T) {
 	a := &fakeAuthenticator{}
-	h := NewAuthHandler(&fakeRegistrar{}, a)
+	h := NewAuthHandler(&fakeRegistrar{}, a, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "tok-to-delete"})
@@ -429,7 +461,7 @@ func TestLogout_DeletesAndClears(t *testing.T) {
 // and does not call the service.
 func TestLogout_NoCookie(t *testing.T) {
 	a := &fakeAuthenticator{}
-	h := NewAuthHandler(&fakeRegistrar{}, a)
+	h := NewAuthHandler(&fakeRegistrar{}, a, nil)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 
@@ -440,5 +472,198 @@ func TestLogout_NoCookie(t *testing.T) {
 	}
 	if a.logoutGot != "" {
 		t.Errorf("service should not be called without a cookie; got %q", a.logoutGot)
+	}
+}
+
+// TestRecoverStart_GenericSuccess asserts a 200 with the generic enumeration-safe
+// message and that the email reaches the service.
+func TestRecoverStart_GenericSuccess(t *testing.T) {
+	f := &fakeRecoverer{}
+	h := NewAuthHandler(&fakeRegistrar{}, nil, f)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/recover",
+		strings.NewReader(`{"email":"alice@example.com"}`))
+
+	h.RecoverStart(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if msg := decodeBody(t, rr)["message"]; msg != recoverGenericMessage {
+		t.Errorf("message = %v, want %q", msg, recoverGenericMessage)
+	}
+	if f.startGot != "alice@example.com" {
+		t.Errorf("service received email %q", f.startGot)
+	}
+}
+
+// TestRecoverStart_UnknownLooksLikeSuccess asserts that even when the service
+// swallows an unknown email (returning nil), the same generic 200 is returned —
+// no account-existence leak.
+func TestRecoverStart_UnknownLooksLikeSuccess(t *testing.T) {
+	f := &fakeRecoverer{startErr: nil}
+	h := NewAuthHandler(&fakeRegistrar{}, nil, f)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/recover",
+		strings.NewReader(`{"email":"nobody@example.com"}`))
+
+	h.RecoverStart(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (no leak); body=%s", rr.Code, rr.Body.String())
+	}
+	if msg := decodeBody(t, rr)["message"]; msg != recoverGenericMessage {
+		t.Errorf("message = %v, want generic", msg)
+	}
+}
+
+// TestRecoverStart_BadBody asserts malformed JSON yields 400.
+func TestRecoverStart_BadBody(t *testing.T) {
+	h := NewAuthHandler(&fakeRegistrar{}, nil, &fakeRecoverer{})
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/recover",
+		strings.NewReader(`{not json`))
+
+	h.RecoverStart(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestRecoverStart_InternalError asserts a genuine infrastructure failure yields
+// 500 (the service only returns an error for real failures, never enumeration).
+func TestRecoverStart_InternalError(t *testing.T) {
+	f := &fakeRecoverer{startErr: errors.New("smtp down")}
+	h := NewAuthHandler(&fakeRegistrar{}, nil, f)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/recover",
+		strings.NewReader(`{"email":"alice@example.com"}`))
+
+	h.RecoverStart(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestRecoverVerify_Success asserts the WebAuthn options are returned as JSON.
+func TestRecoverVerify_Success(t *testing.T) {
+	creation := &protocol.CredentialCreation{}
+	creation.Response.Challenge = protocol.URLEncodedBase64("challenge-bytes")
+	f := &fakeRecoverer{verifyResp: creation}
+	h := NewAuthHandler(&fakeRegistrar{}, nil, f)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/recover/verify?token=rtok123", nil)
+
+	h.RecoverVerify(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if f.verifyGot != "rtok123" {
+		t.Errorf("service received token %q", f.verifyGot)
+	}
+	if _, ok := decodeBody(t, rr)["publicKey"]; !ok {
+		t.Errorf("response missing publicKey object: %s", rr.Body.String())
+	}
+}
+
+// TestRecoverVerify_MissingToken asserts 400 when no token is supplied.
+func TestRecoverVerify_MissingToken(t *testing.T) {
+	h := NewAuthHandler(&fakeRegistrar{}, nil, &fakeRecoverer{})
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/recover/verify", nil)
+
+	h.RecoverVerify(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestRecoverVerify_InvalidToken asserts 400 for an unknown/expired token.
+func TestRecoverVerify_InvalidToken(t *testing.T) {
+	f := &fakeRecoverer{verifyErr: auth.ErrTokenInvalid}
+	h := NewAuthHandler(&fakeRegistrar{}, nil, f)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/recover/verify?token=bad", nil)
+
+	h.RecoverVerify(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestRecoverFinish_Success asserts 200, the session cookie attributes, the
+// user_id JSON, and that token + device_name reach the service.
+func TestRecoverFinish_Success(t *testing.T) {
+	f := &fakeRecoverer{finishResult: auth.RecoveryResult{
+		UserID:         9,
+		SessionToken:   "sess-token",
+		SessionExpires: time.Now().Add(30 * 24 * time.Hour),
+	}}
+	h := NewAuthHandler(&fakeRegistrar{}, nil, f)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost,
+		"/auth/recover/finish?token=rtok123&device_name=NewKey",
+		strings.NewReader(`{"id":"x","response":{}}`))
+
+	h.RecoverFinish(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if f.finishToken != "rtok123" || f.finishDevice != "NewKey" {
+		t.Errorf("service got token=%q device=%q", f.finishToken, f.finishDevice)
+	}
+
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected 1 cookie, got %d", len(cookies))
+	}
+	c := cookies[0]
+	if c.Name != auth.SessionCookieName || c.Value != "sess-token" {
+		t.Errorf("cookie = %s=%s, want %s=sess-token", c.Name, c.Value, auth.SessionCookieName)
+	}
+	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode {
+		t.Errorf("cookie security attrs wrong: HttpOnly=%v Secure=%v SameSite=%v", c.HttpOnly, c.Secure, c.SameSite)
+	}
+	if body := decodeBody(t, rr); body["user_id"] != float64(9) {
+		t.Errorf("body user_id = %v, want 9", body["user_id"])
+	}
+}
+
+// TestRecoverFinish_MissingToken asserts 400 when no token is supplied.
+func TestRecoverFinish_MissingToken(t *testing.T) {
+	h := NewAuthHandler(&fakeRegistrar{}, nil, &fakeRecoverer{})
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/recover/finish",
+		strings.NewReader(`{}`))
+
+	h.RecoverFinish(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestRecoverFinish_InvalidToken asserts 400 when the challenge/token is gone,
+// and that no session cookie is set on failure.
+func TestRecoverFinish_InvalidToken(t *testing.T) {
+	f := &fakeRecoverer{finishErr: auth.ErrTokenInvalid}
+	h := NewAuthHandler(&fakeRegistrar{}, nil, f)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/recover/finish?token=bad",
+		strings.NewReader(`{}`))
+
+	h.RecoverFinish(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+	if len(rr.Result().Cookies()) != 0 {
+		t.Error("no session cookie should be set on a failed recovery finish")
 	}
 }
