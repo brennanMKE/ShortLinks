@@ -220,12 +220,14 @@ func (s *RegistrationService) FinishRegistration(ctx context.Context, token, dev
 	}
 
 	if err := s.store.InsertCredential(ctx, tx, StoredCredential{
-		UserID:       created.ID,
-		CredentialID: credential.ID,
-		PublicKey:    credential.PublicKey,
-		AAGUID:       credential.Authenticator.AAGUID,
-		SignCount:    credential.Authenticator.SignCount,
-		DeviceName:   deviceName,
+		UserID:         created.ID,
+		CredentialID:   credential.ID,
+		PublicKey:      credential.PublicKey,
+		AAGUID:         credential.Authenticator.AAGUID,
+		SignCount:      credential.Authenticator.SignCount,
+		DeviceName:     deviceName,
+		BackupEligible: credential.Flags.BackupEligible,
+		BackupState:    credential.Flags.BackupState,
 	}, now); err != nil {
 		return FinishResult{}, err
 	}

@@ -223,12 +223,14 @@ func (s *RecoveryService) FinishRecovery(ctx context.Context, token, deviceName,
 	// Attach the new credential to the EXISTING user. Existing credentials are
 	// left untouched.
 	if err := s.store.InsertCredential(ctx, tx, StoredCredential{
-		UserID:       userID,
-		CredentialID: credential.ID,
-		PublicKey:    credential.PublicKey,
-		AAGUID:       credential.Authenticator.AAGUID,
-		SignCount:    credential.Authenticator.SignCount,
-		DeviceName:   deviceName,
+		UserID:         userID,
+		CredentialID:   credential.ID,
+		PublicKey:      credential.PublicKey,
+		AAGUID:         credential.Authenticator.AAGUID,
+		SignCount:      credential.Authenticator.SignCount,
+		DeviceName:     deviceName,
+		BackupEligible: credential.Flags.BackupEligible,
+		BackupState:    credential.Flags.BackupState,
 	}, now); err != nil {
 		return RecoveryResult{}, err
 	}

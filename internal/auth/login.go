@@ -197,26 +197,28 @@ func (s *LoginService) FinishLogin(ctx context.Context, ip string, r *http.Reque
 	// Apply the PRD sign_count rules. go-webauthn's UpdateCounter has already
 	// folded the assertion counter into validated.Authenticator and raised
 	// CloneWarning on the regression case; we map that onto our storage policy.
+	// BackupState (BS) is mutable and is refreshed on every successful login.
 	assertionCount := validated.Authenticator.SignCount
+	assertionBS := validated.Flags.BackupState
 	switch {
 	case validated.Authenticator.CloneWarning:
 		// Stored > 0 and assertion <= stored: possible clone of a device-bound
 		// credential. Log a warning, accept the login, and leave sign_count
-		// unchanged (only touch last_used_at).
+		// unchanged (only touch last_used_at and refresh backup_state).
 		s.log.Warn("login: possible cloned credential (sign_count regression)",
 			"user_id", rec.UserID, "stored_sign_count", rec.SignCount, "assertion_sign_count", assertionCount)
-		if err := s.store.TouchCredentialLastUsed(ctx, tx, rec.CredentialID, now); err != nil {
+		if err := s.store.TouchCredentialLastUsed(ctx, tx, rec.CredentialID, assertionBS, now); err != nil {
 			return LoginResult{}, err
 		}
 	case rec.SignCount == 0 && assertionCount == 0:
-		// Synced passkey (iCloud Keychain): both zero. Accept silently and leave
-		// sign_count at 0.
-		if err := s.store.TouchCredentialLastUsed(ctx, tx, rec.CredentialID, now); err != nil {
+		// Synced passkey (iCloud Keychain): both zero. Accept silently, leave
+		// sign_count at 0, and refresh backup_state.
+		if err := s.store.TouchCredentialLastUsed(ctx, tx, rec.CredentialID, assertionBS, now); err != nil {
 			return LoginResult{}, err
 		}
 	default:
-		// Normal advance: store the new (higher) counter.
-		if err := s.store.UpdateSignCount(ctx, tx, rec.CredentialID, assertionCount, now); err != nil {
+		// Normal advance: store the new (higher) counter and refresh backup_state.
+		if err := s.store.UpdateSignCount(ctx, tx, rec.CredentialID, assertionCount, assertionBS, now); err != nil {
 			return LoginResult{}, err
 		}
 	}
@@ -292,9 +294,9 @@ func (s *LoginService) Logout(ctx context.Context, token, ip string) error {
 }
 
 // credentialFromRecord rebuilds a webauthn.Credential from a stored row for use
-// in assertion verification. Flags are left at their zero value: the schema does
-// not persist backup-eligible/state, and synced platform passkeys produced by
-// the relying party's own registration carry the same (unset) flags here.
+// in assertion verification. BackupEligible and BackupState are restored from
+// the stored record: go-webauthn's ValidateLogin treats BE as immutable and
+// will reject an assertion whose BE flag does not match the stored value.
 func credentialFromRecord(rec CredentialRecord) webauthn.Credential {
 	c := webauthn.Credential{
 		ID:        rec.CredentialID,
@@ -304,6 +306,8 @@ func credentialFromRecord(rec CredentialRecord) webauthn.Credential {
 	if len(rec.AAGUID) == 16 {
 		c.Authenticator.AAGUID = append([]byte(nil), rec.AAGUID...)
 	}
+	c.Flags.BackupEligible = rec.BackupEligible
+	c.Flags.BackupState = rec.BackupState
 	return c
 }
 

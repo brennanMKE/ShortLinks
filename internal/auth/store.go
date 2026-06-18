@@ -295,12 +295,14 @@ func (s *Store) UserCount(ctx context.Context, q querier) (int64, error) {
 
 // StoredCredential carries the fields persisted for a registered passkey.
 type StoredCredential struct {
-	UserID       int64
-	CredentialID []byte
-	PublicKey    []byte
-	AAGUID       []byte // raw 16 bytes; nil/empty stored as SQL NULL
-	SignCount    uint32
-	DeviceName   string
+	UserID         int64
+	CredentialID   []byte
+	PublicKey      []byte
+	AAGUID         []byte // raw 16 bytes; nil/empty stored as SQL NULL
+	SignCount      uint32
+	DeviceName     string
+	BackupEligible bool // immutable BE flag from registration; must match on every assertion
+	BackupState    bool // mutable BS flag; updated on each successful login
 }
 
 // InsertCredential stores a passkey_credentials row inside the given querier.
@@ -309,9 +311,11 @@ func (s *Store) InsertCredential(ctx context.Context, q querier, c StoredCredent
 	aaguid := aaguidArg(c.AAGUID)
 	if _, err := q.Exec(ctx,
 		`INSERT INTO passkey_credentials
-		     (user_id, credential_id, public_key, aaguid, sign_count, device_name, created_at, last_used_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
-		c.UserID, c.CredentialID, c.PublicKey, aaguid, int64(c.SignCount), c.DeviceName, now,
+		     (user_id, credential_id, public_key, aaguid, sign_count, device_name,
+		      backup_eligible, backup_state, created_at, last_used_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)`,
+		c.UserID, c.CredentialID, c.PublicKey, aaguid, int64(c.SignCount), c.DeviceName,
+		c.BackupEligible, c.BackupState, now,
 	); err != nil {
 		return fmt.Errorf("auth: inserting credential: %w", err)
 	}
@@ -447,18 +451,21 @@ func (s *Store) LookupUserByEmail(ctx context.Context, email string) (AccountByE
 // CredentialRecord carries the stored fields of a passkey needed to verify an
 // assertion and apply the sign_count rules.
 type CredentialRecord struct {
-	UserID       int64
-	CredentialID []byte
-	PublicKey    []byte
-	AAGUID       []byte // raw 16 bytes; NULL in the DB decodes to nil
-	SignCount    uint32
+	UserID         int64
+	CredentialID   []byte
+	PublicKey      []byte
+	AAGUID         []byte // raw 16 bytes; NULL in the DB decodes to nil
+	SignCount      uint32
+	BackupEligible bool // immutable BE flag; must be re-presented correctly on every assertion
+	BackupState    bool // mutable BS flag; last-seen value from the stored row
 }
 
 // CredentialsForUser loads every stored passkey for an account. Used to build
 // the allowCredentials list and the login webauthn.User's credential set.
 func (s *Store) CredentialsForUser(ctx context.Context, userID int64) ([]CredentialRecord, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT user_id, credential_id, public_key, aaguid, sign_count
+		`SELECT user_id, credential_id, public_key, aaguid, sign_count,
+		        backup_eligible, backup_state
 		   FROM passkey_credentials WHERE user_id = $1`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("auth: loading credentials for user: %w", err)
@@ -476,11 +483,13 @@ func (s *Store) CredentialByID(ctx context.Context, credentialID []byte) (Creden
 	var rec CredentialRecord
 	var active bool
 	err := s.pool.QueryRow(ctx,
-		`SELECT c.user_id, c.credential_id, c.public_key, c.aaguid, c.sign_count, u.active
+		`SELECT c.user_id, c.credential_id, c.public_key, c.aaguid, c.sign_count,
+		        c.backup_eligible, c.backup_state, u.active
 		   FROM passkey_credentials c
 		   JOIN users u ON u.id = c.user_id
 		  WHERE c.credential_id = $1`, credentialID,
-	).Scan(&rec.UserID, &rec.CredentialID, &rec.PublicKey, &rec.AAGUID, &rec.SignCount, &active)
+	).Scan(&rec.UserID, &rec.CredentialID, &rec.PublicKey, &rec.AAGUID, &rec.SignCount,
+		&rec.BackupEligible, &rec.BackupState, &active)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return CredentialRecord{}, false, ErrCredentialNotFound
@@ -491,14 +500,16 @@ func (s *Store) CredentialByID(ctx context.Context, credentialID []byte) (Creden
 }
 
 // scanCredentialRecords decodes credential rows, mapping a NULL/zero AAGUID UUID
-// back to nil bytes.
+// back to nil bytes. The SELECT must include backup_eligible and backup_state
+// columns (added by migration 000009) immediately after sign_count.
 func scanCredentialRecords(rows pgx.Rows) ([]CredentialRecord, error) {
 	var out []CredentialRecord
 	for rows.Next() {
 		var rec CredentialRecord
 		var aaguid *[16]byte
 		var signCount int64
-		if err := rows.Scan(&rec.UserID, &rec.CredentialID, &rec.PublicKey, &aaguid, &signCount); err != nil {
+		if err := rows.Scan(&rec.UserID, &rec.CredentialID, &rec.PublicKey, &aaguid, &signCount,
+			&rec.BackupEligible, &rec.BackupState); err != nil {
 			return nil, fmt.Errorf("auth: scanning credential row: %w", err)
 		}
 		if aaguid != nil {
@@ -552,23 +563,27 @@ func (s *Store) ConsumeAuthenticationChallenge(ctx context.Context, q querier, c
 	return nil
 }
 
-// UpdateSignCount writes a new sign_count and last_used_at for a credential.
-func (s *Store) UpdateSignCount(ctx context.Context, q querier, credentialID []byte, signCount uint32, now time.Time) error {
+// UpdateSignCount writes a new sign_count, last_used_at, and backup_state for a
+// credential. backup_state (BS) is mutable — it can change between assertions —
+// so it is updated alongside the counter on every normal login advance.
+func (s *Store) UpdateSignCount(ctx context.Context, q querier, credentialID []byte, signCount uint32, backupState bool, now time.Time) error {
 	if _, err := q.Exec(ctx,
-		`UPDATE passkey_credentials SET sign_count = $1, last_used_at = $2 WHERE credential_id = $3`,
-		int64(signCount), now, credentialID,
+		`UPDATE passkey_credentials SET sign_count = $1, backup_state = $2, last_used_at = $3 WHERE credential_id = $4`,
+		int64(signCount), backupState, now, credentialID,
 	); err != nil {
 		return fmt.Errorf("auth: updating sign count: %w", err)
 	}
 	return nil
 }
 
-// TouchCredentialLastUsed updates only last_used_at for a credential, used when
-// the sign_count is left unchanged (the synced 0/0 case or the clone case).
-func (s *Store) TouchCredentialLastUsed(ctx context.Context, q querier, credentialID []byte, now time.Time) error {
+// TouchCredentialLastUsed updates last_used_at and backup_state for a
+// credential, used when the sign_count is left unchanged (the synced 0/0 case
+// or the clone case). backup_state (BS) is mutable and is kept current even
+// when the counter is not advanced.
+func (s *Store) TouchCredentialLastUsed(ctx context.Context, q querier, credentialID []byte, backupState bool, now time.Time) error {
 	if _, err := q.Exec(ctx,
-		`UPDATE passkey_credentials SET last_used_at = $1 WHERE credential_id = $2`,
-		now, credentialID,
+		`UPDATE passkey_credentials SET backup_state = $1, last_used_at = $2 WHERE credential_id = $3`,
+		backupState, now, credentialID,
 	); err != nil {
 		return fmt.Errorf("auth: touching credential last_used_at: %w", err)
 	}

@@ -341,3 +341,153 @@ func lastLoginSet(t *testing.T, pool *pgxpool.Pool, userID int64) bool {
 	}
 	return set
 }
+
+// storedBackupFlags reads the backup_eligible and backup_state columns for a
+// credential, asserting both columns exist (migration 000009 applied).
+func storedBackupFlags(t *testing.T, pool *pgxpool.Pool, credID []byte) (eligible, state bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.QueryRow(ctx,
+		`SELECT backup_eligible, backup_state FROM passkey_credentials WHERE credential_id = $1`,
+		credID).Scan(&eligible, &state); err != nil {
+		t.Fatalf("read backup flags: %v", err)
+	}
+	return eligible, state
+}
+
+// registerWithBackupEligibleAuthenticator is like registerWithAuthenticator but
+// creates a virtualwebauthn.Authenticator with BackupEligible=true and
+// BackupState=true, mimicking an iCloud Keychain / synced passkey. This is the
+// exact scenario that was broken before the fix: registration succeeded but
+// every subsequent login failed with a BE flag inconsistency.
+func registerWithBackupEligibleAuthenticator(t *testing.T, svc *RegistrationService, pool *pgxpool.Pool, email string) registeredAccount {
+	t.Helper()
+	ctx := context.Background()
+
+	if err := svc.StartRegistration(ctx, email, ""); err != nil {
+		t.Fatalf("StartRegistration(%s): %v", email, err)
+	}
+	token := lastPendingToken(t, pool, email)
+	creation, err := svc.VerifyRegistration(ctx, token)
+	if err != nil {
+		t.Fatalf("VerifyRegistration(%s): %v", email, err)
+	}
+
+	rp := virtualwebauthn.RelyingParty{ID: testRPID, Name: "ShortLinks", Origin: testRPOrigin}
+	handle, ok := creation.Response.User.ID.(protocol.URLEncodedBase64)
+	if !ok {
+		t.Fatalf("user.id type = %T, want protocol.URLEncodedBase64", creation.Response.User.ID)
+	}
+	// BackupEligible=true simulates an iCloud Keychain / synced multi-device passkey.
+	authenticator := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{
+		UserHandle:     []byte(handle),
+		BackupEligible: true,
+		BackupState:    true,
+	})
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+
+	optionsJSON, err := json.Marshal(creation)
+	if err != nil {
+		t.Fatalf("marshal options: %v", err)
+	}
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(optionsJSON))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	attestationResponse := virtualwebauthn.CreateAttestationResponse(rp, authenticator, cred, *attOpts)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/register/finish?token="+token,
+		bytes.NewReader([]byte(attestationResponse)))
+	result, err := svc.FinishRegistration(ctx, token, "iCloud Passkey", "", req)
+	if err != nil {
+		t.Fatalf("FinishRegistration(%s): %v", email, err)
+	}
+
+	authenticator.AddCredential(cred)
+	return registeredAccount{user: result.User, rp: rp, authenticator: authenticator, cred: cred}
+}
+
+// TestLogin_BackupEligibleCredentialSucceeds is the primary regression test for
+// issue #0047. Before the fix, go-webauthn's ValidateLogin would reject every
+// assertion from an iCloud Keychain passkey with "Backup Eligible flag
+// inconsistency detected during login validation" because the stored credential
+// was rehydrated with BE=false while the assertion carried BE=true.
+//
+// This test registers with a backup-eligible (BE=true) virtual authenticator,
+// confirms the flags are persisted, and confirms a subsequent login succeeds.
+func TestLogin_BackupEligibleCredentialSucceeds(t *testing.T) {
+	pool := testPool(t)
+	setRegistrationsEnabled(t, pool, true)
+	regSvc := newService(t, pool, &recordingMailer{}, "")
+	loginSvc := newLoginService(t, pool)
+
+	acct := registerWithBackupEligibleAuthenticator(t, regSvc, pool, "icloud@example.com")
+
+	// Confirm the flags were persisted at registration (not just left at DEFAULT FALSE).
+	eligible, state := storedBackupFlags(t, pool, acct.cred.ID)
+	if !eligible {
+		t.Error("backup_eligible = false after registration, want true")
+	}
+	if !state {
+		t.Error("backup_state = false after registration, want true")
+	}
+
+	// This login must succeed — it would have failed before the fix.
+	result, err := driveLogin(t, loginSvc, acct, "")
+	if err != nil {
+		t.Fatalf("FinishLogin with backup-eligible credential: %v", err)
+	}
+	if result.UserID != acct.user.ID {
+		t.Errorf("result UserID = %d, want %d", result.UserID, acct.user.ID)
+	}
+	if result.SessionToken == "" {
+		t.Fatal("session token is empty")
+	}
+	if n := countSessions(t, pool, result.SessionToken); n != 1 {
+		t.Errorf("sessions for new token = %d, want 1", n)
+	}
+}
+
+// TestLogin_BackupFlagsRoundTripStoreLoad verifies that backup_eligible and
+// backup_state survive a full store→load cycle through InsertCredential /
+// CredentialByID without corruption. This guards against any future regression
+// where the columns are present but not wired to the scan path.
+func TestLogin_BackupFlagsRoundTripStoreLoad(t *testing.T) {
+	pool := testPool(t)
+	setRegistrationsEnabled(t, pool, true)
+	regSvc := newService(t, pool, &recordingMailer{}, "")
+
+	acct := registerWithBackupEligibleAuthenticator(t, regSvc, pool, "roundtrip@example.com")
+
+	store := NewStore(pool)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rec, _, err := store.CredentialByID(ctx, acct.cred.ID)
+	if err != nil {
+		t.Fatalf("CredentialByID: %v", err)
+	}
+	if !rec.BackupEligible {
+		t.Error("CredentialRecord.BackupEligible = false, want true")
+	}
+	if !rec.BackupState {
+		t.Error("CredentialRecord.BackupState = false, want true")
+	}
+
+	// Also verify the flags are returned via CredentialsForUser (used by
+	// allowCredentials + credentialsFromRecords during login start/finish).
+	recs, err := store.CredentialsForUser(ctx, acct.user.ID)
+	if err != nil {
+		t.Fatalf("CredentialsForUser: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("CredentialsForUser returned %d records, want 1", len(recs))
+	}
+	if !recs[0].BackupEligible {
+		t.Error("CredentialsForUser record BackupEligible = false, want true")
+	}
+	if !recs[0].BackupState {
+		t.Error("CredentialsForUser record BackupState = false, want true")
+	}
+}
