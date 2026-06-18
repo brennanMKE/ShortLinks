@@ -1,17 +1,17 @@
 <!--
-  Link Detail view (#0035). Shows the full stats for a single link, read by key
-  from the shared `selectedLinkKey` store (the Dashboard sets it when a row is
-  clicked — there is no URL router, so the key lives in a store).
+  Link Detail view (#0035, #0049). Shows the full stats for a single link, read
+  by key from the shared `selectedLinkKey` store (the Dashboard sets it when a
+  row is clicked — there is no URL router, so the key lives in a store).
 
   On mount it loads GET /api/links/{key} via getLink, surfacing loading / error
   states (a 404 maps to a "not found" message with a Back action). It displays
   the short URL (with a copy-to-clipboard button), destination, title, status
   (active / inactive / denied-with-reason), created + expiry dates, total click
-  count, and the #0030 UTM breakdown (by_source / by_medium / by_campaign,
-  sorted by count desc, with a graceful empty-stats case). A Deactivate action
-  calls deactivateLink and reflects the new status here and in the shared `links`
-  store; it is hidden once the link is inactive/denied. A Back action returns to
-  the dashboard via a store write.
+  count, a clicks-over-time line chart (#0049), and the #0030 UTM breakdown
+  (by_source / by_medium / by_campaign, now as horizontal bar charts with
+  proportional widths). A Deactivate action calls deactivateLink and reflects the
+  new status here and in the shared `links` store; it is hidden once the link is
+  inactive/denied. A Back action returns to the dashboard via a store write.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -19,7 +19,6 @@
   import { getLink, deactivateLink, ApiError } from '../lib/api';
   import { shortUrl, linkStatus } from '../lib/links';
   import {
-    isNoneBucket,
     isEmptyStats,
     utmDimensions,
     statusLabel,
@@ -28,6 +27,8 @@
   import type { LinkDetail } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import ClicksChart from '../lib/ClicksChart.svelte';
+  import UTMBarChart from '../lib/UTMBarChart.svelte';
 
   let loading = $state(true);
   let notFound = $state(false);
@@ -194,6 +195,10 @@
       {/if}
     </Panel>
 
+    <Panel title="Clicks over time">
+      <ClicksChart timeseries={detail.timeseries} days={30} title="Clicks over the last 30 days" />
+    </Panel>
+
     <Panel title="UTM breakdown">
       {#if noStats}
         <p class="text-muted">No click data yet — share this link to start collecting stats.</p>
@@ -202,22 +207,7 @@
           {#each dimensions as dim (dim.dimension)}
             <div class="utm-dim">
               <h3 class="utm-dim-title">{dim.label}</h3>
-              {#if dim.buckets.length === 0}
-                <p class="text-faint">No data.</p>
-              {:else}
-                <table class="utm-table">
-                  <tbody>
-                    {#each dim.buckets as b (b.value)}
-                      <tr>
-                        <td class="utm-value" class:none={isNoneBucket(b)}>
-                          {isNoneBucket(b) ? '(none)' : b.value}
-                        </td>
-                        <td class="num">{b.count}</td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              {/if}
+              <UTMBarChart buckets={dim.buckets} dimension={dim.dimension} label={dim.label} />
             </div>
           {/each}
         </div>
@@ -272,22 +262,12 @@
   }
   .utm-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
     gap: var(--space-5);
   }
   .utm-dim-title {
     margin: 0 0 var(--space-2);
     font-size: var(--fs-md);
     font-weight: 600;
-  }
-  .utm-table {
-    font-size: var(--fs-base);
-  }
-  .utm-value {
-    overflow-wrap: anywhere;
-  }
-  .utm-value.none {
-    color: var(--text-faint);
-    font-style: italic;
   }
 </style>

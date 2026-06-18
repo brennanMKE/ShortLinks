@@ -18,6 +18,11 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
 
+// timeseriesDays is the default look-back window supplied to ClicksOverTime
+// from the link-detail handler. Zero values tell the stats store to apply its
+// own defaults (currently 30 days).
+var zeroTime time.Time
+
 // defaultPerPage is the page size used when ?per_page= is absent, per the issue
 // (#0022) acceptance criteria.
 const defaultPerPage = 20
@@ -72,12 +77,14 @@ type ruleProvider interface {
 }
 
 // statsProvider is the slice of the click-analytics store the links handler
-// needs: the per-link UTM breakdown (#0030). *clicks.StatsStore satisfies it via
-// UTMStatsForLink. It is optional — a nil provider (no stats store wired) omits
-// the utm_stats field from the link-detail response, so the handler stays
-// testable without a DB and degrades gracefully if analytics are not wired.
+// needs: the per-link UTM breakdown (#0030) and the clicks-over-time series
+// (#0049). *clicks.StatsStore satisfies both methods. It is optional — a nil
+// provider (no stats store wired) omits the utm_stats and timeseries fields from
+// the link-detail response, so the handler stays testable without a DB and
+// degrades gracefully if analytics are not wired.
 type statsProvider interface {
 	UTMStatsForLink(ctx context.Context, linkID int64) (clicks.UTMStats, error)
+	ClicksOverTime(ctx context.Context, linkID int64, from, to time.Time) (clicks.TimeseriesResult, error)
 }
 
 // eventPublisher is the slice of the events broker the links handler needs: the
@@ -479,12 +486,13 @@ func (h *LinksHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // linkDetailView is the GET /api/links/{key} body: a single link's fields plus
-// the #0030 UTM analytics breakdown. It embeds linkView so the link fields keep
-// their existing JSON shape, and adds utm_stats. utm_stats is omitted (nil) when
-// no analytics store is wired.
+// the #0030 UTM analytics breakdown and the #0049 clicks-over-time series.
+// It embeds linkView so the link fields keep their existing JSON shape.
+// utm_stats and timeseries are omitted (nil) when no analytics store is wired.
 type linkDetailView struct {
 	linkView
-	UTMStats *clicks.UTMStats `json:"utm_stats,omitempty"`
+	UTMStats   *clicks.UTMStats          `json:"utm_stats,omitempty"`
+	Timeseries *clicks.TimeseriesResult  `json:"timeseries,omitempty"`
 }
 
 // Get handles GET /api/links/{key}. It returns the caller's link detail with its
@@ -520,10 +528,11 @@ func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	detail := linkDetailView{linkView: toLinkView(link)}
 
-	// #0030: enrich with the UTM breakdown when an analytics store is wired. The
-	// link was resolved scoped to the caller above, so passing link.ID here cannot
-	// leak another user's data. A stats failure is fatal to the detail response
-	// (the click_count in the breakdown must agree with the row count).
+	// #0030 / #0049: enrich with the UTM breakdown and clicks-over-time series
+	// when an analytics store is wired. The link was resolved scoped to the caller
+	// above, so passing link.ID here cannot leak another user's data. Stats
+	// failures are fatal to the detail response so the client never sees a partial
+	// or inconsistent analytics payload.
 	if h.stats != nil {
 		st, err := h.stats.UTMStatsForLink(r.Context(), link.ID)
 		if err != nil {
@@ -531,6 +540,15 @@ func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		detail.UTMStats = &st
+
+		// #0049: default time window — zero values let the store apply its own
+		// defaults (30-day look-back ending at the current UTC midnight).
+		ts, err := h.stats.ClicksOverTime(r.Context(), link.ID, zeroTime, zeroTime)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		detail.Timeseries = &ts
 	}
 
 	writeJSON(w, http.StatusOK, detail)

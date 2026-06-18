@@ -53,9 +53,28 @@ export interface ClickStats {
   by_campaign: UTMBucket[];
 }
 
-/** GET /api/links/{key} — link detail with optional UTM breakdown. */
+/**
+ * One day bucket from the clicks-over-time series (internal/clicks/stats.go
+ * `DayBucket`). date is "YYYY-MM-DD" (UTC); count is clicks that day.
+ */
+export interface DayBucket {
+  date: string;  // "YYYY-MM-DD"
+  count: number;
+}
+
+/**
+ * Clicks-over-time series for a link (#0049). Surfaced on the link-detail
+ * response as `timeseries`. days only includes dates with at least one click;
+ * the frontend fills gaps for continuous charts.
+ */
+export interface TimeseriesResult {
+  days: DayBucket[];
+}
+
+/** GET /api/links/{key} — link detail with optional UTM breakdown and timeseries. */
 export interface LinkDetail extends Link {
   utm_stats?: ClickStats;
+  timeseries?: TimeseriesResult;
 }
 
 /**
