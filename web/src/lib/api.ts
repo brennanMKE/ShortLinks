@@ -229,12 +229,50 @@ export function registerFinish(
 }
 
 /**
+ * POST /auth/recover — submit an email to begin account recovery. The server
+ * returns a generic `{message}` (200) whether or not the email is registered,
+ * so this endpoint never leaks account existence. Called by the Login view's
+ * recover sub-form.
+ */
+export function recoverStart(email: string): Promise<{ message: string }> {
+  return apiPost<{ message: string }>('/auth/recover', { email });
+}
+
+/**
  * GET /auth/recover/verify?token=… — exchange the recovery magic-link token
  * for WebAuthn `PublicKeyCredentialCreationOptions`. Called by the
- * recover-verify landing view (#0041). The ceremony and finish POST are #0043.
+ * recover-verify landing view. The response shape is identical to
+ * `registerVerify`; the helpers in `webauthn.ts` are reused verbatim.
  */
-export function recoverVerify(token: string): Promise<unknown> {
-  return apiGet<unknown>(`/auth/recover/verify?token=${encodeURIComponent(token)}`);
+export function recoverVerify(token: string): Promise<ServerCredentialCreation> {
+  return apiGet<ServerCredentialCreation>(
+    `/auth/recover/verify?token=${encodeURIComponent(token)}`,
+  );
+}
+
+/**
+ * POST /auth/recover/finish?token=…&device_name=… — submit the serialized
+ * attestation to complete account recovery. The token and optional device_name
+ * are query parameters (the handler reads them from the URL so the raw
+ * attestation body is passed untouched to go-webauthn). On success the server
+ * adds the new credential to the EXISTING account, sets the session cookie,
+ * and returns `{user_id}` (differs from `registerFinish` which returns
+ * `{id, email, is_admin}`). Errors: 400 for invalid/expired token or failed
+ * attestation.
+ *
+ * See: internal/handlers/auth.go (RecoverFinish), internal/auth/recovery.go
+ * (FinishRecovery).
+ */
+export function recoverFinish(
+  token: string,
+  attestation: AttestationFinishPayload,
+  deviceName?: string,
+): Promise<{ user_id: number }> {
+  let path = `/auth/recover/finish?token=${encodeURIComponent(token)}`;
+  if (deviceName) {
+    path += `&device_name=${encodeURIComponent(deviceName)}`;
+  }
+  return apiPost<{ user_id: number }>(path, attestation);
 }
 
 // ── Account (passkeys) ──────────────────────────────────────────────────────

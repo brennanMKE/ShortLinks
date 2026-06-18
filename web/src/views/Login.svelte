@@ -28,6 +28,7 @@
     loginStart,
     loginFinish,
     registerStart,
+    recoverStart,
     ApiError,
   } from '../lib/api';
   import {
@@ -46,6 +47,13 @@
   let registering = $state(false);
   let registerError = $state<string | null>(null);
   let registerSent = $state(false);
+
+  // Recovery sub-form state.
+  let showRecover = $state(false);
+  let recoverEmail = $state('');
+  let recovering = $state(false);
+  let recoverError = $state<string | null>(null);
+  let recoverSent = $state(false);
 
   // AbortController for the background conditional-UI get(); aborted on unmount
   // (or when an explicit Sign in starts) so we never leave a dangling ceremony.
@@ -169,6 +177,31 @@
     }
   }
 
+  // ── Recovery sub-form ────────────────────────────────────────────────────
+  async function handleRecover() {
+    if (recovering) return;
+    recovering = true;
+    recoverError = null;
+    try {
+      await recoverStart(recoverEmail);
+      recoverSent = true;
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.status === 429) {
+          recoverError = 'Too many requests. Please wait and try again.';
+        } else if (err.status === 400) {
+          recoverError = 'Please enter a valid email address.';
+        } else {
+          recoverError = err.message || 'Could not start account recovery.';
+        }
+      } else {
+        recoverError = 'Could not reach the server. Check your connection.';
+      }
+    } finally {
+      recovering = false;
+    }
+  }
+
   onMount(() => {
     startConditional();
   });
@@ -266,6 +299,61 @@
         </form>
       {/if}
     </div>
+
+    <div class="recover-entry">
+      {#if !showRecover}
+        <button
+          type="button"
+          class="link"
+          onclick={() => {
+            showRecover = true;
+          }}
+        >
+          Lost your passkey? Recover account
+        </button>
+      {:else if recoverSent}
+        <p class="notice" role="status">
+          If that email is registered, a recovery link has been sent.
+        </p>
+      {:else}
+        <form
+          class="recover-form"
+          onsubmit={(e) => {
+            e.preventDefault();
+            handleRecover();
+          }}
+        >
+          <label for="recover-email">Recover your account</label>
+          <input
+            id="recover-email"
+            type="email"
+            name="recover-email"
+            autocomplete="email"
+            placeholder="you@example.com"
+            bind:value={recoverEmail}
+            disabled={recovering}
+          />
+          <div class="recover-actions">
+            <button type="submit" disabled={recovering}>
+              {recovering ? 'Sending…' : 'Send recovery link'}
+            </button>
+            <button
+              type="button"
+              class="link"
+              onclick={() => {
+                showRecover = false;
+                recoverError = null;
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {#if recoverError}
+            <p class="error" role="alert">{recoverError}</p>
+          {/if}
+        </form>
+      {/if}
+    </div>
   </section>
 </main>
 
@@ -332,6 +420,16 @@
     margin-top: 1.25rem;
     padding-top: 1rem;
     border-top: 1px solid #eee;
+  }
+  .recover-entry {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #eee;
+  }
+  .recover-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
   }
   .register-actions {
     display: flex;
