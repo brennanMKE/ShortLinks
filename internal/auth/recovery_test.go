@@ -332,3 +332,147 @@ func credentialOwner(t *testing.T, pool *pgxpool.Pool, credentialID []byte) int6
 func userCount(t *testing.T, pool *pgxpool.Pool) int {
 	return scanCount(t, pool, `SELECT COUNT(*) FROM users`)
 }
+
+// userIsAdmin returns the is_admin flag for the given user id.
+func userIsAdmin(t *testing.T, pool *pgxpool.Pool, userID int64) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var isAdmin bool
+	if err := pool.QueryRow(ctx,
+		`SELECT is_admin FROM users WHERE id = $1`, userID).Scan(&isAdmin); err != nil {
+		t.Fatalf("fetch is_admin for user %d: %v", userID, err)
+	}
+	return isAdmin
+}
+
+// userIDForEmail returns the id of the users row with the given email.
+func userIDForEmail(t *testing.T, pool *pgxpool.Pool, email string) int64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var id int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM users WHERE email = $1`, email).Scan(&id); err != nil {
+		t.Fatalf("fetch user id for %s: %v", email, err)
+	}
+	return id
+}
+
+// TestRecoveryEndToEnd_AdminBootstrap_ZeroCredentials is the bootstrap-path proof.
+// It simulates what happens on a fresh install:
+//
+//  1. The seed creates an admin user row (is_admin=true, active=true, ZERO passkeys).
+//  2. The admin uses the "Recover account" flow to enroll a passkey.
+//  3. After finish: a passkey_credentials row exists for the admin, is_admin is still
+//     true, and a session was created — without creating a second users row.
+//
+// This verifies that FinishRecovery adds a credential to a ZERO-credential account and
+// does NOT alter is_admin, satisfying the #0044 acceptance criteria for the recovery
+// bootstrap model.
+func TestRecoveryEndToEnd_AdminBootstrap_ZeroCredentials(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	const adminEmail = "admin@example.com"
+
+	// Simulate the seed: insert the admin user row with is_admin=TRUE, no passkeys.
+	// insertUser (from registration_test.go) inserts an active user; we pass admin=true.
+	insertUser(t, pool, adminEmail, true)
+	adminID := userIDForEmail(t, pool, adminEmail)
+
+	// Pre-condition: zero credentials.
+	if n := countCredentials(t, pool, adminID); n != 0 {
+		t.Fatalf("pre-condition: credentials = %d, want 0 (seeded admin has no passkey)", n)
+	}
+	// Pre-condition: is_admin is true.
+	if !userIsAdmin(t, pool, adminID) {
+		t.Fatal("pre-condition: seeded admin is_admin = false, want true")
+	}
+
+	// --- Run the full recovery ceremony (start → verify → finish). ---
+	mailer := &recoveryRecordingMailer{}
+	recSvc := newRecoveryService(t, pool, mailer)
+
+	// Step 1: start — must send recovery email even though there are zero credentials.
+	if err := recSvc.StartRecovery(ctx, adminEmail, ""); err != nil {
+		t.Fatalf("StartRecovery: %v", err)
+	}
+	_, _, _, recToken := mailer.recorded()
+	if recToken == "" {
+		t.Fatalf("recovery token not captured from mailer (StartRecovery may have silently skipped)")
+	}
+
+	// Step 2: verify — must succeed for a zero-credential account.
+	recCreation, err := recSvc.VerifyRecovery(ctx, recToken)
+	if err != nil {
+		t.Fatalf("VerifyRecovery: %v", err)
+	}
+
+	// Step 3: finish — produce a real attestation with a virtual authenticator.
+	rp := virtualwebauthn.RelyingParty{ID: testRPID, Name: "ShortLinks", Origin: testRPOrigin}
+	auth := virtualwebauthn.NewAuthenticator()
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+
+	recOptionsJSON, err := json.Marshal(recCreation)
+	if err != nil {
+		t.Fatalf("marshal recovery options: %v", err)
+	}
+	attOpts, err := virtualwebauthn.ParseAttestationOptions(string(recOptionsJSON))
+	if err != nil {
+		t.Fatalf("ParseAttestationOptions: %v", err)
+	}
+	attResp := virtualwebauthn.CreateAttestationResponse(rp, auth, cred, *attOpts)
+	recReq := httptest.NewRequest(http.MethodPost,
+		"/auth/recover/finish?token="+recToken+"&device_name=Admin+Passkey",
+		bytes.NewReader([]byte(attResp)))
+
+	recResult, err := recSvc.FinishRecovery(ctx, recToken, "Admin Passkey", "", recReq)
+	if err != nil {
+		t.Fatalf("FinishRecovery: %v", err)
+	}
+
+	// The recovery session belongs to the seeded admin user.
+	if recResult.UserID != adminID {
+		t.Errorf("recovery user_id = %d, want seeded admin %d", recResult.UserID, adminID)
+	}
+	if recResult.SessionToken == "" {
+		t.Error("recovery session token is empty")
+	}
+
+	// KEY assertion 1: a passkey_credentials row now exists.
+	if n := countCredentials(t, pool, adminID); n != 1 {
+		t.Errorf("after recovery: credentials = %d, want 1 (first passkey enrolled)", n)
+	}
+
+	// KEY assertion 2: the new credential belongs to the admin user.
+	if !credentialExists(t, pool, cred.ID) {
+		t.Error("credential was not stored after recovery")
+	}
+	if got := credentialOwner(t, pool, cred.ID); got != adminID {
+		t.Errorf("credential owner = %d, want admin user %d", got, adminID)
+	}
+
+	// KEY assertion 3: is_admin is still true (FinishRecovery must not alter it).
+	if !userIsAdmin(t, pool, adminID) {
+		t.Error("is_admin = false after recovery; FinishRecovery must preserve admin status")
+	}
+
+	// KEY assertion 4: a session was created.
+	if n := countSessions(t, pool, recResult.SessionToken); n != 1 {
+		t.Errorf("sessions rows for recovery token = %d, want 1", n)
+	}
+
+	// No second user row was created — recovery never creates users.
+	if n := userCount(t, pool); n != 1 {
+		t.Errorf("users rows = %d, want 1 (recovery must not create a new user)", n)
+	}
+
+	// Recovery token and challenge were cleaned up.
+	if n := countPending(t, pool, adminEmail); n != 0 {
+		t.Errorf("pending_registrations rows after recovery = %d, want 0", n)
+	}
+	if n := countChallenges(t, pool, recToken); n != 0 {
+		t.Errorf("webauthn_challenges rows after recovery = %d, want 0", n)
+	}
+}

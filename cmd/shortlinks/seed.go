@@ -57,6 +57,7 @@ func seed() error {
 
 	fmt.Printf("Seed admin: %s (id=%d)\n", email, adminID)
 	fmt.Printf("Seed link: %s%s -> %s\n", seedLinkPrefix, key, seedDestination)
+	fmt.Println("Hint: to enroll the admin passkey, use \"Recover account\" on the login page (not Register).")
 	return nil
 }
 

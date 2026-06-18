@@ -162,7 +162,7 @@ Fill in every value. The variables present in `.env.example` are:
 | `EMAIL_FROM` | From address for verification/recovery email, e.g. `ShortLinks <noreply@sstools.co>`. |
 | `CACHE_MAX_COST` | Max cached redirect entries (default `10000`). |
 | `CACHE_TTL_SECONDS` | Redirect cache entry TTL in seconds (default `300`). |
-| `ADMIN_EMAIL` | Email of the first admin. When the first user registers with this address, they are promoted to admin. Used only once. |
+| `ADMIN_EMAIL` | Email of the admin account. The `seed` command creates this user row with `is_admin = true`; the admin then enrolls a passkey via the **Recover account** flow (see "First admin login" below). Also used to promote any future registrant with this email to admin. |
 
 Generate the session secret with:
 
@@ -292,19 +292,45 @@ curl -fsS https://go.sstools.co/health
 
 ---
 
-## 10. First login
+## 10. First admin login
+
+The `seed` command (step 6) creates the admin user row (`ADMIN_EMAIL`,
+`is_admin = true`, `active = true`) but does **not** enroll a passkey. To
+obtain the first passkey you must use the **Recover account** flow — not the
+Register flow. This is by design: registration rejects an already-registered
+email, so trying to register `ADMIN_EMAIL` after the seed silently does nothing.
+
+### Why the Recover account flow
+
+Recovery adds a passkey to an **existing** account without creating a new user
+row, and it does not check the `registrations_enabled` gate. It is the correct
+path for any account that already exists but has no passkey yet — including the
+seeded admin.
+
+### Steps
 
 1. Open `https://go.sstools.co` in a browser.
-2. Register an account using the **`ADMIN_EMAIL`** address you set in
-   `/etc/shortlinks/config.env`. Because no users exist yet and the email
-   matches `ADMIN_EMAIL`, this first account is promoted to admin
-   (`is_admin = true`).
-3. Complete the email verification magic link, then the device passkey ceremony
-   (Touch ID / Face ID / iCloud Keychain). WebAuthn requires HTTPS, which the
-   Let's Encrypt step above provides.
-4. You are redirected to the dashboard. From the Admin view you can open
-   registration for additional users (`registrations_enabled`), manage URL
-   filter rules, and review the audit log.
+2. On the login page, click **"Recover account / lost passkey"** (below the
+   main login form).
+3. Enter the `ADMIN_EMAIL` address and submit. The page shows a generic
+   confirmation — no account-existence information is revealed.
+4. Check your inbox for the recovery email. **Email delivery must be working**
+   (SES credentials configured in `/etc/shortlinks/config.env`) before this
+   step will succeed; see issue #0045 for SES setup.
+5. Click the link in the email. The browser opens the recovery ceremony page,
+   which calls `navigator.credentials.create()` to enroll a new passkey (Touch
+   ID / Face ID / iCloud Keychain). WebAuthn requires HTTPS — the Let's Encrypt
+   certificate from step 9 is required.
+6. After the passkey ceremony completes you are redirected to the dashboard as
+   the admin user. `is_admin` is preserved throughout recovery; the admin's
+   user row is unchanged.
+
+### Enabling registration for other users
+
+`registrations_enabled` defaults to `false`. Once you are logged in as admin,
+open **Admin → Settings** and toggle it on before inviting additional users to
+register. Non-admin users use the **Register** form (not Recover account) and
+must receive an email verification link to complete their enrollment.
 
 ---
 
