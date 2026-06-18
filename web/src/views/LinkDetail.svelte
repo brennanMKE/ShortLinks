@@ -12,11 +12,6 @@
   calls deactivateLink and reflects the new status here and in the shared `links`
   store; it is hidden once the link is inactive/denied. A Back action returns to
   the dashboard via a store write.
-
-  All non-trivial pure logic (UTM sorting/formatting, empty-stats detection,
-  status-label derivation, date formatting) lives in lib/linkDetail.ts and is
-  unit-tested there. We match the Svelte 5 runes + error-handling style of
-  Dashboard.svelte / Login.svelte.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -31,10 +26,10 @@
     formatDate,
   } from '../lib/linkDetail';
   import type { LinkDetail } from '../lib/types';
+  import Button from '../lib/Button.svelte';
+  import Panel from '../lib/Panel.svelte';
 
   let loading = $state(true);
-  // `notFound` is the 404 case (deleted / never existed / not owned); `loadError`
-  // is any other failure. They render different copy.
   let notFound = $state(false);
   let loadError = $state<string | null>(null);
   let detail = $state<LinkDetail | null>(null);
@@ -42,7 +37,6 @@
   let deactivating = $state(false);
   let copied = $state(false);
 
-  // Derived display values (recomputed when `detail` changes).
   const status = $derived(detail ? linkStatus(detail) : 'active');
   const shareUrl = $derived(detail ? shortUrl(detail.key) : '');
   const dimensions = $derived(detail ? utmDimensions(detail.utm_stats) : []);
@@ -81,7 +75,7 @@
         copied = false;
       }, 1500);
     } catch {
-      // Clipboard may be unavailable (insecure context / permissions); ignore.
+      // Clipboard may be unavailable; ignore.
     }
   }
 
@@ -91,9 +85,7 @@
     deactivating = true;
     try {
       await deactivateLink(key);
-      // Reflect the soft-delete locally without a refetch…
       if (detail) detail = { ...detail, active: false };
-      // …and in the shared dashboard list so the row updates when we go back.
       links.update((cur) => cur.map((l) => (l.key === key ? { ...l, active: false } : l)));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -101,7 +93,6 @@
         currentView.set('login');
         return;
       }
-      // Other failures leave the displayed status unchanged; the user can retry.
       loadError = 'Could not deactivate this link. Please try again.';
     } finally {
       deactivating = false;
@@ -116,8 +107,6 @@
   onMount(() => {
     const key = $selectedLinkKey;
     if (!key) {
-      // No link selected (e.g. a direct navigation) — treat as not found so the
-      // user gets a Back action rather than a perpetual spinner.
       loading = false;
       notFound = true;
       return;
@@ -126,46 +115,54 @@
   });
 </script>
 
-<div class="detail">
-  <header class="topbar">
-    <button type="button" class="back" onclick={goDashboard}>&larr; Dashboard</button>
-    <h1 class="wordmark">Link detail</h1>
+<div class="app-shell detail-shell">
+  <header class="app-header">
+    <Button onclick={goDashboard}>&larr; Dashboard</Button>
+    <h1 class="app-title">Link detail</h1>
   </header>
 
   {#if loading}
-    <p class="muted" role="status">Loading link…</p>
+    <p class="text-muted" role="status">Loading link…</p>
   {:else if notFound}
-    <section class="card">
-      <h2>Link not found</h2>
-      <p class="muted">This link no longer exists, or you don't have access to it.</p>
-      <button type="button" class="primary" onclick={goDashboard}>Back to dashboard</button>
-    </section>
+    <Panel title="Link not found">
+      <p class="text-muted">This link no longer exists, or you don't have access to it.</p>
+      <Button variant="primary" onclick={goDashboard}>Back to dashboard</Button>
+    </Panel>
   {:else if loadError && !detail}
-    <section class="card">
-      <p class="error" role="alert">{loadError}</p>
+    <Panel>
+      <p class="text-error" role="alert">{loadError}</p>
       {#if $selectedLinkKey}
-        <button type="button" class="primary" onclick={() => load($selectedLinkKey!)}>Retry</button>
+        <Button variant="primary" onclick={() => load($selectedLinkKey!)}>Retry</Button>
       {/if}
-    </section>
+    </Panel>
   {:else if detail}
-    <section class="card">
+    <Panel>
       <div class="title-row">
-        <h2>{detail.title || 'Untitled link'}</h2>
-        <span class="badge {status}">{statusLabel(detail)}</span>
+        <h2 class="detail-title">{detail.title || 'Untitled link'}</h2>
+        <span
+          class="badge"
+          class:badge-success={status === 'active'}
+          class:badge-danger={status === 'denied'}
+          class:badge-muted={status === 'inactive'}
+        >
+          {statusLabel(detail)}
+        </span>
       </div>
 
       <dl class="fields">
         <dt>Short URL</dt>
-        <dd class="short-url-row">
-          <a class="short-url" href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a>
-          <button type="button" class="copy" onclick={copyShortUrl}>
-            {copied ? 'Copied!' : 'Copy'}
-          </button>
+        <dd>
+          <div class="row">
+            <a class="short-url" href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a>
+            <Button variant="subtle" onclick={copyShortUrl}>
+              {copied ? 'Copied!' : 'Copy'}
+            </Button>
+          </div>
         </dd>
 
         <dt>Destination</dt>
         <dd>
-          <a class="dest" href={detail.destination_url} target="_blank" rel="noreferrer">
+          <a class="dest-link" href={detail.destination_url} target="_blank" rel="noreferrer">
             {detail.destination_url}
           </a>
         </dd>
@@ -181,32 +178,32 @@
       </dl>
 
       {#if loadError}
-        <p class="error" role="alert">{loadError}</p>
+        <p class="text-error" role="alert">{loadError}</p>
       {/if}
 
       {#if canDeactivate}
-        <button
-          type="button"
-          class="danger"
-          disabled={deactivating}
-          onclick={handleDeactivate}
-        >
-          {deactivating ? 'Deactivating…' : 'Deactivate link'}
-        </button>
+        <div style="margin-top: var(--space-3);">
+          <Button
+            variant="danger"
+            disabled={deactivating}
+            onclick={handleDeactivate}
+          >
+            {deactivating ? 'Deactivating…' : 'Deactivate link'}
+          </Button>
+        </div>
       {/if}
-    </section>
+    </Panel>
 
-    <section class="card">
-      <h2>UTM breakdown</h2>
+    <Panel title="UTM breakdown">
       {#if noStats}
-        <p class="muted">No click data yet — share this link to start collecting stats.</p>
+        <p class="text-muted">No click data yet — share this link to start collecting stats.</p>
       {:else}
         <div class="utm-grid">
           {#each dimensions as dim (dim.dimension)}
             <div class="utm-dim">
-              <h3>{dim.label}</h3>
+              <h3 class="utm-dim-title">{dim.label}</h3>
               {#if dim.buckets.length === 0}
-                <p class="muted small">No data.</p>
+                <p class="text-faint">No data.</p>
               {:else}
                 <table class="utm-table">
                   <tbody>
@@ -225,178 +222,72 @@
           {/each}
         </div>
       {/if}
-    </section>
+    </Panel>
   {/if}
 </div>
 
 <style>
-  .detail {
-    max-width: 48rem;
-    margin: 0 auto;
-    padding: 1rem;
-  }
-  .topbar {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .wordmark {
-    font-size: 1.125rem;
-    margin: 0;
-  }
-  .back {
-    background: none;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    padding: 0.375rem 0.75rem;
-    cursor: pointer;
-    font-size: 0.875rem;
-  }
-  .card {
-    border: 1px solid #e2e2e2;
-    border-radius: 0.5rem;
-    padding: 1.25rem;
-    margin-bottom: 1.5rem;
-  }
-  .card h2 {
-    margin: 0 0 1rem;
-    font-size: 1.125rem;
+  .detail-shell {
+    max-width: 760px;
   }
   .title-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 1rem;
+    gap: var(--space-4);
+    margin-bottom: var(--space-4);
   }
-  .title-row h2 {
+  .detail-title {
+    font-size: var(--fs-lg);
+    font-weight: 600;
     margin: 0;
   }
   .fields {
     display: grid;
     grid-template-columns: 9rem 1fr;
-    gap: 0.5rem 1rem;
-    margin: 0 0 1rem;
+    gap: var(--space-2) var(--space-4);
+    margin: 0 0 var(--space-3);
   }
   .fields dt {
-    color: #666;
+    color: var(--text-muted);
     font-weight: 600;
-    font-size: 0.8125rem;
+    font-size: var(--fs-sm);
     align-self: center;
   }
   .fields dd {
     margin: 0;
     overflow-wrap: anywhere;
   }
-  .short-url-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-  }
   .short-url {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #1f6feb;
+    font-family: var(--font-mono);
+    color: var(--accent);
     word-break: break-all;
   }
-  .dest {
-    color: #1f6feb;
+  .dest-link {
+    color: var(--accent);
     word-break: break-all;
-  }
-  .copy {
-    border: 1px solid #1f6feb;
-    background: #fff;
-    color: #1f6feb;
-    border-radius: 0.375rem;
-    padding: 0.25rem 0.625rem;
-    font-size: 0.8125rem;
-    cursor: pointer;
   }
   .num {
     font-variant-numeric: tabular-nums;
   }
-  .muted {
-    color: #888;
-  }
-  .muted.small {
-    font-size: 0.8125rem;
-  }
-  .badge {
-    display: inline-block;
-    padding: 0.125rem 0.5rem;
-    border-radius: 1rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    white-space: nowrap;
-  }
-  .badge.active {
-    background: #e6f4ea;
-    color: #1a7f37;
-  }
-  .badge.inactive {
-    background: #f0f0f0;
-    color: #777;
-  }
-  .badge.denied {
-    background: #fbe9e7;
-    color: #c0362c;
-  }
-  .primary {
-    margin-top: 0.5rem;
-    padding: 0.5rem 0.875rem;
-    border: none;
-    border-radius: 0.375rem;
-    background: #1f6feb;
-    color: #fff;
-    font-size: 0.9375rem;
-    cursor: pointer;
-  }
-  .danger {
-    margin-top: 0.5rem;
-    padding: 0.5rem 0.875rem;
-    border: 1px solid #c0362c;
-    border-radius: 0.375rem;
-    background: #fff;
-    color: #c0362c;
-    font-size: 0.9375rem;
-    cursor: pointer;
-  }
-  .danger:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
   .utm-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-    gap: 1.25rem;
+    gap: var(--space-5);
   }
-  .utm-dim h3 {
-    margin: 0 0 0.5rem;
-    font-size: 0.9375rem;
+  .utm-dim-title {
+    margin: 0 0 var(--space-2);
+    font-size: var(--fs-md);
+    font-weight: 600;
   }
   .utm-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.875rem;
-  }
-  .utm-table td {
-    padding: 0.25rem 0.25rem;
-    border-bottom: 1px solid #eee;
-  }
-  .utm-table td.num {
-    text-align: right;
+    font-size: var(--fs-base);
   }
   .utm-value {
     overflow-wrap: anywhere;
   }
   .utm-value.none {
-    color: #999;
+    color: var(--text-faint);
     font-style: italic;
-  }
-  .error {
-    color: #c0362c;
-    font-size: 0.875rem;
-    margin: 0.5rem 0;
   }
 </style>

@@ -36,6 +36,8 @@
     serializeAssertion,
     conditionalMediationAvailable,
   } from '../lib/webauthn';
+  import Button from '../lib/Button.svelte';
+  import Panel from '../lib/Panel.svelte';
 
   let email = $state('');
   let signingIn = $state(false);
@@ -62,9 +64,6 @@
   const canSubmit = $derived(!signingIn);
 
   // ── Shared ceremony runner ──────────────────────────────────────────────
-  // Drives a single navigator.credentials.get() and posts the result. Used by
-  // both the conditional (autofill) and modal (button) paths; mediation and the
-  // optional email are the only differences.
   async function runCeremony(
     mediation: CredentialMediationRequirement,
     withEmail: string | undefined,
@@ -80,7 +79,6 @@
     })) as PublicKeyCredential | null;
 
     if (!credential) {
-      // User dismissed the prompt or no credential was produced.
       return false;
     }
 
@@ -99,8 +97,6 @@
       return err.message || 'Sign in failed. Please try again.';
     }
     if (err instanceof DOMException) {
-      // AbortError is benign (we cancelled the background ceremony); NotAllowed
-      // is the user dismissing the OS prompt.
       if (err.name === 'AbortError') return '';
       if (err.name === 'NotAllowedError') return '';
       return 'Passkey prompt was cancelled or unavailable.';
@@ -111,7 +107,6 @@
   // ── Explicit "Sign in" (modal, email-first) ──────────────────────────────
   async function handleSignIn() {
     if (signingIn) return;
-    // Cancel any in-flight conditional ceremony so the modal one can take over.
     conditionalAbort?.abort();
     conditionalAbort = null;
 
@@ -127,7 +122,6 @@
       if (msg) loginError = msg;
     } finally {
       signingIn = false;
-      // Re-arm the background autofill ceremony if the user is still here.
       if ($currentView === 'login') startConditional();
     }
   }
@@ -141,10 +135,8 @@
     try {
       await runCeremony('conditional', undefined, controller.signal);
     } catch (err) {
-      // Conditional UI failures are silent: the user can still use the button.
       const msg = describeLoginError(err);
       if (msg && !controller.signal.aborted) {
-        // Only surface a genuine (non-abort) server/network error.
         loginError = msg;
       }
     }
@@ -212,238 +204,178 @@
   });
 </script>
 
-<main class="login">
+<main class="login-shell">
   <header class="brand">
-    <h1>go.sstools.co</h1>
-    <p class="tagline">Sign in with your passkey</p>
+    <h1 class="brand-title">go.sstools.co</h1>
+    <p class="text-muted tagline">Sign in with your passkey</p>
   </header>
 
-  <section class="card">
+  <Panel>
     <form
+      class="sign-in-form"
       onsubmit={(e) => {
         e.preventDefault();
         handleSignIn();
       }}
     >
-      <label for="login-email">Email</label>
-      <input
-        id="login-email"
-        type="email"
-        name="email"
-        autocomplete="username webauthn"
-        placeholder="you@example.com"
-        bind:value={email}
-        disabled={signingIn}
-      />
+      <div class="field">
+        <label for="login-email">Email</label>
+        <input
+          id="login-email"
+          type="email"
+          name="email"
+          autocomplete="username webauthn"
+          placeholder="you@example.com"
+          bind:value={email}
+          disabled={signingIn}
+        />
+      </div>
 
-      <button type="submit" disabled={!canSubmit}>
+      <Button type="submit" variant="primary" disabled={!canSubmit}>
         {signingIn ? 'Signing in…' : 'Sign in'}
-      </button>
+      </Button>
 
       {#if loginError}
-        <p class="error" role="alert">{loginError}</p>
+        <p class="text-error" role="alert">{loginError}</p>
       {/if}
     </form>
 
-    <div class="register-entry">
+    <hr class="divider" />
+
+    <div class="sub-section">
       {#if !showRegister}
-        <button
-          type="button"
-          class="link"
+        <Button
+          variant="subtle"
           onclick={() => {
             showRegister = true;
           }}
         >
           Need an account? Register
-        </button>
+        </Button>
       {:else if registerSent}
-        <p class="notice" role="status">
+        <p class="text-notice" role="status">
           Check your email for a link to finish setting up your account.
         </p>
       {:else}
         <form
-          class="register-form"
           onsubmit={(e) => {
             e.preventDefault();
             handleRegister();
           }}
         >
-          <label for="register-email">Register a new account</label>
-          <input
-            id="register-email"
-            type="email"
-            name="register-email"
-            autocomplete="email"
-            placeholder="you@example.com"
-            bind:value={registerEmail}
-            disabled={registering}
-          />
-          <div class="register-actions">
-            <button type="submit" disabled={registering}>
+          <div class="field">
+            <label for="register-email">Register a new account</label>
+            <input
+              id="register-email"
+              type="email"
+              name="register-email"
+              autocomplete="email"
+              placeholder="you@example.com"
+              bind:value={registerEmail}
+              disabled={registering}
+            />
+          </div>
+          <div class="row">
+            <Button type="submit" variant="primary" disabled={registering}>
               {registering ? 'Sending…' : 'Send link'}
-            </button>
-            <button
-              type="button"
-              class="link"
+            </Button>
+            <Button
+              variant="subtle"
               onclick={() => {
                 showRegister = false;
                 registerError = null;
               }}
             >
               Cancel
-            </button>
+            </Button>
           </div>
           {#if registerError}
-            <p class="error" role="alert">{registerError}</p>
+            <p class="text-error" role="alert">{registerError}</p>
           {/if}
         </form>
       {/if}
     </div>
 
-    <div class="recover-entry">
+    <div class="sub-section">
       {#if !showRecover}
-        <button
-          type="button"
-          class="link"
+        <Button
+          variant="subtle"
           onclick={() => {
             showRecover = true;
           }}
         >
           Lost your passkey? Recover account
-        </button>
+        </Button>
       {:else if recoverSent}
-        <p class="notice" role="status">
+        <p class="text-notice" role="status">
           If that email is registered, a recovery link has been sent.
         </p>
       {:else}
         <form
-          class="recover-form"
           onsubmit={(e) => {
             e.preventDefault();
             handleRecover();
           }}
         >
-          <label for="recover-email">Recover your account</label>
-          <input
-            id="recover-email"
-            type="email"
-            name="recover-email"
-            autocomplete="email"
-            placeholder="you@example.com"
-            bind:value={recoverEmail}
-            disabled={recovering}
-          />
-          <div class="recover-actions">
-            <button type="submit" disabled={recovering}>
+          <div class="field">
+            <label for="recover-email">Recover your account</label>
+            <input
+              id="recover-email"
+              type="email"
+              name="recover-email"
+              autocomplete="email"
+              placeholder="you@example.com"
+              bind:value={recoverEmail}
+              disabled={recovering}
+            />
+          </div>
+          <div class="row">
+            <Button type="submit" variant="primary" disabled={recovering}>
               {recovering ? 'Sending…' : 'Send recovery link'}
-            </button>
-            <button
-              type="button"
-              class="link"
+            </Button>
+            <Button
+              variant="subtle"
               onclick={() => {
                 showRecover = false;
                 recoverError = null;
               }}
             >
               Cancel
-            </button>
+            </Button>
           </div>
           {#if recoverError}
-            <p class="error" role="alert">{recoverError}</p>
+            <p class="text-error" role="alert">{recoverError}</p>
           {/if}
         </form>
       {/if}
     </div>
-  </section>
+  </Panel>
 </main>
 
 <style>
-  .login {
-    max-width: 24rem;
-    margin: 4rem auto;
-    padding: 0 1rem;
+  .login-shell {
+    max-width: 360px;
+    margin: var(--space-6) auto;
+    padding: 0 var(--space-4);
   }
   .brand {
     text-align: center;
-    margin-bottom: 1.5rem;
+    margin-bottom: var(--space-5);
   }
-  .brand h1 {
-    font-size: 1.5rem;
+  .brand-title {
+    font-size: var(--fs-xl);
+    font-weight: 600;
     margin: 0;
   }
   .tagline {
-    color: #666;
-    margin: 0.25rem 0 0;
+    margin: var(--space-1) 0 0;
   }
-  .card {
-    border: 1px solid #e2e2e2;
-    border-radius: 0.5rem;
-    padding: 1.5rem;
-  }
-  form {
+  .sign-in-form {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
   }
-  label {
-    font-weight: 600;
-    font-size: 0.875rem;
-  }
-  input {
-    padding: 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    font-size: 1rem;
-  }
-  button[type='submit'] {
-    padding: 0.5rem;
-    border: none;
-    border-radius: 0.375rem;
-    background: #1f6feb;
-    color: #fff;
-    font-size: 1rem;
-    cursor: pointer;
-  }
-  button[type='submit']:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .link {
-    background: none;
-    border: none;
-    color: #1f6feb;
-    cursor: pointer;
-    padding: 0;
-    font-size: 0.875rem;
-  }
-  .register-entry {
-    margin-top: 1.25rem;
-    padding-top: 1rem;
-    border-top: 1px solid #eee;
-  }
-  .recover-entry {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid #eee;
-  }
-  .recover-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-  .register-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
-  .error {
-    color: #c0362c;
-    font-size: 0.875rem;
-    margin: 0.25rem 0 0;
-  }
-  .notice {
-    color: #1a7f37;
-    font-size: 0.875rem;
-    margin: 0;
+  .sub-section {
+    margin-top: var(--space-3);
   }
 </style>

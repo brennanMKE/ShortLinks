@@ -73,7 +73,9 @@
 </script>
 
 {#if loading}
-  <p>Loading…</p>
+  <div class="app-shell">
+    <p class="text-muted">Loading…</p>
+  </div>
 {:else if $currentView === 'login'}
   <Login />
 {:else if $currentView === 'dashboard'}

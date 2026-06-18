@@ -13,12 +13,6 @@
     required for "other"), reactivate with an optional note.
   - Audit log  — GET /admin/audit?page=&per_page=&user_id=: a paginated,
     newest-first table with a per-user filter.
-
-  All non-trivial pure logic (reason-code/value ↔ label maps, the
-  other-requires-note validation, the test-result mapping, audit
-  actor/target/metadata rendering, pagination math, the user-id filter parser)
-  lives in lib/admin.ts and is unit-tested there. We match the Svelte 5 runes +
-  error-handling style and the topbar/tabs of the other views for consistency.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -56,6 +50,8 @@
     registrationsEnabled,
   } from '../lib/admin';
   import type { Setting, FilterRule, AdminUser, AuditEntry } from '../lib/types';
+  import Button from '../lib/Button.svelte';
+  import Panel from '../lib/Panel.svelte';
 
   type Section = 'settings' | 'filters' | 'users' | 'audit';
   let section = $state<Section>('settings');
@@ -90,7 +86,6 @@
     const next = regEnabled ? 'false' : 'true';
     try {
       const res = (await updateSetting('registrations_enabled', next)) as { settings: Setting[] };
-      // The PATCH returns the authoritative full settings list.
       if (res && Array.isArray(res.settings)) settings = res.settings;
       else await loadSettings();
       settingsNotice = `Registrations ${next === 'true' ? 'enabled' : 'disabled'}.`;
@@ -107,14 +102,12 @@
   let rulesLoading = $state(true);
   let rulesError = $state<string | null>(null);
 
-  // Create-rule form.
   let newPattern = $state('');
   let newReason = $state<number>(REASON_OPTIONS[0].code);
   let newDescription = $state('');
   let creating = $state(false);
   let createError = $state<string | null>(null);
 
-  // Inline edit of one rule.
   let editingRuleId = $state<number | null>(null);
   let editPattern = $state('');
   let editReason = $state<number>(REASON_OPTIONS[0].code);
@@ -123,7 +116,6 @@
   let savingRule = $state(false);
   let ruleRowError = $state<Record<number, string>>({});
 
-  // Test tool.
   let testUrl = $state('');
   let testing = $state(false);
   let testNotice = $state<FilterTestNotice | null>(null);
@@ -260,7 +252,6 @@
   let usersLoading = $state(true);
   let usersError = $state<string | null>(null);
 
-  // Deactivation modal state.
   let deactivatingUser = $state<AdminUser | null>(null);
   let deactReason = $state<string>(DEACTIVATION_REASONS[0].value);
   let deactNote = $state('');
@@ -433,22 +424,21 @@
   });
 </script>
 
-<div class="admin">
-  <header class="topbar">
-    <h1 class="wordmark">go.sstools.co</h1>
-    <nav class="tabs" aria-label="Primary">
-      <button type="button" class="tab" onclick={() => go('dashboard')}>Dashboard</button>
-      <button type="button" class="tab" onclick={() => go('account')}>Account</button>
-      <button type="button" class="tab active" aria-current="page">Admin</button>
+<div class="app-shell">
+  <header class="app-header">
+    <h1 class="app-title">go.sstools.co</h1>
+    <nav class="nav-tabs" aria-label="Primary">
+      <button type="button" class="nav-tab" onclick={() => go('dashboard')}>Dashboard</button>
+      <button type="button" class="nav-tab" onclick={() => go('account')}>Account</button>
+      <button type="button" class="nav-tab active" aria-current="page">Admin</button>
     </nav>
-    <button type="button" class="signout" onclick={handleSignOut}>Sign out</button>
+    <Button variant="default" onclick={handleSignOut}>Sign out</Button>
   </header>
 
   {#if !$currentUser?.is_admin}
-    <section class="card">
-      <h2>Admin</h2>
-      <p class="error" role="alert">You do not have access to this area.</p>
-    </section>
+    <Panel title="Admin">
+      <p class="text-error" role="alert">You do not have access to this area.</p>
+    </Panel>
   {:else}
     <nav class="subtabs" aria-label="Admin sections">
       <button
@@ -456,44 +446,43 @@
         class="subtab"
         class:active={section === 'settings'}
         aria-current={section === 'settings' ? 'page' : undefined}
-        onclick={() => (section = 'settings')}>Settings</button
-      >
+        onclick={() => (section = 'settings')}
+      >Settings</button>
       <button
         type="button"
         class="subtab"
         class:active={section === 'filters'}
         aria-current={section === 'filters' ? 'page' : undefined}
-        onclick={() => (section = 'filters')}>URL filters</button
-      >
+        onclick={() => (section = 'filters')}
+      >URL filters</button>
       <button
         type="button"
         class="subtab"
         class:active={section === 'users'}
         aria-current={section === 'users' ? 'page' : undefined}
-        onclick={() => (section = 'users')}>Users</button
-      >
+        onclick={() => (section = 'users')}
+      >Users</button>
       <button
         type="button"
         class="subtab"
         class:active={section === 'audit'}
         aria-current={section === 'audit' ? 'page' : undefined}
-        onclick={() => (section = 'audit')}>Audit log</button
-      >
+        onclick={() => (section = 'audit')}
+      >Audit log</button>
     </nav>
 
     {#if section === 'settings'}
-      <section class="card">
-        <h2>Settings</h2>
+      <Panel title="Settings">
         {#if settingsLoading}
-          <p class="muted" role="status">Loading settings…</p>
+          <p class="text-muted" role="status">Loading settings…</p>
         {:else if settingsError}
-          <p class="error" role="alert">{settingsError}</p>
-          <button type="button" class="primary" onclick={loadSettings}>Retry</button>
+          <p class="text-error" role="alert">{settingsError}</p>
+          <Button variant="primary" onclick={loadSettings}>Retry</Button>
         {:else}
           <div class="setting-row">
-            <div>
+            <div class="setting-info">
               <span class="setting-name">Registrations enabled</span>
-              <p class="muted small">
+              <p class="text-muted setting-desc">
                 When on, the registration form accepts new users. When off, the server is locked to
                 existing users.
               </p>
@@ -511,20 +500,19 @@
             </button>
           </div>
           {#if settingsNotice}
-            <p class="notice" role="status">{settingsNotice}</p>
+            <p class="text-notice" role="status">{settingsNotice}</p>
           {/if}
         {/if}
-      </section>
+      </Panel>
     {/if}
 
     {#if section === 'filters'}
-      <section class="card">
-        <h2>Test a URL</h2>
-        <p class="muted small intro">
+      <Panel title="Test a URL">
+        <p class="text-muted intro">
           Check whether a destination URL would be blocked by the active rules. This is a dry run —
           nothing is created.
         </p>
-        <form class="test-form" onsubmit={handleTest}>
+        <form class="inline-form" onsubmit={handleTest}>
           <label class="sr-only" for="test-url">URL to test</label>
           <input
             id="test-url"
@@ -532,23 +520,23 @@
             placeholder="https://example.com/path"
             bind:value={testUrl}
             disabled={testing}
+            style="flex: 1; min-width: 12rem; width: auto;"
           />
-          <button type="submit" class="primary" disabled={testing}>
+          <Button type="submit" variant="primary" disabled={testing}>
             {testing ? 'Testing…' : 'Test'}
-          </button>
+          </Button>
         </form>
         {#if testError}
-          <p class="error small" role="alert">{testError}</p>
+          <p class="text-error" role="alert">{testError}</p>
         {:else if testNotice}
-          <p class={testNotice.kind === 'match' ? 'error small' : 'notice'} role="status">
+          <p class={testNotice.kind === 'match' ? 'text-error' : 'text-notice'} role="status">
             {testNotice.message}
           </p>
         {/if}
-      </section>
+      </Panel>
 
-      <section class="card">
-        <h2>Add a rule</h2>
-        <form class="rule-form" onsubmit={handleCreateRule}>
+      <Panel title="Add a rule">
+        <form onsubmit={handleCreateRule}>
           <div class="field">
             <label for="new-pattern">Pattern (Go regular expression)</label>
             <input
@@ -577,26 +565,25 @@
               disabled={creating}
             />
           </div>
-          <button type="submit" class="primary" disabled={creating}>
+          <Button type="submit" variant="primary" disabled={creating}>
             {creating ? 'Adding…' : 'Add rule'}
-          </button>
+          </Button>
         </form>
         {#if createError}
-          <p class="error small" role="alert">{createError}</p>
+          <p class="text-error" role="alert">{createError}</p>
         {/if}
-      </section>
+      </Panel>
 
-      <section class="card">
-        <h2>Filter rules</h2>
+      <Panel title="Filter rules" noPadding={rules.length > 0 && !rulesLoading && !rulesError}>
         {#if rulesLoading}
-          <p class="muted" role="status">Loading rules…</p>
+          <p class="text-muted" role="status">Loading rules…</p>
         {:else if rulesError}
-          <p class="error" role="alert">{rulesError}</p>
-          <button type="button" class="primary" onclick={loadRules}>Retry</button>
+          <p class="text-error" role="alert">{rulesError}</p>
+          <Button variant="primary" onclick={loadRules}>Retry</Button>
         {:else if rules.length === 0}
-          <p class="muted">No filter rules defined.</p>
+          <p class="text-muted">No filter rules defined.</p>
         {:else}
-          <table class="data-table">
+          <table>
             <thead>
               <tr>
                 <th>Pattern</th>
@@ -610,7 +597,9 @@
               {#each rules as rule (rule.id)}
                 <tr>
                   {#if editingRuleId === rule.id}
-                    <td><input type="text" bind:value={editPattern} disabled={savingRule} /></td>
+                    <td>
+                      <input type="text" bind:value={editPattern} disabled={savingRule} />
+                    </td>
                     <td>
                       <select bind:value={editReason} disabled={savingRule}>
                         {#each REASON_OPTIONS as opt (opt.code)}
@@ -618,7 +607,9 @@
                         {/each}
                       </select>
                     </td>
-                    <td><input type="text" bind:value={editDescription} disabled={savingRule} /></td>
+                    <td>
+                      <input type="text" bind:value={editDescription} disabled={savingRule} />
+                    </td>
                     <td>
                       <label class="inline-check">
                         <input type="checkbox" bind:checked={editActive} disabled={savingRule} />
@@ -626,18 +617,12 @@
                       </label>
                     </td>
                     <td class="actions-col">
-                      <button
-                        type="button"
-                        class="primary small"
-                        disabled={savingRule}
-                        onclick={() => saveEditRule(rule)}>{savingRule ? 'Saving…' : 'Save'}</button
-                      >
-                      <button
-                        type="button"
-                        class="ghost small"
-                        disabled={savingRule}
-                        onclick={cancelEditRule}>Cancel</button
-                      >
+                      <div class="row">
+                        <Button variant="primary" disabled={savingRule} onclick={() => saveEditRule(rule)}>
+                          {savingRule ? 'Saving…' : 'Save'}
+                        </Button>
+                        <Button disabled={savingRule} onclick={cancelEditRule}>Cancel</Button>
+                      </div>
                     </td>
                   {:else}
                     <td class="mono">{rule.pattern}</td>
@@ -645,39 +630,38 @@
                     <td>{rule.description || '—'}</td>
                     <td>{rule.active ? 'Yes' : 'No'}</td>
                     <td class="actions-col">
-                      <button type="button" class="ghost small" onclick={() => startEditRule(rule)}
-                        >Edit</button
-                      >
-                      <button type="button" class="danger small" onclick={() => handleDeleteRule(rule)}
-                        >Delete</button
-                      >
+                      <div class="row">
+                        <Button onclick={() => startEditRule(rule)}>Edit</Button>
+                        <Button variant="danger" onclick={() => handleDeleteRule(rule)}>Delete</Button>
+                      </div>
                     </td>
                   {/if}
                 </tr>
                 {#if ruleRowError[rule.id]}
                   <tr>
-                    <td colspan="5"><p class="error small" role="alert">{ruleRowError[rule.id]}</p></td>
+                    <td colspan="5">
+                      <p class="text-error" role="alert">{ruleRowError[rule.id]}</p>
+                    </td>
                   </tr>
                 {/if}
               {/each}
             </tbody>
           </table>
         {/if}
-      </section>
+      </Panel>
     {/if}
 
     {#if section === 'users'}
-      <section class="card">
-        <h2>Users</h2>
+      <Panel title="Users" noPadding={users.length > 0 && !usersLoading && !usersError}>
         {#if usersLoading}
-          <p class="muted" role="status">Loading users…</p>
+          <p class="text-muted" role="status">Loading users…</p>
         {:else if usersError}
-          <p class="error" role="alert">{usersError}</p>
-          <button type="button" class="primary" onclick={loadUsers}>Retry</button>
+          <p class="text-error" role="alert">{usersError}</p>
+          <Button variant="primary" onclick={loadUsers}>Retry</Button>
         {:else if users.length === 0}
-          <p class="muted">No users found.</p>
+          <p class="text-muted">No users found.</p>
         {:else}
-          <table class="data-table">
+          <table>
             <thead>
               <tr>
                 <th>Email</th>
@@ -693,39 +677,42 @@
                   <td>{user.email}</td>
                   <td>{user.is_admin ? 'Admin' : '—'}</td>
                   <td>
-                    <span class="status" class:inactive={!user.active}>
+                    <span
+                      class="badge"
+                      class:badge-success={user.active}
+                      class:badge-danger={!user.active}
+                    >
                       {user.active ? 'Active' : 'Inactive'}
                     </span>
                   </td>
                   <td>{user.last_login_at ? formatDateTime(user.last_login_at) : 'Never'}</td>
                   <td class="actions-col">
                     {#if canDeactivate(user, $currentUser?.id ?? -1)}
-                      <button type="button" class="danger small" onclick={() => openDeactivate(user)}
-                        >Deactivate</button
-                      >
+                      <Button variant="danger" onclick={() => openDeactivate(user)}>Deactivate</Button>
                     {:else if !user.active}
-                      <button
-                        type="button"
-                        class="ghost small"
+                      <Button
                         disabled={reactivatingId === user.id}
                         onclick={() => handleReactivate(user)}
-                        >{reactivatingId === user.id ? 'Reactivating…' : 'Reactivate'}</button
                       >
+                        {reactivatingId === user.id ? 'Reactivating…' : 'Reactivate'}
+                      </Button>
                     {:else}
-                      <span class="muted small">—</span>
+                      <span class="text-muted">—</span>
                     {/if}
                   </td>
                 </tr>
                 {#if userRowError[user.id]}
                   <tr>
-                    <td colspan="5"><p class="error small" role="alert">{userRowError[user.id]}</p></td>
+                    <td colspan="5">
+                      <p class="text-error" role="alert">{userRowError[user.id]}</p>
+                    </td>
                   </tr>
                 {/if}
               {/each}
             </tbody>
           </table>
         {/if}
-      </section>
+      </Panel>
 
       {#if deactivatingUser}
         <div
@@ -745,7 +732,7 @@
             onclick={(e) => e.stopPropagation()}
             onkeydown={(e) => e.stopPropagation()}
           >
-            <h2>Deactivate {deactivatingUser.email}</h2>
+            <h2 class="modal-title">Deactivate {deactivatingUser.email}</h2>
             <form onsubmit={submitDeactivate}>
               <div class="field">
                 <label for="deact-reason">Reason</label>
@@ -773,15 +760,13 @@
                 ></textarea>
               </div>
               {#if deactError}
-                <p class="error small" role="alert">{deactError}</p>
+                <p class="text-error" role="alert">{deactError}</p>
               {/if}
-              <div class="modal-actions">
-                <button type="submit" class="danger" disabled={deactSubmitting}>
+              <div class="row" style="margin-top: var(--space-3);">
+                <Button type="submit" variant="danger" disabled={deactSubmitting}>
                   {deactSubmitting ? 'Deactivating…' : 'Deactivate'}
-                </button>
-                <button type="button" class="ghost" disabled={deactSubmitting} onclick={closeDeactivate}
-                  >Cancel</button
-                >
+                </Button>
+                <Button disabled={deactSubmitting} onclick={closeDeactivate}>Cancel</Button>
               </div>
             </form>
           </div>
@@ -790,35 +775,35 @@
     {/if}
 
     {#if section === 'audit'}
-      <section class="card">
-        <h2>Audit log</h2>
-        <form class="filter-form" onsubmit={applyAuditFilter}>
-          <label for="audit-user">Filter by user id</label>
+      <Panel title="Audit log">
+        <form class="inline-form" onsubmit={applyAuditFilter} style="margin-bottom: var(--space-3);">
+          <label for="audit-user" style="white-space: nowrap;">Filter by user id</label>
           <input
             id="audit-user"
             type="text"
             inputmode="numeric"
             placeholder="e.g. 5"
             bind:value={auditUserIdRaw}
+            style="width: 8rem;"
           />
-          <button type="submit" class="primary small">Apply</button>
+          <Button type="submit" variant="primary">Apply</Button>
           {#if auditUserIdFilter !== null}
-            <button type="button" class="ghost small" onclick={clearAuditFilter}>Clear</button>
+            <Button onclick={clearAuditFilter}>Clear</Button>
           {/if}
         </form>
         {#if auditFilterError}
-          <p class="error small" role="alert">{auditFilterError}</p>
+          <p class="text-error" role="alert">{auditFilterError}</p>
         {/if}
 
         {#if auditLoading}
-          <p class="muted" role="status">Loading audit log…</p>
+          <p class="text-muted" role="status">Loading audit log…</p>
         {:else if auditError}
-          <p class="error" role="alert">{auditError}</p>
-          <button type="button" class="primary" onclick={loadAudit}>Retry</button>
+          <p class="text-error" role="alert">{auditError}</p>
+          <Button variant="primary" onclick={loadAudit}>Retry</Button>
         {:else if auditEntries.length === 0}
-          <p class="muted">No audit entries.</p>
+          <p class="text-muted">No audit entries.</p>
         {:else}
-          <table class="data-table">
+          <table>
             <thead>
               <tr>
                 <th>When</th>
@@ -836,7 +821,7 @@
                   <td class="mono">{entry.action}</td>
                   <td>{actorLabel(entry)}</td>
                   <td>{targetLabel(entry)}</td>
-                  <td class="meta-cell">{formatMetadata(entry.metadata)}</td>
+                  <td class="meta-cell mono">{formatMetadata(entry.metadata)}</td>
                   <td>{entry.ip_address ?? '—'}</td>
                 </tr>
               {/each}
@@ -844,247 +829,156 @@
           </table>
 
           <div class="pager">
-            <button
-              type="button"
-              class="ghost small"
+            <Button
               disabled={!auditPaging.hasPrev}
-              onclick={() => auditGoTo(auditPaging.page - 1)}>Previous</button
-            >
-            <span class="muted small">
+              onclick={() => auditGoTo(auditPaging.page - 1)}
+            >Previous</Button>
+            <span class="text-muted">
               {auditPaging.firstItem}–{auditPaging.lastItem} of {auditPaging.total} · page
               {auditPaging.page} of {auditPaging.totalPages}
             </span>
-            <button
-              type="button"
-              class="ghost small"
+            <Button
               disabled={!auditPaging.hasNext}
-              onclick={() => auditGoTo(auditPaging.page + 1)}>Next</button
-            >
+              onclick={() => auditGoTo(auditPaging.page + 1)}
+            >Next</Button>
           </div>
         {/if}
-      </section>
+      </Panel>
     {/if}
   {/if}
 </div>
 
 <style>
-  .admin {
-    max-width: 60rem;
-    margin: 0 auto;
-    padding: 1rem;
-  }
-  .topbar {
+  .nav-tabs {
     display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .wordmark {
-    font-size: 1.125rem;
-    margin: 0;
-  }
-  .tabs {
-    display: flex;
-    gap: 0.5rem;
+    gap: var(--space-1);
     flex: 1;
+    padding: 0 var(--space-2);
   }
-  .tab {
+  .nav-tab {
     background: none;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    padding: 0.375rem 0.75rem;
+    border: none;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
     cursor: pointer;
-    font-size: 0.875rem;
+    color: var(--text-muted);
+    font-size: var(--fs-md);
+    font-family: var(--font);
   }
-  .tab.active {
-    background: #1f6feb;
-    color: #fff;
-    border-color: #1f6feb;
-    cursor: default;
+  .nav-tab.active {
+    background: var(--accent-subtle);
+    color: var(--accent);
+    font-weight: 600;
   }
-  .signout {
-    background: none;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    padding: 0.375rem 0.75rem;
-    cursor: pointer;
-    font-size: 0.875rem;
+  .nav-tab:hover:not(.active) {
+    background: var(--bg-subtle);
+    color: var(--text);
   }
   .subtabs {
     display: flex;
-    gap: 0.5rem;
-    margin-bottom: 1.5rem;
+    gap: var(--space-2);
+    margin-bottom: var(--space-4);
     flex-wrap: wrap;
   }
   .subtab {
-    background: #fff;
-    border: 1px solid #ccc;
+    background: var(--bg-panel);
+    border: var(--border-w) solid var(--border);
     border-bottom-width: 2px;
-    border-radius: 0.375rem;
-    padding: 0.5rem 1rem;
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-4);
     cursor: pointer;
-    font-size: 0.9375rem;
+    font-size: var(--fs-md);
+    font-family: var(--font);
+    color: var(--text-muted);
   }
   .subtab.active {
-    border-bottom-color: #1f6feb;
-    color: #1f6feb;
+    border-bottom-color: var(--accent);
+    color: var(--accent);
     font-weight: 600;
   }
-  .card {
-    border: 1px solid #e2e2e2;
-    border-radius: 0.5rem;
-    padding: 1.25rem;
-    margin-bottom: 1.5rem;
-  }
-  .card h2 {
-    margin: 0 0 1rem;
-    font-size: 1.125rem;
+  .subtab:hover:not(.active) {
+    background: var(--bg-subtle);
+    color: var(--text);
   }
   .intro {
-    margin: 0 0 1rem;
+    margin: 0 0 var(--space-3);
   }
   .setting-row {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 1rem;
+    gap: var(--space-4);
+  }
+  .setting-info {
+    flex: 1;
   }
   .setting-name {
     font-weight: 600;
   }
+  .setting-desc {
+    margin: var(--space-1) 0 0;
+    font-size: var(--fs-sm);
+  }
   .toggle {
     flex-shrink: 0;
     min-width: 4rem;
-    border: 1px solid #ccc;
-    border-radius: 1rem;
-    padding: 0.375rem 0.875rem;
-    background: #eee;
+    border: var(--border-w) solid var(--border-strong);
+    border-radius: 10px;
+    padding: var(--space-1) var(--space-3);
+    background: var(--bg-subtle);
     cursor: pointer;
-    font-size: 0.875rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
+    font-family: var(--font);
+    color: var(--text-muted);
   }
   .toggle.on {
-    background: #1f6feb;
-    border-color: #1f6feb;
-    color: #fff;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-text);
   }
   .toggle:disabled {
-    opacity: 0.6;
+    opacity: 0.5;
     cursor: default;
   }
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    margin-bottom: 0.875rem;
-  }
-  .field label {
-    font-size: 0.8125rem;
-    font-weight: 600;
-    color: #444;
-  }
-  .field input,
-  .field select,
-  .field textarea {
-    padding: 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    font-size: 0.9375rem;
-    font-family: inherit;
-  }
-  .test-form,
-  .filter-form {
+  .inline-form {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     flex-wrap: wrap;
-  }
-  .test-form input {
-    flex: 1;
-    min-width: 12rem;
-    padding: 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    font-size: 0.9375rem;
-  }
-  .filter-form label {
-    font-size: 0.875rem;
-    font-weight: 600;
-  }
-  .filter-form input {
-    padding: 0.375rem 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    font-size: 0.875rem;
-    width: 8rem;
-  }
-  .data-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.875rem;
-  }
-  .data-table th,
-  .data-table td {
-    text-align: left;
-    padding: 0.5rem;
-    border-bottom: 1px solid #eee;
-    vertical-align: top;
-  }
-  .data-table th {
-    color: #666;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-  .data-table input,
-  .data-table select {
-    width: 100%;
-    padding: 0.3125rem 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    font-size: 0.8125rem;
-  }
-  .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8125rem;
-    overflow-wrap: anywhere;
-  }
-  .meta-cell {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.75rem;
-    overflow-wrap: anywhere;
-    max-width: 18rem;
   }
   .actions-col {
     white-space: nowrap;
   }
+  .mono {
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    overflow-wrap: anywhere;
+  }
+  .meta-cell {
+    max-width: 280px;
+    overflow-wrap: anywhere;
+  }
   .inline-check {
     display: inline-flex;
     align-items: center;
-    gap: 0.375rem;
-    font-size: 0.8125rem;
+    gap: var(--space-1);
+    font-size: var(--fs-sm);
+    font-weight: normal;
+    color: var(--text);
+    cursor: pointer;
   }
   .inline-check input {
     width: auto;
-  }
-  .status {
-    display: inline-block;
-    padding: 0.125rem 0.5rem;
-    border-radius: 0.75rem;
-    background: #e6f4ea;
-    color: #1a7f37;
-    font-size: 0.75rem;
-    font-weight: 600;
-  }
-  .status.inactive {
-    background: #fbe9e7;
-    color: #c0362c;
+    margin: 0;
   }
   .pager {
     display: flex;
     align-items: center;
-    gap: 1rem;
-    margin-top: 1rem;
+    gap: var(--space-4);
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: var(--border-w) solid var(--border);
   }
   .modal-backdrop {
     position: fixed;
@@ -1093,101 +987,27 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 1rem;
+    padding: var(--space-4);
     z-index: 10;
   }
   .modal {
-    background: #fff;
-    border-radius: 0.5rem;
-    padding: 1.5rem;
+    background: var(--bg-panel);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-5);
     width: 100%;
-    max-width: 28rem;
+    max-width: 420px;
   }
-  .modal h2 {
-    margin: 0 0 1rem;
-    font-size: 1.125rem;
+  .modal-title {
+    font-size: var(--fs-lg);
+    font-weight: 600;
+    margin: 0 0 var(--space-4);
     overflow-wrap: anywhere;
   }
-  .modal textarea {
-    resize: vertical;
-  }
-  .modal-actions {
-    display: flex;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
-  }
-  .muted {
-    color: #888;
-  }
-  .small {
-    font-size: 0.8125rem;
-  }
-  .notice {
-    color: #1a7f37;
-    font-size: 0.875rem;
-    margin: 0.75rem 0 0;
-  }
-  .primary {
-    padding: 0.5rem 0.875rem;
-    border: none;
-    border-radius: 0.375rem;
-    background: #1f6feb;
-    color: #fff;
-    font-size: 0.9375rem;
-    cursor: pointer;
-  }
-  .primary:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .ghost {
-    background: #fff;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    padding: 0.5rem 0.875rem;
-    cursor: pointer;
-    font-size: 0.9375rem;
-  }
-  .ghost:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .danger {
-    border: 1px solid #c0362c;
-    border-radius: 0.375rem;
-    background: #fff;
-    color: #c0362c;
-    padding: 0.5rem 0.875rem;
-    cursor: pointer;
-    font-size: 0.9375rem;
-  }
-  .danger:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .primary.small,
-  .ghost.small,
-  .danger.small {
-    padding: 0.3125rem 0.625rem;
-    font-size: 0.8125rem;
-  }
-  .error {
-    color: #c0362c;
-    font-size: 0.875rem;
-    margin: 0.5rem 0;
-  }
-  .error.small {
-    font-size: 0.8125rem;
-  }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
+
+  /* Inputs inside table cells need to override the global 100% width */
+  tbody td input[type="text"],
+  tbody td select {
+    width: 100%;
   }
 </style>

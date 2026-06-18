@@ -4,22 +4,6 @@
   the PRD guard that the LAST passkey cannot be revoked without adding a
   replacement first (the backend refuses that with 409
   `cannot_revoke_last_credential`, surfaced here as a clear, actionable message).
-
-  There is no logged-in "add passkey" endpoint in the routes — per the PRD a new
-  credential is added through the account-recovery flow — so this view is
-  list / rename / revoke only, matching the issue's acceptance criteria.
-
-  On mount it loads GET /account/credentials via listCredentials, surfacing
-  loading / error / empty states. Each row shows the device name (inline
-  editable), the AAGUID-derived device hint (computed server-side, returned as
-  `device_hint`), created + last-used dates, and the sign count. Rename calls
-  PATCH /account/credentials/{id}; Revoke calls DELETE /account/credentials/{id}.
-
-  All non-trivial pure logic (date / last-used formatting, rename validation,
-  the last-credential guard, and the revoke-failure → message mapping) lives in
-  lib/account.ts and is unit-tested there. We match the Svelte 5 runes + error
-  handling style of LinkDetail.svelte / Dashboard.svelte, and the topbar / tabs
-  for nav consistency with the other views.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -33,25 +17,21 @@
     revokeErrorMessage,
   } from '../lib/account';
   import type { Credential } from '../lib/types';
+  import Button from '../lib/Button.svelte';
+  import Panel from '../lib/Panel.svelte';
 
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let credentials = $state<Credential[]>([]);
 
-  // The id of the credential whose name is being edited inline, plus the draft
-  // value and a per-edit error. Only one row is editable at a time.
   let editingId = $state<number | null>(null);
   let editingName = $state('');
   let editError = $state<string | null>(null);
   let saving = $state(false);
 
-  // Per-credential transient state keyed by id: a revoke in flight, and the most
-  // recent revoke error to show on that row (e.g. the 409 last-credential copy).
   let revokingId = $state<number | null>(null);
   let rowErrors = $state<Record<number, string>>({});
 
-  // The last passkey cannot be revoked (PRD). The backend enforces this with a
-  // 409; we also disable the control client-side for immediate feedback.
   const revokeAllowed = $derived(canRevoke(credentials));
 
   async function load() {
@@ -67,8 +47,6 @@
     }
   }
 
-  // Returns true (and routes to login) when the error is a 401 session expiry,
-  // so callers can early-return; false otherwise.
   function handleAuthError(err: unknown): boolean {
     if (err instanceof ApiError && err.status === 401) {
       currentUser.set(null);
@@ -100,7 +78,6 @@
     editError = null;
     try {
       const updated = await renameCredential(cred.id, result.value);
-      // Update the row in place with the authoritative server record.
       credentials = credentials.map((c) => (c.id === updated.id ? updated : c));
       editingId = null;
       editingName = '';
@@ -128,8 +105,6 @@
       credentials = credentials.filter((c) => c.id !== cred.id);
     } catch (err) {
       if (handleAuthError(err)) return;
-      // The 409 last-credential case yields the clear, actionable message; any
-      // other failure gets the generic retry copy (see lib/account.ts).
       rowErrors = { ...rowErrors, [cred.id]: revokeErrorMessage(err) };
     } finally {
       revokingId = null;
@@ -151,7 +126,7 @@
     try {
       await logout();
     } catch {
-      // Even if the server call fails, drop local state and return to login.
+      // Drop local state regardless of server result.
     }
     currentUser.set(null);
     links.set([]);
@@ -161,40 +136,38 @@
   onMount(load);
 </script>
 
-<div class="account">
-  <header class="topbar">
-    <h1 class="wordmark">go.sstools.co</h1>
-    <nav class="tabs" aria-label="Primary">
-      <button type="button" class="tab" onclick={() => go('dashboard')}>Dashboard</button>
-      <button type="button" class="tab active" aria-current="page">Account</button>
+<div class="app-shell account-shell">
+  <header class="app-header">
+    <h1 class="app-title">go.sstools.co</h1>
+    <nav class="nav-tabs" aria-label="Primary">
+      <button type="button" class="nav-tab" onclick={() => go('dashboard')}>Dashboard</button>
+      <button type="button" class="nav-tab active" aria-current="page">Account</button>
       {#if $currentUser?.is_admin}
-        <button type="button" class="tab" onclick={() => go('admin')}>Admin</button>
+        <button type="button" class="nav-tab" onclick={() => go('admin')}>Admin</button>
       {/if}
     </nav>
-    <button type="button" class="signout" onclick={handleSignOut}>Sign out</button>
+    <Button variant="default" onclick={handleSignOut}>Sign out</Button>
   </header>
 
-  <section class="card">
-    <h2>Account</h2>
+  <Panel title="Account">
     {#if $currentUser}
-      <p class="muted email">Signed in as <strong>{$currentUser.email}</strong></p>
+      <p class="text-muted">Signed in as <strong>{$currentUser.email}</strong></p>
     {/if}
-  </section>
+  </Panel>
 
-  <section class="card">
-    <h2>Passkeys</h2>
-    <p class="muted intro">
+  <Panel title="Passkeys">
+    <p class="text-muted intro">
       These are the passkeys registered to your account. Add a new passkey through
       account recovery; you cannot revoke your only passkey.
     </p>
 
     {#if loading}
-      <p class="muted" role="status">Loading passkeys…</p>
+      <p class="text-muted" role="status">Loading passkeys…</p>
     {:else if loadError}
-      <p class="error" role="alert">{loadError}</p>
-      <button type="button" class="primary" onclick={load}>Retry</button>
+      <p class="text-error" role="alert">{loadError}</p>
+      <Button variant="primary" onclick={load}>Retry</Button>
     {:else if credentials.length === 0}
-      <p class="muted">No passkeys found for this account.</p>
+      <p class="text-muted">No passkeys found for this account.</p>
     {:else}
       <ul class="creds">
         {#each credentials as cred (cred.id)}
@@ -202,7 +175,7 @@
             <div class="cred-main">
               {#if editingId === cred.id}
                 <form
-                  class="edit"
+                  class="edit-form"
                   onsubmit={(e) => {
                     e.preventDefault();
                     saveEdit(cred);
@@ -217,23 +190,20 @@
                     oninput={() => {
                       editError = null;
                     }}
+                    style="width: auto; flex: 1; min-width: 8rem;"
                   />
-                  <button type="submit" class="primary small" disabled={saving}>
+                  <Button type="submit" variant="primary" disabled={saving}>
                     {saving ? 'Saving…' : 'Save'}
-                  </button>
-                  <button type="button" class="ghost small" disabled={saving} onclick={cancelEdit}>
-                    Cancel
-                  </button>
+                  </Button>
+                  <Button variant="default" disabled={saving} onclick={cancelEdit}>Cancel</Button>
                 </form>
                 {#if editError}
-                  <p class="error small" role="alert">{editError}</p>
+                  <p class="text-error" role="alert">{editError}</p>
                 {/if}
               {:else}
                 <div class="name-row">
-                  <span class="name">{cred.device_name || 'Unnamed passkey'}</span>
-                  <button type="button" class="ghost small" onclick={() => startEdit(cred)}>
-                    Rename
-                  </button>
+                  <span class="cred-name">{cred.device_name || 'Unnamed passkey'}</span>
+                  <Button variant="subtle" onclick={() => startEdit(cred)}>Rename</Button>
                 </div>
               {/if}
 
@@ -257,89 +227,57 @@
               </dl>
 
               {#if rowErrors[cred.id]}
-                <p class="error small" role="alert">{rowErrors[cred.id]}</p>
+                <p class="text-error" role="alert">{rowErrors[cred.id]}</p>
               {/if}
             </div>
 
             <div class="cred-actions">
-              <button
-                type="button"
-                class="danger small"
+              <Button
+                variant="danger"
                 disabled={!revokeAllowed || revokingId === cred.id}
-                title={revokeAllowed
-                  ? 'Revoke this passkey'
-                  : 'You cannot revoke your only passkey. Add another passkey first.'}
                 onclick={() => handleRevoke(cred)}
               >
                 {revokingId === cred.id ? 'Revoking…' : 'Revoke'}
-              </button>
+              </Button>
             </div>
           </li>
         {/each}
       </ul>
     {/if}
-  </section>
+  </Panel>
 </div>
 
 <style>
-  .account {
-    max-width: 48rem;
-    margin: 0 auto;
-    padding: 1rem;
+  .account-shell {
+    max-width: 760px;
   }
-  .topbar {
+  .nav-tabs {
     display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .wordmark {
-    font-size: 1.125rem;
-    margin: 0;
-  }
-  .tabs {
-    display: flex;
-    gap: 0.5rem;
+    gap: var(--space-1);
     flex: 1;
+    padding: 0 var(--space-2);
   }
-  .tab {
+  .nav-tab {
     background: none;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    padding: 0.375rem 0.75rem;
+    border: none;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
     cursor: pointer;
-    font-size: 0.875rem;
+    color: var(--text-muted);
+    font-size: var(--fs-md);
+    font-family: var(--font);
   }
-  .tab.active {
-    background: #1f6feb;
-    color: #fff;
-    border-color: #1f6feb;
-    cursor: default;
+  .nav-tab.active {
+    background: var(--accent-subtle);
+    color: var(--accent);
+    font-weight: 600;
   }
-  .signout {
-    background: none;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    padding: 0.375rem 0.75rem;
-    cursor: pointer;
-    font-size: 0.875rem;
-  }
-  .card {
-    border: 1px solid #e2e2e2;
-    border-radius: 0.5rem;
-    padding: 1.25rem;
-    margin-bottom: 1.5rem;
-  }
-  .card h2 {
-    margin: 0 0 1rem;
-    font-size: 1.125rem;
-  }
-  .email {
-    margin: 0;
+  .nav-tab:hover:not(.active) {
+    background: var(--bg-subtle);
+    color: var(--text);
   }
   .intro {
-    margin: 0 0 1rem;
-    font-size: 0.875rem;
+    margin: 0 0 var(--space-3);
   }
   .creds {
     list-style: none;
@@ -347,16 +285,17 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: var(--space-3);
   }
   .cred {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 1rem;
-    border: 1px solid #eee;
-    border-radius: 0.5rem;
-    padding: 1rem;
+    gap: var(--space-3);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+    background: var(--bg-subtle);
   }
   .cred-main {
     flex: 1;
@@ -365,42 +304,34 @@
   .name-row {
     display: flex;
     align-items: center;
-    gap: 0.625rem;
-    margin-bottom: 0.75rem;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
   }
-  .name {
+  .cred-name {
     font-weight: 600;
     overflow-wrap: anywhere;
   }
-  .edit {
+  .edit-form {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.5rem;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
     flex-wrap: wrap;
-  }
-  .edit input {
-    flex: 1;
-    min-width: 8rem;
-    padding: 0.375rem 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    font-size: 0.9375rem;
   }
   .meta {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-    gap: 0.5rem 1rem;
+    gap: var(--space-2) var(--space-4);
     margin: 0;
   }
   .meta dt {
-    color: #666;
+    color: var(--text-muted);
     font-weight: 600;
-    font-size: 0.75rem;
+    font-size: var(--fs-sm);
   }
   .meta dd {
     margin: 0;
-    font-size: 0.875rem;
+    font-size: var(--fs-base);
     overflow-wrap: anywhere;
   }
   .num {
@@ -408,64 +339,5 @@
   }
   .cred-actions {
     flex-shrink: 0;
-  }
-  .muted {
-    color: #888;
-  }
-  .primary {
-    margin-top: 0.5rem;
-    padding: 0.5rem 0.875rem;
-    border: none;
-    border-radius: 0.375rem;
-    background: #1f6feb;
-    color: #fff;
-    font-size: 0.9375rem;
-    cursor: pointer;
-  }
-  .ghost {
-    background: #fff;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    cursor: pointer;
-  }
-  .danger {
-    border: 1px solid #c0362c;
-    border-radius: 0.375rem;
-    background: #fff;
-    color: #c0362c;
-    cursor: pointer;
-  }
-  .danger:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .small {
-    padding: 0.3125rem 0.625rem;
-    font-size: 0.8125rem;
-    margin-top: 0;
-  }
-  .primary.small:disabled,
-  .ghost.small:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .error {
-    color: #c0362c;
-    font-size: 0.875rem;
-    margin: 0.5rem 0;
-  }
-  .error.small {
-    font-size: 0.8125rem;
-  }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
   }
 </style>

@@ -12,15 +12,6 @@
     3. POST the serialized attestation to /auth/register/finish?token=….
     4. On success: call GET /api/me to confirm the session, set currentUser,
        clear pendingVerifyToken, and navigate to "dashboard".
-
-  Error states shown inline:
-    • expired/invalid token   → descriptive message + back-to-login link
-    • ceremony cancelled      → "NotAllowedError" from the OS prompt
-    • generic failure         → catchall with retry prompt
-
-  Admin promotion (ADMIN_EMAIL match or first user) is handled by the server
-  inside FinishRegistration — the SPA simply navigates to "dashboard" and the
-  Admin tab appears when currentUser.is_admin is true.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -31,12 +22,13 @@
     serializeAttestation,
   } from '../lib/webauthn';
   import { get } from 'svelte/store';
+  import Button from '../lib/Button.svelte';
+  import Panel from '../lib/Panel.svelte';
 
   type Status = 'verifying' | 'creating' | 'finishing' | 'error';
 
   let status = $state<Status>('verifying');
   let errorMessage = $state<string | null>(null);
-  // Stash the token for the finish POST; it is the same token used for verify.
   let token = $state<string | null>(null);
 
   onMount(async () => {
@@ -81,7 +73,6 @@
           errorMessage =
             'Passkey creation was cancelled. Please try again when you are ready.';
         } else if (err.name === 'InvalidStateError') {
-          // A credential for this user is already registered on this device.
           errorMessage =
             'A passkey for this account is already registered on this device.';
         } else {
@@ -124,14 +115,9 @@
       const user = await getMe();
       currentUser.set(user);
       pendingVerifyToken.set(null);
-      // Replace the consumed-token URL so a reload routes through /api/me
-      // (valid session → dashboard) instead of replaying the spent token.
       history.replaceState({}, '', '/');
       currentView.set('dashboard');
     } catch {
-      // The session cookie was set by the finish endpoint; a /api/me failure
-      // is very unlikely but we handle it gracefully rather than leaving the
-      // user on a blank screen.
       status = 'error';
       errorMessage =
         'Your account was created but we could not load your profile. Try signing in.';
@@ -144,72 +130,39 @@
   }
 </script>
 
-<main class="register-verify">
+<main class="verify-shell">
   <header class="brand">
-    <h1>go.sstools.co</h1>
+    <h1 class="brand-title">go.sstools.co</h1>
   </header>
 
-  <section class="card">
+  <Panel>
     {#if status === 'verifying'}
-      <p class="status">Verifying your link…</p>
+      <p class="text-muted">Verifying your link…</p>
     {:else if status === 'creating'}
-      <p class="status">Creating your passkey…</p>
-      <p class="hint">Follow the prompt from your device to register a passkey.</p>
+      <p>Creating your passkey…</p>
+      <p class="text-muted">Follow the prompt from your device to register a passkey.</p>
     {:else if status === 'finishing'}
-      <p class="status">Finishing registration…</p>
+      <p class="text-muted">Finishing registration…</p>
     {:else if status === 'error'}
-      <p class="error" role="alert">{errorMessage}</p>
-      <button onclick={goToLogin}>Back to sign in</button>
+      <p class="text-error" role="alert">{errorMessage}</p>
+      <Button onclick={goToLogin}>Back to sign in</Button>
     {/if}
-  </section>
+  </Panel>
 </main>
 
 <style>
-  .register-verify {
-    max-width: 24rem;
-    margin: 4rem auto;
-    padding: 0 1rem;
+  .verify-shell {
+    max-width: 360px;
+    margin: var(--space-6) auto;
+    padding: 0 var(--space-4);
   }
   .brand {
     text-align: center;
-    margin-bottom: 1.5rem;
+    margin-bottom: var(--space-5);
   }
-  .brand h1 {
-    font-size: 1.5rem;
+  .brand-title {
+    font-size: var(--fs-xl);
+    font-weight: 600;
     margin: 0;
-  }
-  .card {
-    border: 1px solid #e2e2e2;
-    border-radius: 0.5rem;
-    padding: 1.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-  }
-  .status {
-    color: #444;
-    margin: 0;
-  }
-  .hint {
-    color: #666;
-    font-size: 0.875rem;
-    margin: 0;
-  }
-  .error {
-    color: #c0362c;
-    font-size: 0.9rem;
-    margin: 0;
-  }
-  button {
-    align-self: flex-start;
-    padding: 0.4rem 0.9rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    background: #fff;
-    cursor: pointer;
-    font-size: 0.875rem;
-  }
-  button:hover {
-    background: #f5f5f5;
   }
 </style>

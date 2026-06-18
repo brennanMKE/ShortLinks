@@ -53,6 +53,8 @@
   } from '../lib/links';
   import { subscribeLinks, prependUniqueByKey } from '../lib/events';
   import type { Link } from '../lib/types';
+  import Button from '../lib/Button.svelte';
+  import Panel from '../lib/Panel.svelte';
 
   const PER_PAGE = 20;
 
@@ -60,17 +62,13 @@
   let destinationUrl = $state('');
   let title = $state('');
   let customKey = $state('');
-  let expiresAt = $state(''); // <input type="datetime-local"> value (local time).
+  let expiresAt = $state('');
   let submitting = $state(false);
 
-  // The contextual banner shown after the most recent create attempt, and the
-  // per-field inline errors (cleared on edit / next submit).
   let notice = $state<CreateNotice | null>(null);
   let keyError = $state<string | null>(null);
   let urlError = $state<string | null>(null);
 
-  // Whether the entered URL fails client-side validation (gates submit, mirrors
-  // the server's http(s) check; the server is still authoritative).
   const urlInvalid = $derived(destinationUrl.trim() !== '' && !isValidHttpUrl(destinationUrl));
   const canSubmit = $derived(!submitting && destinationUrl.trim() !== '' && !urlInvalid);
 
@@ -86,7 +84,6 @@
   const hasPrev = $derived(page > 1);
   const hasNext = $derived(page < totalPages);
 
-  // Copy-button feedback: the key whose short URL was most recently copied.
   let copiedKey = $state<string | null>(null);
 
   async function loadPage(p: number) {
@@ -94,7 +91,6 @@
     loadError = null;
     try {
       const res = await listLinks(p, PER_PAGE);
-      // The list is the shared store so #0034 can prepend live events to it.
       links.set(res.links);
       page = res.page;
       perPage = res.per_page;
@@ -120,8 +116,6 @@
     if (k !== '') input.key = k;
     const e = expiresAt.trim();
     if (e !== '') {
-      // <input type="datetime-local"> gives a local "YYYY-MM-DDTHH:mm"; convert
-      // to an RFC 3339 instant (UTC, with offset) for the server's expires_at.
       const d = new Date(e);
       if (!Number.isNaN(d.getTime())) input.expires_at = d.toISOString();
     }
@@ -137,11 +131,7 @@
     try {
       const created = await createLink(buildInput());
       notice = noticeForCreated(created);
-      // Prepend the returned link to the shared store. On an active-duplicate the
-      // link already exists in the list; replace any existing row with the same
-      // key so we don't show it twice.
       links.update((cur) => [created, ...cur.filter((l) => l.key !== created.key)]);
-      // Clear the form except keep nothing sticky; a fresh form invites the next.
       destinationUrl = '';
       title = '';
       customKey = '';
@@ -186,7 +176,6 @@
     deactivating = { ...deactivating, [key]: true };
     try {
       await deactivateLink(key);
-      // Reflect the soft-delete in the store row without a refetch.
       links.update((cur) =>
         cur.map((l) => (l.key === key ? { ...l, active: false } : l)),
       );
@@ -195,7 +184,6 @@
         currentUser.set(null);
         currentView.set('login');
       }
-      // Other failures leave the row unchanged; the user can retry.
     } finally {
       const { [key]: _removed, ...rest } = deactivating;
       deactivating = rest;
@@ -206,7 +194,7 @@
     try {
       await logout();
     } catch {
-      // Even if the server call fails, drop local state and return to login.
+      // Drop local state and return to login even on failure.
     }
     currentUser.set(null);
     links.set([]);
@@ -231,12 +219,7 @@
     loadPage(1);
 
     // #0034 SSE live updates: open the /api/events stream and prepend each
-    // link.created event to the shared store. We dedupe by key with the pure
-    // helper because the user's OWN creates already prepended optimistically in
-    // handleCreate above and ALSO arrive here over SSE — so the same link must
-    // replace its existing row (moving it to the front) rather than appear twice.
-    // The browser's EventSource reconnects on its own after a drop (no custom
-    // retry). The cleanup returned below closes the stream on unmount.
+    // link.created event to the shared store.
     const unsubscribe = subscribeLinks((link) => {
       links.update((cur) => prependUniqueByKey(cur, link));
     });
@@ -245,126 +228,133 @@
   });
 </script>
 
-<div class="dashboard">
-  <header class="topbar">
-    <h1 class="wordmark">go.sstools.co</h1>
-    <nav class="tabs" aria-label="Primary">
-      <button type="button" class="tab active" aria-current="page">Dashboard</button>
-      <button type="button" class="tab" onclick={() => go('account')}>Account</button>
+<div class="app-shell">
+  <header class="app-header">
+    <h1 class="app-title">go.sstools.co</h1>
+    <nav class="nav-tabs" aria-label="Primary">
+      <button type="button" class="nav-tab active" aria-current="page">Dashboard</button>
+      <button type="button" class="nav-tab" onclick={() => go('account')}>Account</button>
       {#if $currentUser?.is_admin}
-        <button type="button" class="tab" onclick={() => go('admin')}>Admin</button>
+        <button type="button" class="nav-tab" onclick={() => go('admin')}>Admin</button>
       {/if}
     </nav>
-    <button type="button" class="signout" onclick={handleSignOut}>Sign out</button>
+    <Button variant="default" onclick={handleSignOut}>Sign out</Button>
   </header>
 
-  <section class="create card">
-    <h2>Create a short link</h2>
+  <Panel title="Create a short link">
     <form
       onsubmit={(e) => {
         e.preventDefault();
         handleCreate();
       }}
     >
-      <label for="dest-url">Destination URL</label>
-      <input
-        id="dest-url"
-        type="url"
-        inputmode="url"
-        placeholder="https://example.com/page"
-        bind:value={destinationUrl}
-        oninput={() => {
-          urlError = null;
-        }}
-        disabled={submitting}
-        required
-        aria-invalid={urlInvalid || urlError !== null}
-      />
-      {#if urlInvalid}
-        <p class="field-hint" role="status">Enter a valid http(s) URL.</p>
-      {/if}
-      {#if urlError}
-        <p class="error" role="alert">{urlError}</p>
-      {/if}
+      <div class="field">
+        <label for="dest-url">Destination URL</label>
+        <input
+          id="dest-url"
+          type="url"
+          inputmode="url"
+          placeholder="https://example.com/page"
+          bind:value={destinationUrl}
+          oninput={() => {
+            urlError = null;
+          }}
+          disabled={submitting}
+          required
+          aria-invalid={urlInvalid || urlError !== null}
+          class:input-error={urlInvalid || urlError !== null}
+        />
+        {#if urlInvalid}
+          <p class="text-warn" role="status">Enter a valid http(s) URL.</p>
+        {/if}
+        {#if urlError}
+          <p class="text-error" role="alert">{urlError}</p>
+        {/if}
+      </div>
 
-      <label for="title">Title <span class="optional">(optional)</span></label>
-      <input
-        id="title"
-        type="text"
-        placeholder="A human-readable label"
-        bind:value={title}
-        disabled={submitting}
-      />
+      <div class="field">
+        <label for="title">Title <span class="text-faint">(optional)</span></label>
+        <input
+          id="title"
+          type="text"
+          placeholder="A human-readable label"
+          bind:value={title}
+          disabled={submitting}
+        />
+      </div>
 
-      <label for="custom-key">Custom alias <span class="optional">(optional)</span></label>
-      <input
-        id="custom-key"
-        type="text"
-        placeholder="e.g. launch"
-        bind:value={customKey}
-        oninput={() => {
-          keyError = null;
-        }}
-        disabled={submitting}
-        aria-invalid={keyError !== null}
-      />
-      {#if keyError}
-        <p class="error" role="alert">{keyError}</p>
-      {/if}
+      <div class="field">
+        <label for="custom-key">Custom alias <span class="text-faint">(optional)</span></label>
+        <input
+          id="custom-key"
+          type="text"
+          placeholder="e.g. launch"
+          bind:value={customKey}
+          oninput={() => {
+            keyError = null;
+          }}
+          disabled={submitting}
+          aria-invalid={keyError !== null}
+          class:input-error={keyError !== null}
+        />
+        {#if keyError}
+          <p class="text-error" role="alert">{keyError}</p>
+        {/if}
+      </div>
 
-      <label for="expires">Expires <span class="optional">(optional)</span></label>
-      <input
-        id="expires"
-        type="datetime-local"
-        bind:value={expiresAt}
-        disabled={submitting}
-      />
+      <div class="field">
+        <label for="expires">Expires <span class="text-faint">(optional)</span></label>
+        <input
+          id="expires"
+          type="datetime-local"
+          bind:value={expiresAt}
+          disabled={submitting}
+        />
+      </div>
 
-      <button type="submit" disabled={!canSubmit}>
+      <Button type="submit" variant="primary" disabled={!canSubmit}>
         {submitting ? 'Creating…' : 'Create link'}
-      </button>
+      </Button>
     </form>
 
     {#if notice}
       {#if notice.kind === 'created' || notice.kind === 'duplicate'}
         {@const resultKey = notice.link.key}
-        <div class="result" role="status">
+        <div class="result-box" role="status">
           {#if notice.kind === 'duplicate'}
-            <p class="notice">{notice.message}</p>
+            <p class="text-notice result-label">{notice.message}</p>
           {:else}
-            <p class="success-label">Your short link is ready:</p>
+            <p class="result-label">Your short link is ready:</p>
           {/if}
-          <div class="short-url-row">
+          <div class="row">
             <a class="short-url" href={notice.shortUrl} target="_blank" rel="noreferrer">
               {notice.shortUrl}
             </a>
-            <button type="button" class="copy" onclick={() => copyShortUrl(resultKey)}>
+            <Button variant="subtle" onclick={() => copyShortUrl(resultKey)}>
               {copiedKey === resultKey ? 'Copied!' : 'Copy'}
-            </button>
+            </Button>
           </div>
         </div>
       {:else if notice.kind === 'denied'}
-        <p class="error denied" role="alert">{notice.message}</p>
+        <div class="denied-box" role="alert">{notice.message}</div>
       {:else if notice.field === null}
-        <p class="error" role="alert">{notice.message}</p>
+        <p class="text-error" role="alert">{notice.message}</p>
       {/if}
     {/if}
-  </section>
+  </Panel>
 
-  <section class="list card">
-    <h2>Your links</h2>
-
+  <Panel title="Your links" noPadding={$links.length > 0 && !loading && !loadError}>
     {#if loading}
-      <p class="muted">Loading your links…</p>
+      <p class="text-muted">Loading your links…</p>
     {:else if loadError}
-      <p class="error" role="alert">
+      <p class="text-error" role="alert">
         {loadError}
-        <button type="button" class="link" onclick={() => loadPage(page)}>Retry</button>
       </p>
+      <Button variant="subtle" onclick={() => loadPage(page)}>Retry</Button>
     {:else if $links.length === 0}
-      <p class="muted">No links yet — create your first one above.</p>
+      <p class="text-muted">No links yet — create your first one above.</p>
     {:else}
-      <table class="links-table">
+      <table>
         <thead>
           <tr>
             <th scope="col">Short URL</th>
@@ -379,26 +369,31 @@
         <tbody>
           {#each $links as link (link.key)}
             {@const status = linkStatus(link)}
-            <tr class="row" onclick={() => openDetail(link.key)}>
+            <tr class="link-row" onclick={() => openDetail(link.key)}>
               <td class="short-cell">
-                <span class="short-key">/u/{link.key}</span>
-                <button
-                  type="button"
-                  class="copy small"
-                  title="Copy short URL"
+                <span class="mono">/u/{link.key}</span>
+                <Button
+                  variant="subtle"
                   onclick={(e) => {
                     e.stopPropagation();
                     copyShortUrl(link.key);
                   }}
                 >
                   {copiedKey === link.key ? 'Copied!' : 'Copy'}
-                </button>
+                </Button>
               </td>
-              <td class="dest" title={link.destination_url}>{destinationDomain(link.destination_url)}</td>
+              <td class="dest-cell text-muted" title={link.destination_url}>
+                {destinationDomain(link.destination_url)}
+              </td>
               <td>{link.title || '—'}</td>
               <td class="num">{link.click_count}</td>
               <td>
-                <span class="badge {status}">
+                <span
+                  class="badge"
+                  class:badge-success={status === 'active'}
+                  class:badge-danger={status === 'denied'}
+                  class:badge-muted={status === 'inactive'}
+                >
                   {#if status === 'denied'}
                     Denied{link.denied_reason > 0 ? `: ${deniedReasonLabel(link.denied_reason)}` : ''}
                   {:else if status === 'inactive'}
@@ -408,12 +403,11 @@
                   {/if}
                 </span>
               </td>
-              <td class="muted">{formatDate(link.created_at)}</td>
-              <td class="actions">
+              <td class="text-muted">{formatDate(link.created_at)}</td>
+              <td class="actions-cell">
                 {#if status === 'active'}
-                  <button
-                    type="button"
-                    class="link danger"
+                  <Button
+                    variant="danger"
                     disabled={deactivating[link.key]}
                     onclick={(e) => {
                       e.stopPropagation();
@@ -421,7 +415,7 @@
                     }}
                   >
                     {deactivating[link.key] ? 'Deactivating…' : 'Deactivate'}
-                  </button>
+                  </Button>
                 {/if}
               </td>
             </tr>
@@ -431,178 +425,53 @@
 
       {#if totalPages > 1}
         <div class="pager">
-          <button type="button" disabled={!hasPrev} onclick={() => loadPage(page - 1)}>
-            Previous
-          </button>
-          <span class="page-info">Page {page} of {totalPages} ({total} links)</span>
-          <button type="button" disabled={!hasNext} onclick={() => loadPage(page + 1)}>
-            Next
-          </button>
+          <Button disabled={!hasPrev} onclick={() => loadPage(page - 1)}>Previous</Button>
+          <span class="text-muted">Page {page} of {totalPages} ({total} links)</span>
+          <Button disabled={!hasNext} onclick={() => loadPage(page + 1)}>Next</Button>
         </div>
       {/if}
     {/if}
-  </section>
+  </Panel>
 </div>
 
 <style>
-  .dashboard {
-    max-width: 56rem;
-    margin: 0 auto;
-    padding: 1rem;
-  }
-  .topbar {
+  .nav-tabs {
     display: flex;
-    align-items: center;
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-  .wordmark {
-    font-size: 1.125rem;
-    margin: 0;
-  }
-  .tabs {
-    display: flex;
-    gap: 0.5rem;
+    gap: var(--space-1);
     flex: 1;
+    padding: 0 var(--space-2);
   }
-  .tab {
+  .nav-tab {
     background: none;
     border: none;
-    padding: 0.375rem 0.5rem;
-    border-radius: 0.375rem;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius);
     cursor: pointer;
-    color: #444;
-    font-size: 0.9375rem;
+    color: var(--text-muted);
+    font-size: var(--fs-md);
+    font-family: var(--font);
   }
-  .tab.active {
-    background: #eef3fb;
-    color: #1f6feb;
+  .nav-tab.active {
+    background: var(--accent-subtle);
+    color: var(--accent);
     font-weight: 600;
   }
-  .signout {
-    background: none;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    padding: 0.375rem 0.75rem;
-    cursor: pointer;
-    font-size: 0.875rem;
-  }
-  .card {
-    border: 1px solid #e2e2e2;
-    border-radius: 0.5rem;
-    padding: 1.25rem;
-    margin-bottom: 1.5rem;
-  }
-  .card h2 {
-    margin: 0 0 1rem;
-    font-size: 1.125rem;
-  }
-  form {
-    display: flex;
-    flex-direction: column;
-    gap: 0.375rem;
-  }
-  label {
-    font-weight: 600;
-    font-size: 0.875rem;
-    margin-top: 0.5rem;
-  }
-  .optional {
-    font-weight: 400;
-    color: #888;
-  }
-  input {
-    padding: 0.5rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    font-size: 1rem;
-  }
-  input[aria-invalid='true'] {
-    border-color: #c0362c;
-  }
-  button[type='submit'] {
-    margin-top: 1rem;
-    padding: 0.5rem;
-    border: none;
-    border-radius: 0.375rem;
-    background: #1f6feb;
-    color: #fff;
-    font-size: 1rem;
-    cursor: pointer;
-  }
-  button[type='submit']:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .result {
-    margin-top: 1rem;
-    padding: 0.75rem;
-    border: 1px solid #d0e3ff;
-    background: #f5f9ff;
-    border-radius: 0.375rem;
-  }
-  .success-label {
-    margin: 0 0 0.5rem;
-    font-weight: 600;
-  }
-  .short-url-row {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-  }
-  .short-url {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    color: #1f6feb;
-    word-break: break-all;
-  }
-  .copy {
-    border: 1px solid #1f6feb;
-    background: #fff;
-    color: #1f6feb;
-    border-radius: 0.375rem;
-    padding: 0.25rem 0.625rem;
-    font-size: 0.8125rem;
-    cursor: pointer;
-  }
-  .copy.small {
-    padding: 0.125rem 0.5rem;
-    font-size: 0.75rem;
-  }
-  .links-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.875rem;
-  }
-  .links-table th,
-  .links-table td {
-    text-align: left;
-    padding: 0.5rem 0.5rem;
-    border-bottom: 1px solid #eee;
-    vertical-align: middle;
-  }
-  .links-table th {
-    color: #666;
-    font-weight: 600;
-    font-size: 0.8125rem;
-  }
-  .row {
-    cursor: pointer;
-  }
-  .row:hover {
-    background: #fafbfc;
+  .nav-tab:hover:not(.active) {
+    background: var(--bg-subtle);
+    color: var(--text);
   }
   .short-cell {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: var(--space-2);
     white-space: nowrap;
   }
-  .short-key {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  .mono {
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
   }
-  .dest {
-    max-width: 14rem;
+  .dest-cell {
+    max-width: 200px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -611,96 +480,47 @@
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
-  .muted {
-    color: #888;
-  }
-  .badge {
-    display: inline-block;
-    padding: 0.125rem 0.5rem;
-    border-radius: 1rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-  }
-  .badge.active {
-    background: #e6f4ea;
-    color: #1a7f37;
-  }
-  .badge.inactive {
-    background: #f0f0f0;
-    color: #777;
-  }
-  .badge.denied {
-    background: #fbe9e7;
-    color: #c0362c;
-  }
-  .actions {
+  .actions-cell {
     text-align: right;
     white-space: nowrap;
   }
-  .link {
-    background: none;
-    border: none;
-    color: #1f6feb;
+  .link-row {
     cursor: pointer;
-    padding: 0;
-    font-size: 0.875rem;
   }
-  .link.danger {
-    color: #c0362c;
+  .result-box {
+    margin-top: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    border: var(--border-w) solid var(--border);
+    background: var(--accent-subtle);
+    border-radius: var(--radius);
   }
-  .link:disabled {
-    opacity: 0.6;
-    cursor: default;
+  .result-label {
+    margin: 0 0 var(--space-2);
+    font-weight: 600;
+  }
+  .short-url {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    word-break: break-all;
+  }
+  .denied-box {
+    margin-top: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    border: var(--border-w) solid var(--border);
+    background: #fdecea;
+    color: var(--danger);
+    border-radius: var(--radius);
+    font-size: var(--fs-sm);
+  }
+  .input-error {
+    border-color: var(--danger) !important;
   }
   .pager {
     display: flex;
     align-items: center;
-    gap: 1rem;
-    margin-top: 1rem;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
     justify-content: center;
-  }
-  .pager button {
-    padding: 0.375rem 0.75rem;
-    border: 1px solid #ccc;
-    border-radius: 0.375rem;
-    background: #fff;
-    cursor: pointer;
-  }
-  .pager button:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .page-info {
-    color: #666;
-    font-size: 0.875rem;
-  }
-  .error {
-    color: #c0362c;
-    font-size: 0.875rem;
-    margin: 0.25rem 0 0;
-  }
-  .error.denied {
-    margin-top: 1rem;
-    padding: 0.75rem;
-    border: 1px solid #f3c6c0;
-    background: #fbe9e7;
-    border-radius: 0.375rem;
-  }
-  .notice {
-    color: #1a7f37;
-    margin: 0 0 0.5rem;
-    font-weight: 600;
-  }
-  .field-hint {
-    color: #b06000;
-    font-size: 0.8125rem;
-    margin: 0.125rem 0 0;
-  }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
+    border-top: var(--border-w) solid var(--border);
   }
 </style>
