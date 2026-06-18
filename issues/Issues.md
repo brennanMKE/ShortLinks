@@ -64,3 +64,29 @@ cd web && npm run build && cd .. && go build ./cmd/shortlinks
 ## Git tracking
 
 `issues/` is tracked in this repo. Each lifecycle event produces a commit per the skill's conventions.
+
+## Resolution workflow (review-gated subagents)
+
+Issues are worked **one at a time, in ascending order**, each on its own branch `issue/NNNN` cut from `main`, and nothing reaches `main` until an independent review approves. Three roles:
+
+- **Implementer subagent — model `claude-sonnet-4-6`.** Implements and verifies on the issue branch, committing checkpoints prefixed `#NNNN`. Flips the issue to `in-progress`. Never touches `main`, never edits resolution sections.
+- **Reviewer subagent — model `claude-opus-4-8`.** Reviews `git diff main...issue/NNNN` against the issue's acceptance criteria. Returns **Approve** or **Request changes** with a specific list. Never edits code, commits, or changes status.
+- **Orchestrator (main session).** Cuts the branch, dispatches both subagents, routes review findings back to the same implementer, records work-log rows, and — only after approval — marks the issue `resolved` and squash-merges to `main` (`git merge --squash`), keeping the branch.
+
+A project override may change the model assignments, but the default is **Sonnet implements, Opus reviews**. Status flow is `open` → `in-progress` → `resolved`; only the user sets `closed`.
+
+**Build-artifact note:** `web/dist/*` is gitignored except the placeholder `web/dist/index.html`; hashed `dist/assets/*` are never committed (production build regenerates them via `cd web && npm run build && go build`). Implementers must NOT commit a real `dist/index.html` build — leave the placeholder.
+
+## Work log & cost tracking
+
+Every implementer and reviewer dispatch appends one row to the issue's `## Work log` section (last section of the file), with exact token counts and cost. Prices live in `issues/model-pricing.json` (refreshed at most once/day from the Anthropic pricing docs). Token counts come from the subagent's transcript, deduped by `requestId`. Cost = (input×input + output×output + cache_read×cache_read + cache_write×cache_write_5m) / 1e6, rounded to the cent. Bailed attempts still get a row — they cost real tokens.
+
+```
+## Work log
+
+| Date | Model | Input | Output | Cache read | Cache write | Cost |
+|---|---|---|---|---|---|---|
+| 2026-06-17 | claude-sonnet-4-6 | 3,992 | 8,349 | 1,316,061 | 52,407 | $0.73 |
+
+**Total: $0.73**
+```
