@@ -53,6 +53,8 @@
   } from '../lib/links';
   import { subscribeLinks, prependUniqueByKey } from '../lib/events';
   import type { Link } from '../lib/types';
+  import { emptyUtmParams, composeUtmUrl, isUtmEmpty } from '../lib/utm';
+  import type { UtmParams } from '../lib/utm';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
 
@@ -64,6 +66,15 @@
   let customKey = $state('');
   let expiresAt = $state('');
   let submitting = $state(false);
+
+  // ── UTM builder state ───────────────────────────────────────────────────────
+  let utmOpen = $state(false);
+  let utmParams = $state<UtmParams>(emptyUtmParams());
+
+  // Live preview: the destination URL with UTM params baked in. When UTM fields
+  // are all empty this equals destinationUrl unchanged (no stray `?` appended).
+  const composedUrl = $derived(composeUtmUrl(destinationUrl, utmParams));
+  const hasUtm = $derived(!isUtmEmpty(utmParams));
 
   let notice = $state<CreateNotice | null>(null);
   let keyError = $state<string | null>(null);
@@ -109,7 +120,10 @@
 
   // ── Create submit ─────────────────────────────────────────────────────────
   function buildInput(): CreateLinkInput {
-    const input: CreateLinkInput = { destination_url: destinationUrl.trim() };
+    // Use the composed URL (destination + UTM params baked in) as the stored
+    // destination_url. UTM values are NOT stored as discrete fields — they are
+    // merged into the URL before submission. See lib/utm.ts for rationale.
+    const input: CreateLinkInput = { destination_url: composedUrl || destinationUrl.trim() };
     const t = title.trim();
     if (t !== '') input.title = t;
     const k = customKey.trim();
@@ -136,6 +150,8 @@
       title = '';
       customKey = '';
       expiresAt = '';
+      utmParams = emptyUtmParams();
+      utmOpen = false;
     } catch (err) {
       const n = noticeForError(err);
       notice = n;
@@ -310,6 +326,84 @@
           bind:value={expiresAt}
           disabled={submitting}
         />
+      </div>
+
+      <!-- UTM builder — collapsible section (#0048) -->
+      <div class="utm-section">
+        <button
+          type="button"
+          class="utm-toggle"
+          aria-expanded={utmOpen}
+          onclick={() => { utmOpen = !utmOpen; }}
+        >
+          <span class="utm-toggle-chevron" class:open={utmOpen}>▶</span>
+          Campaign / UTM parameters
+          {#if hasUtm && !utmOpen}
+            <span class="badge">filled</span>
+          {/if}
+        </button>
+
+        {#if utmOpen}
+          <div class="utm-fields">
+            <div class="field">
+              <label for="utm-source">Source <span class="text-faint">(utm_source)</span></label>
+              <input
+                id="utm-source"
+                type="text"
+                placeholder="e.g. newsletter, google, twitter"
+                bind:value={utmParams.utm_source}
+                disabled={submitting}
+              />
+            </div>
+            <div class="field">
+              <label for="utm-medium">Medium <span class="text-faint">(utm_medium)</span></label>
+              <input
+                id="utm-medium"
+                type="text"
+                placeholder="e.g. email, cpc, social"
+                bind:value={utmParams.utm_medium}
+                disabled={submitting}
+              />
+            </div>
+            <div class="field">
+              <label for="utm-campaign">Campaign <span class="text-faint">(utm_campaign)</span></label>
+              <input
+                id="utm-campaign"
+                type="text"
+                placeholder="e.g. spring-launch, black-friday"
+                bind:value={utmParams.utm_campaign}
+                disabled={submitting}
+              />
+            </div>
+            <div class="field">
+              <label for="utm-term">Term <span class="text-faint">(utm_term, optional)</span></label>
+              <input
+                id="utm-term"
+                type="text"
+                placeholder="e.g. running+shoes"
+                bind:value={utmParams.utm_term}
+                disabled={submitting}
+              />
+            </div>
+            <div class="field">
+              <label for="utm-content">Content <span class="text-faint">(utm_content, optional)</span></label>
+              <input
+                id="utm-content"
+                type="text"
+                placeholder="e.g. hero-cta, sidebar-link"
+                bind:value={utmParams.utm_content}
+                disabled={submitting}
+              />
+            </div>
+
+            {#if destinationUrl.trim() !== ''}
+              <div class="utm-preview">
+                <p class="utm-preview-label">Destination preview</p>
+                <p class="utm-preview-url" title={composedUrl}>{composedUrl}</p>
+              </div>
+            {/if}
+          </div>
+        {/if}
       </div>
 
       <Button type="submit" variant="primary" disabled={!canSubmit}>
@@ -522,5 +616,75 @@
     padding: var(--space-3) var(--space-4);
     justify-content: center;
     border-top: var(--border-w) solid var(--border);
+  }
+
+  /* ── UTM builder (#0048) ─────────────────────────────────────────────────── */
+  .utm-section {
+    margin-bottom: var(--space-3);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .utm-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    background: var(--bg-subtle);
+    border: none;
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .utm-toggle:hover {
+    background: var(--bg-header);
+    color: var(--text);
+  }
+
+  .utm-toggle-chevron {
+    font-size: 9px;
+    display: inline-block;
+    transition: transform 0.15s ease;
+    color: var(--text-faint);
+  }
+
+  .utm-toggle-chevron.open {
+    transform: rotate(90deg);
+  }
+
+  .utm-fields {
+    padding: var(--space-3) var(--space-3) var(--space-2);
+    border-top: var(--border-w) solid var(--border);
+    background: var(--bg-panel);
+  }
+
+  .utm-preview {
+    margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-subtle);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .utm-preview-label {
+    margin: 0 0 var(--space-1);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .utm-preview-url {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    color: var(--accent);
+    word-break: break-all;
+    overflow-wrap: anywhere;
   }
 </style>
