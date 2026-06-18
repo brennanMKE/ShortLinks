@@ -3,8 +3,8 @@
 # db-status.sh — read-only snapshot of the ShortLinks auth/registration state.
 # Run directly on the EC2 instance:
 #
-#     bash scripts/db-status.sh
-#     bash scripts/db-status.sh admin@example.com   # focus on one email
+#     bash scripts/db-status.sh                     # focus on $ADMIN_EMAIL from .env
+#     bash scripts/db-status.sh other@example.com   # focus on a specific email
 #
 # Uses `sudo -u postgres` peer auth, so no password is needed. cd /tmp first to
 # avoid the harmless "could not change directory" warning postgres emits when
@@ -12,8 +12,17 @@
 
 set -euo pipefail
 
+# Default the email filter to ADMIN_EMAIL. Read it from the project .env when not
+# already set in the environment. (Parsed directly rather than `source`d so other
+# .env values containing spaces/special chars can't break this script.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../.env"
+if [ -z "${ADMIN_EMAIL:-}" ] && [ -f "$ENV_FILE" ]; then
+  ADMIN_EMAIL="$(grep -E '^ADMIN_EMAIL=' "$ENV_FILE" | tail -n1 | cut -d= -f2- | tr -d "\"'")"
+fi
+
 DB="${SHORTLINKS_DB:-shortlinks}"
-EMAIL="${1:-}"
+EMAIL="${1:-${ADMIN_EMAIL:-}}"
 cd /tmp
 
 psql() { sudo -u postgres /usr/bin/psql -d "$DB" -X -P pager=off "$@"; }
