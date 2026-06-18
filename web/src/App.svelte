@@ -30,6 +30,12 @@
       const params = new URLSearchParams(window.location.search);
       const token = params.get('token');
       pendingVerifyToken.set(token);
+      // Strip the token from the URL immediately after capturing it into the
+      // store. The view selection is based on pathname only, so dropping the
+      // query string does not affect the first render. A mid-ceremony reload
+      // will land on /register/verify with no token in the URL (and thus an
+      // empty store), showing "No verification token found" — correct behavior.
+      history.replaceState({}, '', '/register/verify');
       currentView.set('register-verify');
       loading = false;
       return;
@@ -39,6 +45,8 @@
       const params = new URLSearchParams(window.location.search);
       const token = params.get('token');
       pendingVerifyToken.set(token);
+      // Same defensive strip for the recovery path.
+      history.replaceState({}, '', '/recover/verify');
       currentView.set('recover-verify');
       loading = false;
       return;

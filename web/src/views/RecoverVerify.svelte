@@ -130,6 +130,9 @@
       const user = await getMe();
       currentUser.set(user);
       pendingVerifyToken.set(null);
+      // Replace the consumed-token URL so a reload routes through /api/me
+      // (valid session → dashboard) instead of replaying the spent token.
+      history.replaceState({}, '', '/');
       currentView.set('dashboard');
     } catch {
       // The session cookie was set by the finish endpoint; a /api/me failure
