@@ -5,7 +5,14 @@ import { writable } from 'svelte/store';
 import type { User, Link } from './types';
 
 /** The set of top-level views App.svelte can render. */
-export type View = 'login' | 'dashboard' | 'link-detail' | 'account' | 'admin';
+export type View =
+  | 'login'
+  | 'dashboard'
+  | 'link-detail'
+  | 'account'
+  | 'admin'
+  | 'register-verify'  // magic-link registration landing (#0041)
+  | 'recover-verify';  // magic-link recovery landing (#0041)
 
 /**
  * The active view. Default is "login"; App.svelte flips it to "dashboard" once
@@ -27,3 +34,11 @@ export const links = writable<Link[]>([]);
  * there is no URL routing, the detail view reads which link to load from here.
  */
 export const selectedLinkKey = writable<string | null>(null);
+
+/**
+ * The magic-link token parsed from the landing URL (/register/verify or
+ * /recover/verify). App.svelte sets this on load when it detects one of those
+ * paths; the register-verify and recover-verify views read it on mount (#0041).
+ * Cleared after the ceremony completes or fails.
+ */
+export const pendingVerifyToken = writable<string | null>(null);

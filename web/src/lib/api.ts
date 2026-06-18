@@ -192,6 +192,27 @@ export function registerStart(email: string): Promise<{ message: string }> {
   return apiPost<{ message: string }>('/auth/register/start', { email });
 }
 
+/**
+ * GET /auth/register/verify?token=… — exchange the magic-link token for
+ * WebAuthn `PublicKeyCredentialCreationOptions`. Called by the register-verify
+ * landing view after the SPA loads (#0041). Returns ApiError(400/401/410) for
+ * invalid or expired tokens; ApiError(404) if the session challenge has expired.
+ * The credential-creation ceremony (navigator.credentials.create) and the POST
+ * to /auth/register/finish are implemented in #0042.
+ */
+export function registerVerify(token: string): Promise<unknown> {
+  return apiGet<unknown>(`/auth/register/verify?token=${encodeURIComponent(token)}`);
+}
+
+/**
+ * GET /auth/recover/verify?token=… — exchange the recovery magic-link token
+ * for WebAuthn `PublicKeyCredentialCreationOptions`. Called by the
+ * recover-verify landing view (#0041). The ceremony and finish POST are #0043.
+ */
+export function recoverVerify(token: string): Promise<unknown> {
+  return apiGet<unknown>(`/auth/recover/verify?token=${encodeURIComponent(token)}`);
+}
+
 // ── Account (passkeys) ──────────────────────────────────────────────────────
 
 /** GET /account/credentials — the caller's registered passkeys. */

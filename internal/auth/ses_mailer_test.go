@@ -76,7 +76,10 @@ func TestSESMailer_SendVerification_InjectedTransport(t *testing.T) {
 			t.Errorf("message missing header %q\nfull message:\n%s", h, msg)
 		}
 	}
-	wantLink := "https://go.sstools.co/auth/register/verify?token=tok-123"
+	// The email link now points at the SPA browser path (/register/verify), not
+	// the /auth/* JSON API endpoint. The SPA reads the token and calls
+	// GET /auth/register/verify to fetch creation options (#0041).
+	wantLink := "https://go.sstools.co/register/verify?token=tok-123"
 	if !strings.Contains(msg, wantLink) {
 		t.Errorf("message missing verification link %q\nfull message:\n%s", wantLink, msg)
 	}
@@ -103,7 +106,9 @@ func TestSESMailer_SendRecovery_InjectedTransport(t *testing.T) {
 	if !strings.Contains(msg, "Subject: Recover your ShortLinks account\r\n") {
 		t.Errorf("message missing recovery subject\nfull message:\n%s", msg)
 	}
-	wantLink := "https://go.sstools.co/auth/recover/verify?token=rec-789"
+	// The email link now points at the SPA browser path (/recover/verify), not
+	// the /auth/* JSON API endpoint (#0041).
+	wantLink := "https://go.sstools.co/recover/verify?token=rec-789"
 	if !strings.Contains(msg, wantLink) {
 		t.Errorf("message missing recovery link %q\nfull message:\n%s", wantLink, msg)
 	}
@@ -296,7 +301,8 @@ func TestSESMailer_RealTransport_AgainstFakeServer(t *testing.T) {
 	if !strings.Contains(srv.data, "Subject: Verify your ShortLinks account") {
 		t.Errorf("DATA missing subject\nfull DATA:\n%s", srv.data)
 	}
-	if !strings.Contains(srv.data, "https://go.sstools.co/auth/register/verify?token=tok-real") {
+	// SPA browser path (#0041).
+	if !strings.Contains(srv.data, "https://go.sstools.co/register/verify?token=tok-real") {
 		t.Errorf("DATA missing verification link\nfull DATA:\n%s", srv.data)
 	}
 }
