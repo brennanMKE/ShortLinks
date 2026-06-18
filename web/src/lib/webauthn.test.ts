@@ -11,7 +11,10 @@ import {
   base64urlToBytes,
   toPublicKeyRequestOptions,
   serializeAssertion,
+  toPublicKeyCreationOptions,
+  serializeAttestation,
   type ServerRequestOptions,
+  type ServerCreationOptions,
 } from './webauthn';
 
 function bytes(...vals: number[]): Uint8Array {
@@ -184,5 +187,177 @@ describe('serializeAssertion', () => {
       }),
     );
     expect('userHandle' in payload.response).toBe(false);
+  });
+});
+
+// ── toPublicKeyCreationOptions ───────────────────────────────────────────────
+
+describe('toPublicKeyCreationOptions', () => {
+  it('decodes challenge and user.id into bytes', () => {
+    const challengeBytes = bytes(0x11, 0x22, 0x33, 0x44);
+    const userIdBytes = bytes(0xaa, 0xbb, 0xcc);
+
+    const server: ServerCreationOptions = {
+      challenge: bufferToBase64url(challengeBytes),
+      rp: { id: 'go.sstools.co', name: 'ShortLinks' },
+      user: {
+        id: bufferToBase64url(userIdBytes),
+        name: 'user@example.com',
+        displayName: 'user@example.com',
+      },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+      timeout: 60000,
+    };
+
+    const opts = toPublicKeyCreationOptions(server);
+
+    expect(Array.from(new Uint8Array(opts.challenge as ArrayBuffer))).toEqual([
+      0x11, 0x22, 0x33, 0x44,
+    ]);
+    expect(Array.from(new Uint8Array(opts.user.id as ArrayBuffer))).toEqual([0xaa, 0xbb, 0xcc]);
+    expect(opts.user.name).toBe('user@example.com');
+    expect(opts.user.displayName).toBe('user@example.com');
+    expect(opts.rp).toEqual({ id: 'go.sstools.co', name: 'ShortLinks' });
+    expect(opts.timeout).toBe(60000);
+    expect(opts.pubKeyCredParams).toEqual([{ type: 'public-key', alg: -7 }]);
+  });
+
+  it('decodes excludeCredentials ids into bytes', () => {
+    const excludedId = bytes(0xde, 0xad, 0xbe, 0xef);
+    const server: ServerCreationOptions = {
+      challenge: bufferToBase64url(bytes(1, 2, 3)),
+      rp: { id: 'go.sstools.co', name: 'ShortLinks' },
+      user: { id: bufferToBase64url(bytes(9)), name: 'u', displayName: 'u' },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+      excludeCredentials: [
+        { type: 'public-key', id: bufferToBase64url(excludedId), transports: ['internal'] },
+      ],
+    };
+
+    const opts = toPublicKeyCreationOptions(server);
+
+    expect(opts.excludeCredentials).toHaveLength(1);
+    const ec = opts.excludeCredentials![0];
+    expect(ec.type).toBe('public-key');
+    expect(Array.from(new Uint8Array(ec.id as ArrayBuffer))).toEqual([0xde, 0xad, 0xbe, 0xef]);
+    expect(ec.transports).toEqual(['internal']);
+  });
+
+  it('omits excludeCredentials when the list is empty', () => {
+    const opts = toPublicKeyCreationOptions({
+      challenge: bufferToBase64url(bytes(1)),
+      rp: { id: 'go.sstools.co', name: 'ShortLinks' },
+      user: { id: bufferToBase64url(bytes(2)), name: 'u', displayName: 'u' },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+      excludeCredentials: [],
+    });
+    expect(opts.excludeCredentials).toBeUndefined();
+  });
+
+  it('passes through authenticatorSelection and attestation', () => {
+    const opts = toPublicKeyCreationOptions({
+      challenge: bufferToBase64url(bytes(5)),
+      rp: { id: 'go.sstools.co', name: 'ShortLinks' },
+      user: { id: bufferToBase64url(bytes(6)), name: 'u', displayName: 'u' },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        residentKey: 'required',
+        userVerification: 'required',
+      },
+      attestation: 'none',
+    });
+    expect(opts.authenticatorSelection).toEqual({
+      authenticatorAttachment: 'platform',
+      residentKey: 'required',
+      userVerification: 'required',
+    });
+    expect(opts.attestation).toBe('none');
+  });
+});
+
+// ── serializeAttestation ─────────────────────────────────────────────────────
+
+describe('serializeAttestation', () => {
+  // A minimal fake of the PublicKeyCredential returned by
+  // navigator.credentials.create().
+  function fakeCreationCredential(opts: {
+    rawId: Uint8Array;
+    clientDataJSON: Uint8Array;
+    attestationObject: Uint8Array;
+    transports?: string[];
+    attachment?: string;
+  }): PublicKeyCredential {
+    const response = {
+      clientDataJSON: opts.clientDataJSON.buffer,
+      attestationObject: opts.attestationObject.buffer,
+      getTransports: () => opts.transports ?? [],
+    };
+    return {
+      id: bufferToBase64url(opts.rawId),
+      type: 'public-key',
+      rawId: opts.rawId.buffer,
+      authenticatorAttachment: opts.attachment ?? null,
+      response,
+      getClientExtensionResults: () => ({}),
+    } as unknown as PublicKeyCredential;
+  }
+
+  it('produces the exact base64url JSON keys /auth/register/finish expects', () => {
+    const rawId = bytes(0xde, 0xad, 0xbe, 0xef);
+    const clientData = new TextEncoder().encode('{"type":"webauthn.create"}');
+    const attestObj = bytes(0xa3, 0x63, 0x66, 0x6d, 0x74); // partial CBOR
+
+    const payload = serializeAttestation(
+      fakeCreationCredential({
+        rawId,
+        clientDataJSON: clientData,
+        attestationObject: attestObj,
+        transports: ['internal'],
+        attachment: 'platform',
+      }),
+    );
+
+    expect(payload).toEqual({
+      id: bufferToBase64url(rawId),
+      type: 'public-key',
+      rawId: bufferToBase64url(rawId),
+      authenticatorAttachment: 'platform',
+      clientExtensionResults: {},
+      response: {
+        clientDataJSON: bufferToBase64url(clientData),
+        attestationObject: bufferToBase64url(attestObj),
+        transports: ['internal'],
+      },
+    });
+
+    // Confirm binary fields round-trip through base64url.
+    expect(Array.from(base64urlToBytes(payload.rawId))).toEqual(Array.from(rawId));
+    expect(Array.from(base64urlToBytes(payload.response.attestationObject!))).toEqual(
+      Array.from(attestObj),
+    );
+  });
+
+  it('omits transports when none are returned', () => {
+    const payload = serializeAttestation(
+      fakeCreationCredential({
+        rawId: bytes(1),
+        clientDataJSON: bytes(2),
+        attestationObject: bytes(3),
+        transports: [],
+      }),
+    );
+    expect('transports' in payload.response).toBe(false);
+  });
+
+  it('omits authenticatorAttachment when null', () => {
+    const payload = serializeAttestation(
+      fakeCreationCredential({
+        rawId: bytes(1),
+        clientDataJSON: bytes(2),
+        attestationObject: bytes(3),
+      }),
+    );
+    expect('authenticatorAttachment' in payload).toBe(false);
   });
 });

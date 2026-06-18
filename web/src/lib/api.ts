@@ -17,6 +17,8 @@ import type {
 import type {
   ServerCredentialAssertion,
   AssertionFinishPayload,
+  ServerCredentialCreation,
+  AttestationFinishPayload,
 } from './webauthn';
 
 /**
@@ -197,11 +199,33 @@ export function registerStart(email: string): Promise<{ message: string }> {
  * WebAuthn `PublicKeyCredentialCreationOptions`. Called by the register-verify
  * landing view after the SPA loads (#0041). Returns ApiError(400/401/410) for
  * invalid or expired tokens; ApiError(404) if the session challenge has expired.
- * The credential-creation ceremony (navigator.credentials.create) and the POST
- * to /auth/register/finish are implemented in #0042.
  */
-export function registerVerify(token: string): Promise<unknown> {
-  return apiGet<unknown>(`/auth/register/verify?token=${encodeURIComponent(token)}`);
+export function registerVerify(token: string): Promise<ServerCredentialCreation> {
+  return apiGet<ServerCredentialCreation>(
+    `/auth/register/verify?token=${encodeURIComponent(token)}`,
+  );
+}
+
+/**
+ * POST /auth/register/finish?token=…&device_name=… — submit the serialized
+ * attestation to complete registration. The token and optional device_name are
+ * query parameters (the handler reads them from the URL so the raw attestation
+ * body is passed untouched to go-webauthn). On success the server sets the
+ * session cookie and returns `{id, email, is_admin}`. Errors: 400 for
+ * invalid/expired token or failed attestation.
+ *
+ * See: internal/handlers/auth.go (RegisterFinish).
+ */
+export function registerFinish(
+  token: string,
+  attestation: AttestationFinishPayload,
+  deviceName?: string,
+): Promise<{ id: number; email: string; is_admin: boolean }> {
+  let path = `/auth/register/finish?token=${encodeURIComponent(token)}`;
+  if (deviceName) {
+    path += `&device_name=${encodeURIComponent(deviceName)}`;
+  }
+  return apiPost<{ id: number; email: string; is_admin: boolean }>(path, attestation);
 }
 
 /**

@@ -172,6 +172,150 @@ export function serializeAssertion(
   return payload;
 }
 
+// ── Server creation-options JSON → PublicKeyCredentialCreationOptions ────────
+
+/**
+ * The shape of the creation options the server returns from
+ * `GET /auth/register/verify?token=…`. Mirrors go-webauthn's
+ * `protocol.CredentialCreation`: a `publicKey` object (the
+ * `PublicKeyCredentialCreationOptions`) plus an optional top-level
+ * `mediation`. `challenge`, `user.id`, and each
+ * `excludeCredentials[].id` are unpadded base64url strings.
+ *
+ * See: internal/auth/registration.go (VerifyRegistration),
+ * internal/handlers/auth.go (RegisterVerify).
+ */
+export interface ServerCredentialCreation {
+  publicKey: ServerCreationOptions;
+  mediation?: string;
+}
+
+/** The `publicKey` member of {@link ServerCredentialCreation}. */
+export interface ServerCreationOptions {
+  /** Unpadded base64url challenge bytes. */
+  challenge: string;
+  rp: { id: string; name: string };
+  /** `user.id` is unpadded base64url (go-webauthn serialises `any` → base64url). */
+  user: { id: string; name: string; displayName: string };
+  pubKeyCredParams: Array<{ type: PublicKeyCredentialType; alg: COSEAlgorithmIdentifier }>;
+  timeout?: number;
+  excludeCredentials?: ServerCreationCredentialDescriptor[];
+  authenticatorSelection?: AuthenticatorSelectionCriteria;
+  attestation?: AttestationConveyancePreference;
+  extensions?: Record<string, unknown>;
+}
+
+/** One entry of the server's `excludeCredentials` list. */
+export interface ServerCreationCredentialDescriptor {
+  type: PublicKeyCredentialType;
+  id: string;
+  transports?: AuthenticatorTransport[];
+}
+
+/**
+ * Convert the server's JSON creation options into the
+ * `PublicKeyCredentialCreationOptions` the browser's
+ * `navigator.credentials.create` expects, decoding `challenge`,
+ * `user.id`, and every `excludeCredentials[].id` from base64url into
+ * `ArrayBuffer`s (`BufferSource`).
+ */
+export function toPublicKeyCreationOptions(
+  options: ServerCreationOptions,
+): PublicKeyCredentialCreationOptions {
+  const publicKey: PublicKeyCredentialCreationOptions = {
+    challenge: base64urlToBytes(options.challenge),
+    rp: options.rp,
+    user: {
+      id: base64urlToBytes(options.user.id),
+      name: options.user.name,
+      displayName: options.user.displayName,
+    },
+    pubKeyCredParams: options.pubKeyCredParams,
+  };
+
+  if (options.timeout !== undefined) publicKey.timeout = options.timeout;
+  if (options.authenticatorSelection !== undefined) {
+    publicKey.authenticatorSelection = options.authenticatorSelection;
+  }
+  if (options.attestation !== undefined) publicKey.attestation = options.attestation;
+  if (options.extensions !== undefined) {
+    publicKey.extensions = options.extensions as AuthenticationExtensionsClientInputs;
+  }
+  if (options.excludeCredentials && options.excludeCredentials.length > 0) {
+    publicKey.excludeCredentials = options.excludeCredentials.map((cred) => {
+      const descriptor: PublicKeyCredentialDescriptor = {
+        type: cred.type,
+        id: base64urlToBytes(cred.id),
+      };
+      if (cred.transports) descriptor.transports = cred.transports;
+      return descriptor;
+    });
+  }
+
+  return publicKey;
+}
+
+// ── PublicKeyCredential attestation → server finish JSON ─────────────────────
+
+/**
+ * The exact JSON body `POST /auth/register/finish` expects. Mirrors
+ * go-webauthn's `protocol.CredentialCreationResponse`:
+ * `id`/`rawId` and every `response.*` binary field are unpadded
+ * base64url. `transports` is included when the authenticator reports
+ * them (the server stores them for future `allowCredentials` hints).
+ */
+export interface AttestationFinishPayload {
+  id: string;
+  type: string;
+  rawId: string;
+  authenticatorAttachment?: string;
+  clientExtensionResults: AuthenticationExtensionsClientOutputs;
+  response: {
+    clientDataJSON: string;
+    attestationObject: string;
+    transports?: string[];
+  };
+}
+
+/**
+ * Serialize the `PublicKeyCredential` returned by
+ * `navigator.credentials.create()` into the base64url JSON shape the
+ * server parses with `protocol.ParseCredentialCreationResponse`. Encodes
+ * `id`/`rawId` and each `response.*` field to match the server's
+ * `URLEncodedBase64` decoding exactly.
+ */
+export function serializeAttestation(
+  credential: PublicKeyCredential,
+): AttestationFinishPayload {
+  const response = credential.response as AuthenticatorAttestationResponse;
+
+  const payload: AttestationFinishPayload = {
+    id: credential.id,
+    type: credential.type,
+    rawId: bufferToBase64url(credential.rawId),
+    clientExtensionResults: credential.getClientExtensionResults(),
+    response: {
+      clientDataJSON: bufferToBase64url(response.clientDataJSON),
+      attestationObject: bufferToBase64url(response.attestationObject),
+    },
+  };
+
+  if (credential.authenticatorAttachment) {
+    payload.authenticatorAttachment = credential.authenticatorAttachment;
+  }
+  // Include transports when the authenticator reports them so the server can
+  // persist them for future allowCredentials hints (getTransports() is
+  // optional in older browsers — guard with a typeof check).
+  if (typeof response.getTransports === 'function') {
+    const transports = response.getTransports();
+    if (transports && transports.length > 0) {
+      payload.response.transports = transports;
+    }
+  }
+
+  return payload;
+}
+
 /**
  * Feature-detect conditional-mediation (passkey autofill) support. Browsers that
  * lack it should skip the background `mediation: 'conditional'` get() call and
