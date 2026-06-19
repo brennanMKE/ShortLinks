@@ -220,3 +220,44 @@ tbody tr:last-child td { border-bottom: none; }
 .text-error  { color: var(--danger); font-size: var(--fs-sm); margin: var(--space-1) 0 0; }
 .text-notice { color: var(--success); font-size: var(--fs-sm); margin: var(--space-1) 0 0; }
 .text-warn   { color: var(--warning); font-size: var(--fs-sm); margin: var(--space-1) 0 0; }
+
+/* ── Scroll container — wrap wide tables on mobile ──────────────────────────── */
+/*
+ * Apply .table-scroll around any <table> that must scroll horizontally on narrow
+ * screens instead of stacking.  The wrapper clips overflow and gives a stable
+ * column-layout context; -webkit-overflow-scrolling: touch provides momentum
+ * scrolling on iOS Safari.
+ */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Mobile responsive — 480px and below ────────────────────────────────────── */
+/*
+ * Breakpoint covers iPhone SE (375px) through iPhone Pro Max (430px) and up to
+ * 480px.  All rules are additive — desktop layout is untouched above 480px.
+ * No hardcoded hex colours; all values use design tokens.
+ */
+@media (max-width: 480px) {
+  /* Tighten the shell gutter so cards don't clip the viewport edge */
+  .app-shell {
+    padding: var(--space-4) var(--space-3);
+  }
+
+  /*
+   * Stack the app-header so title / nav-tabs / sign-out don't fight for space.
+   * Consumers (Dashboard, Account, Admin) each define .nav-tabs and .nav-tab
+   * as scoped Svelte styles; the shared header layout change is done here.
+   */
+  .app-header {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-3);
+  }
+
+  /* Ensure the app title takes its natural width and doesn't grow */
+  .app-title {
+    flex: none;
+  }
+}

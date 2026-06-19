@@ -266,6 +266,10 @@
     color: var(--text-muted);
     font-size: var(--fs-md);
     font-family: var(--font);
+    /* Comfortable tap target on mobile */
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
   }
   .nav-tab.active {
     background: var(--accent-subtle);
@@ -275,6 +279,27 @@
   .nav-tab:hover:not(.active) {
     background: var(--bg-subtle);
     color: var(--text);
+  }
+
+  @media (max-width: 480px) {
+    /* Stack nav-tabs below the title/sign-out row */
+    .nav-tabs {
+      order: 3;
+      flex: 0 0 100%;
+      padding: 0;
+      flex-wrap: wrap;
+    }
+    .nav-tab {
+      font-size: var(--fs-base);
+      padding: var(--space-1) var(--space-3);
+    }
+    /* Credential cards: stack the main content and revoke button vertically */
+    .cred {
+      flex-direction: column;
+    }
+    .cred-actions {
+      align-self: flex-start;
+    }
   }
   .intro {
     margin: 0 0 var(--space-3);

@@ -155,6 +155,7 @@
     max-width: 360px;
     margin: var(--space-6) auto;
     padding: 0 var(--space-4);
+    width: 100%;
   }
   .brand {
     text-align: center;
@@ -164,5 +165,11 @@
     font-size: var(--fs-xl);
     font-weight: 600;
     margin: 0;
+  }
+
+  @media (max-width: 480px) {
+    .verify-shell {
+      margin-top: var(--space-5);
+    }
   }
 </style>

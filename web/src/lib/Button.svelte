@@ -61,4 +61,12 @@
     color: var(--danger);
   }
   .btn-danger:hover:not(:disabled) { background: #fbeaea; }
+
+  /* Increase tap target height on mobile (≥40px) without changing desktop layout */
+  @media (max-width: 480px) {
+    .btn {
+      padding: var(--space-3) var(--space-3);
+      min-height: 40px;
+    }
+  }
 </style>

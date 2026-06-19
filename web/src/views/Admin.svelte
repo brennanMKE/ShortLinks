@@ -583,70 +583,72 @@
         {:else if rules.length === 0}
           <p class="text-muted">No filter rules defined.</p>
         {:else}
-          <table>
-            <thead>
-              <tr>
-                <th>Pattern</th>
-                <th>Reason</th>
-                <th>Description</th>
-                <th>Active</th>
-                <th class="actions-col">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each rules as rule (rule.id)}
+          <div class="table-scroll">
+            <table>
+              <thead>
                 <tr>
-                  {#if editingRuleId === rule.id}
-                    <td>
-                      <input type="text" bind:value={editPattern} disabled={savingRule} />
-                    </td>
-                    <td>
-                      <select bind:value={editReason} disabled={savingRule}>
-                        {#each REASON_OPTIONS as opt (opt.code)}
-                          <option value={opt.code}>{opt.label}</option>
-                        {/each}
-                      </select>
-                    </td>
-                    <td>
-                      <input type="text" bind:value={editDescription} disabled={savingRule} />
-                    </td>
-                    <td>
-                      <label class="inline-check">
-                        <input type="checkbox" bind:checked={editActive} disabled={savingRule} />
-                        Active
-                      </label>
-                    </td>
-                    <td class="actions-col">
-                      <div class="row">
-                        <Button variant="primary" disabled={savingRule} onclick={() => saveEditRule(rule)}>
-                          {savingRule ? 'Saving…' : 'Save'}
-                        </Button>
-                        <Button disabled={savingRule} onclick={cancelEditRule}>Cancel</Button>
-                      </div>
-                    </td>
-                  {:else}
-                    <td class="mono">{rule.pattern}</td>
-                    <td>{rule.reason_label || reasonLabel(rule.reason_code)}</td>
-                    <td>{rule.description || '—'}</td>
-                    <td>{rule.active ? 'Yes' : 'No'}</td>
-                    <td class="actions-col">
-                      <div class="row">
-                        <Button onclick={() => startEditRule(rule)}>Edit</Button>
-                        <Button variant="danger" onclick={() => handleDeleteRule(rule)}>Delete</Button>
-                      </div>
-                    </td>
-                  {/if}
+                  <th>Pattern</th>
+                  <th>Reason</th>
+                  <th>Description</th>
+                  <th>Active</th>
+                  <th class="actions-col">Actions</th>
                 </tr>
-                {#if ruleRowError[rule.id]}
+              </thead>
+              <tbody>
+                {#each rules as rule (rule.id)}
                   <tr>
-                    <td colspan="5">
-                      <p class="text-error" role="alert">{ruleRowError[rule.id]}</p>
-                    </td>
+                    {#if editingRuleId === rule.id}
+                      <td>
+                        <input type="text" bind:value={editPattern} disabled={savingRule} />
+                      </td>
+                      <td>
+                        <select bind:value={editReason} disabled={savingRule}>
+                          {#each REASON_OPTIONS as opt (opt.code)}
+                            <option value={opt.code}>{opt.label}</option>
+                          {/each}
+                        </select>
+                      </td>
+                      <td>
+                        <input type="text" bind:value={editDescription} disabled={savingRule} />
+                      </td>
+                      <td>
+                        <label class="inline-check">
+                          <input type="checkbox" bind:checked={editActive} disabled={savingRule} />
+                          Active
+                        </label>
+                      </td>
+                      <td class="actions-col">
+                        <div class="row">
+                          <Button variant="primary" disabled={savingRule} onclick={() => saveEditRule(rule)}>
+                            {savingRule ? 'Saving…' : 'Save'}
+                          </Button>
+                          <Button disabled={savingRule} onclick={cancelEditRule}>Cancel</Button>
+                        </div>
+                      </td>
+                    {:else}
+                      <td class="mono">{rule.pattern}</td>
+                      <td>{rule.reason_label || reasonLabel(rule.reason_code)}</td>
+                      <td>{rule.description || '—'}</td>
+                      <td>{rule.active ? 'Yes' : 'No'}</td>
+                      <td class="actions-col">
+                        <div class="row">
+                          <Button onclick={() => startEditRule(rule)}>Edit</Button>
+                          <Button variant="danger" onclick={() => handleDeleteRule(rule)}>Delete</Button>
+                        </div>
+                      </td>
+                    {/if}
                   </tr>
-                {/if}
-              {/each}
-            </tbody>
-          </table>
+                  {#if ruleRowError[rule.id]}
+                    <tr>
+                      <td colspan="5">
+                        <p class="text-error" role="alert">{ruleRowError[rule.id]}</p>
+                      </td>
+                    </tr>
+                  {/if}
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
       </Panel>
     {/if}
@@ -661,56 +663,58 @@
         {:else if users.length === 0}
           <p class="text-muted">No users found.</p>
         {:else}
-          <table>
-            <thead>
-              <tr>
-                <th>Email</th>
-                <th>Admin</th>
-                <th>Status</th>
-                <th>Last login</th>
-                <th class="actions-col">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each users as user (user.id)}
+          <div class="table-scroll">
+            <table>
+              <thead>
                 <tr>
-                  <td>{user.email}</td>
-                  <td>{user.is_admin ? 'Admin' : '—'}</td>
-                  <td>
-                    <span
-                      class="badge"
-                      class:badge-success={user.active}
-                      class:badge-danger={!user.active}
-                    >
-                      {user.active ? 'Active' : 'Inactive'}
-                    </span>
-                  </td>
-                  <td>{user.last_login_at ? formatDateTime(user.last_login_at) : 'Never'}</td>
-                  <td class="actions-col">
-                    {#if canDeactivate(user, $currentUser?.id ?? -1)}
-                      <Button variant="danger" onclick={() => openDeactivate(user)}>Deactivate</Button>
-                    {:else if !user.active}
-                      <Button
-                        disabled={reactivatingId === user.id}
-                        onclick={() => handleReactivate(user)}
-                      >
-                        {reactivatingId === user.id ? 'Reactivating…' : 'Reactivate'}
-                      </Button>
-                    {:else}
-                      <span class="text-muted">—</span>
-                    {/if}
-                  </td>
+                  <th>Email</th>
+                  <th>Admin</th>
+                  <th>Status</th>
+                  <th>Last login</th>
+                  <th class="actions-col">Actions</th>
                 </tr>
-                {#if userRowError[user.id]}
+              </thead>
+              <tbody>
+                {#each users as user (user.id)}
                   <tr>
-                    <td colspan="5">
-                      <p class="text-error" role="alert">{userRowError[user.id]}</p>
+                    <td>{user.email}</td>
+                    <td>{user.is_admin ? 'Admin' : '—'}</td>
+                    <td>
+                      <span
+                        class="badge"
+                        class:badge-success={user.active}
+                        class:badge-danger={!user.active}
+                      >
+                        {user.active ? 'Active' : 'Inactive'}
+                      </span>
+                    </td>
+                    <td>{user.last_login_at ? formatDateTime(user.last_login_at) : 'Never'}</td>
+                    <td class="actions-col">
+                      {#if canDeactivate(user, $currentUser?.id ?? -1)}
+                        <Button variant="danger" onclick={() => openDeactivate(user)}>Deactivate</Button>
+                      {:else if !user.active}
+                        <Button
+                          disabled={reactivatingId === user.id}
+                          onclick={() => handleReactivate(user)}
+                        >
+                          {reactivatingId === user.id ? 'Reactivating…' : 'Reactivate'}
+                        </Button>
+                      {:else}
+                        <span class="text-muted">—</span>
+                      {/if}
                     </td>
                   </tr>
-                {/if}
-              {/each}
-            </tbody>
-          </table>
+                  {#if userRowError[user.id]}
+                    <tr>
+                      <td colspan="5">
+                        <p class="text-error" role="alert">{userRowError[user.id]}</p>
+                      </td>
+                    </tr>
+                  {/if}
+                {/each}
+              </tbody>
+            </table>
+          </div>
         {/if}
       </Panel>
 
@@ -803,30 +807,32 @@
         {:else if auditEntries.length === 0}
           <p class="text-muted">No audit entries.</p>
         {:else}
-          <table>
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Action</th>
-                <th>Actor</th>
-                <th>Target</th>
-                <th>Metadata</th>
-                <th>IP</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each auditEntries as entry (entry.id)}
+          <div class="table-scroll">
+            <table>
+              <thead>
                 <tr>
-                  <td>{formatDateTime(entry.created_at)}</td>
-                  <td class="mono">{entry.action}</td>
-                  <td>{actorLabel(entry)}</td>
-                  <td>{targetLabel(entry)}</td>
-                  <td class="meta-cell mono">{formatMetadata(entry.metadata)}</td>
-                  <td>{entry.ip_address ?? '—'}</td>
+                  <th>When</th>
+                  <th>Action</th>
+                  <th>Actor</th>
+                  <th>Target</th>
+                  <th>Metadata</th>
+                  <th>IP</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {#each auditEntries as entry (entry.id)}
+                  <tr>
+                    <td>{formatDateTime(entry.created_at)}</td>
+                    <td class="mono">{entry.action}</td>
+                    <td>{actorLabel(entry)}</td>
+                    <td>{targetLabel(entry)}</td>
+                    <td class="meta-cell mono">{formatMetadata(entry.metadata)}</td>
+                    <td>{entry.ip_address ?? '—'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
 
           <div class="pager">
             <Button
@@ -864,6 +870,10 @@
     color: var(--text-muted);
     font-size: var(--fs-md);
     font-family: var(--font);
+    /* Comfortable tap target on mobile */
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
   }
   .nav-tab.active {
     background: var(--accent-subtle);
@@ -890,6 +900,10 @@
     font-size: var(--fs-md);
     font-family: var(--font);
     color: var(--text-muted);
+    /* Comfortable tap target on mobile */
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
   }
   .subtab.active {
     border-bottom-color: var(--accent);
@@ -899,6 +913,34 @@
   .subtab:hover:not(.active) {
     background: var(--bg-subtle);
     color: var(--text);
+  }
+
+  @media (max-width: 480px) {
+    /* Stack nav-tabs below title on narrow screens */
+    .nav-tabs {
+      order: 3;
+      flex: 0 0 100%;
+      padding: 0;
+      flex-wrap: wrap;
+    }
+    .nav-tab {
+      font-size: var(--fs-base);
+      padding: var(--space-1) var(--space-3);
+    }
+    /* Sub-tabs: already flex-wrap:wrap; reduce padding so 4 fit on 2 rows */
+    .subtab {
+      font-size: var(--fs-base);
+      padding: var(--space-2) var(--space-3);
+    }
+    /* Pager: allow center + wrap */
+    .pager {
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    /* Audit filter inline-form label + input on narrow width */
+    .inline-form {
+      gap: var(--space-2);
+    }
   }
   .intro {
     margin: 0 0 var(--space-3);

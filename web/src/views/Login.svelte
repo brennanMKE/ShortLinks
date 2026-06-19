@@ -357,6 +357,8 @@
     max-width: 360px;
     margin: var(--space-6) auto;
     padding: 0 var(--space-4);
+    /* On screens narrower than 360px (e.g. very small phones) ensure edge gutter */
+    width: 100%;
   }
   .brand {
     text-align: center;
@@ -377,5 +379,12 @@
   }
   .sub-section {
     margin-top: var(--space-3);
+  }
+
+  @media (max-width: 480px) {
+    /* Reduce top margin on very small screens */
+    .login-shell {
+      margin-top: var(--space-5);
+    }
   }
 </style>

@@ -448,74 +448,76 @@
     {:else if $links.length === 0}
       <p class="text-muted">No links yet — create your first one above.</p>
     {:else}
-      <table>
-        <thead>
-          <tr>
-            <th scope="col">Short URL</th>
-            <th scope="col">Destination</th>
-            <th scope="col">Title</th>
-            <th scope="col">Clicks</th>
-            <th scope="col">Status</th>
-            <th scope="col">Created</th>
-            <th scope="col"><span class="sr-only">Actions</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each $links as link (link.key)}
-            {@const status = linkStatus(link)}
-            <tr class="link-row" onclick={() => openDetail(link.key)}>
-              <td class="short-cell">
-                <span class="mono">/u/{link.key}</span>
-                <Button
-                  variant="subtle"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    copyShortUrl(link.key);
-                  }}
-                >
-                  {copiedKey === link.key ? 'Copied!' : 'Copy'}
-                </Button>
-              </td>
-              <td class="dest-cell text-muted" title={link.destination_url}>
-                {destinationDomain(link.destination_url)}
-              </td>
-              <td>{link.title || '—'}</td>
-              <td class="num">{link.click_count}</td>
-              <td>
-                <span
-                  class="badge"
-                  class:badge-success={status === 'active'}
-                  class:badge-danger={status === 'denied'}
-                  class:badge-muted={status === 'inactive'}
-                >
-                  {#if status === 'denied'}
-                    Denied{link.denied_reason > 0 ? `: ${deniedReasonLabel(link.denied_reason)}` : ''}
-                  {:else if status === 'inactive'}
-                    Inactive
-                  {:else}
-                    Active
-                  {/if}
-                </span>
-              </td>
-              <td class="text-muted">{formatDate(link.created_at)}</td>
-              <td class="actions-cell">
-                {#if status === 'active'}
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Short URL</th>
+              <th scope="col">Destination</th>
+              <th scope="col">Title</th>
+              <th scope="col">Clicks</th>
+              <th scope="col">Status</th>
+              <th scope="col">Created</th>
+              <th scope="col"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each $links as link (link.key)}
+              {@const status = linkStatus(link)}
+              <tr class="link-row" onclick={() => openDetail(link.key)}>
+                <td class="short-cell">
+                  <span class="mono">/u/{link.key}</span>
                   <Button
-                    variant="danger"
-                    disabled={deactivating[link.key]}
+                    variant="subtle"
                     onclick={(e) => {
                       e.stopPropagation();
-                      handleDeactivate(link.key);
+                      copyShortUrl(link.key);
                     }}
                   >
-                    {deactivating[link.key] ? 'Deactivating…' : 'Deactivate'}
+                    {copiedKey === link.key ? 'Copied!' : 'Copy'}
                   </Button>
-                {/if}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+                </td>
+                <td class="dest-cell text-muted" title={link.destination_url}>
+                  {destinationDomain(link.destination_url)}
+                </td>
+                <td>{link.title || '—'}</td>
+                <td class="num">{link.click_count}</td>
+                <td>
+                  <span
+                    class="badge"
+                    class:badge-success={status === 'active'}
+                    class:badge-danger={status === 'denied'}
+                    class:badge-muted={status === 'inactive'}
+                  >
+                    {#if status === 'denied'}
+                      Denied{link.denied_reason > 0 ? `: ${deniedReasonLabel(link.denied_reason)}` : ''}
+                    {:else if status === 'inactive'}
+                      Inactive
+                    {:else}
+                      Active
+                    {/if}
+                  </span>
+                </td>
+                <td class="text-muted">{formatDate(link.created_at)}</td>
+                <td class="actions-cell">
+                  {#if status === 'active'}
+                    <Button
+                      variant="danger"
+                      disabled={deactivating[link.key]}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleDeactivate(link.key);
+                      }}
+                    >
+                      {deactivating[link.key] ? 'Deactivating…' : 'Deactivate'}
+                    </Button>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
 
       {#if totalPages > 1}
         <div class="pager">
@@ -544,6 +546,10 @@
     color: var(--text-muted);
     font-size: var(--fs-md);
     font-family: var(--font);
+    /* Ensure a comfortable tap target on mobile */
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
   }
   .nav-tab.active {
     background: var(--accent-subtle);
@@ -553,6 +559,21 @@
   .nav-tab:hover:not(.active) {
     background: var(--bg-subtle);
     color: var(--text);
+  }
+
+  @media (max-width: 480px) {
+    /* On narrow screens, let the nav-tabs row wrap below the title.
+       The sign-out button stays on the same row as the title via order. */
+    .nav-tabs {
+      order: 3;          /* push below title + sign-out */
+      flex: 0 0 100%;    /* take full width on its own line */
+      padding: 0;
+      flex-wrap: wrap;
+    }
+    .nav-tab {
+      font-size: var(--fs-base);
+      padding: var(--space-1) var(--space-3);
+    }
   }
   .short-cell {
     display: flex;
@@ -616,6 +637,7 @@
     padding: var(--space-3) var(--space-4);
     justify-content: center;
     border-top: var(--border-w) solid var(--border);
+    flex-wrap: wrap;
   }
 
   /* ── UTM builder (#0048) ─────────────────────────────────────────────────── */

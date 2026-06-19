@@ -226,6 +226,7 @@
     justify-content: space-between;
     gap: var(--space-4);
     margin-bottom: var(--space-4);
+    flex-wrap: wrap;
   }
   .detail-title {
     font-size: var(--fs-lg);
@@ -269,5 +270,20 @@
     margin: 0 0 var(--space-2);
     font-size: var(--fs-md);
     font-weight: 600;
+  }
+
+  @media (max-width: 480px) {
+    /* Stack the dt/dd pairs vertically so labels don't compete with values */
+    .fields {
+      grid-template-columns: 1fr;
+      gap: var(--space-1);
+    }
+    .fields dt {
+      margin-top: var(--space-2);
+    }
+    .fields dt:first-child {
+      margin-top: 0;
+    }
+    /* UTM grid: already auto-fit minmax(14rem) — 1 col at 375px; no change needed */
   }
 </style>
