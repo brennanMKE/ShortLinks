@@ -622,7 +622,7 @@
     margin-top: var(--space-4);
     padding: var(--space-3) var(--space-4);
     border: var(--border-w) solid var(--border);
-    background: #fdecea;
+    background: var(--danger-subtle);
     color: var(--danger);
     border-radius: var(--radius);
     font-size: var(--fs-sm);

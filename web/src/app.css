@@ -1,5 +1,8 @@
 /* ── Design tokens ──────────────────────────────────────────────────────────── */
 :root {
+  /* Allow the browser to theme native controls to match */
+  color-scheme: light dark;
+
   /* Color — neutrals */
   --bg-page:    #f6f7f8;
   --bg-panel:   #ffffff;
@@ -25,6 +28,11 @@
   --success: #2e7d32;
   --danger:  #c62828;
   --warning: #b26a00;
+
+  /* Status surface tints — used for badge backgrounds and notice boxes */
+  --success-subtle: #e8f5e9;
+  --danger-subtle:  #fdecea;
+  --danger-hover-bg: #fbeaea;
 
   /* Spacing — 8px grid */
   --space-1: 4px;
@@ -191,11 +199,11 @@ tbody tr:last-child td { border-bottom: none; }
 
 /* Status badge variants */
 .badge-success {
-  background: #e8f5e9;
+  background: var(--success-subtle);
   color: var(--success);
 }
 .badge-danger {
-  background: #fdecea;
+  background: var(--danger-subtle);
   color: var(--danger);
 }
 .badge-muted {
@@ -259,5 +267,54 @@ tbody tr:last-child td { border-bottom: none; }
   /* Ensure the app title takes its natural width and doesn't grow */
   .app-title {
     flex: none;
+  }
+}
+
+/* ── Dark mode — OS-driven palette override ──────────────────────────────────
+ *
+ * Only the token VALUES change here; every component already uses the tokens
+ * so nothing else needs to change. Palette choices:
+ *
+ *   Backgrounds  — GitHub Primer dark scale: page #0d1117, panel #161b22,
+ *                  subtle #1c2128, header #21262d
+ *   Text         — near-white body, dimmed muted/faint
+ *   Borders      — slightly lighter than panels for subtle definition
+ *   Accent       — #4d8ef0 (brightened from #2d5fa3 for dark-bg contrast)
+ *   Status tints — darker, desaturated backgrounds that stay readable
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Neutrals */
+    --bg-page:    #0d1117;
+    --bg-panel:   #161b22;
+    --bg-subtle:  #1c2128;
+    --bg-header:  #21262d;
+
+    /* Text */
+    --text:        #e6edf3;
+    --text-muted:  #8b949e;
+    /* #0051 review: faint raised from #6e7681 (3.77:1) to clear WCAG AA 4.5:1
+       on panel — used for 10px chart axis labels (ClicksChart). */
+    --text-faint:  #8b949e;
+
+    /* Borders */
+    --border:        #30363d;
+    --border-strong: #484f58;
+
+    /* Accent — brightened for dark-bg legibility */
+    --accent:        #4d8ef0;
+    --accent-hover:  #6aa3f5;
+    --accent-text:   #0d1117;
+    --accent-subtle: #1a2a45;
+
+    /* Status colours — brighter for dark backgrounds */
+    --success: #3fb950;
+    --danger:  #f85149;
+    --warning: #d29922;
+
+    /* Status surface tints — dark, desaturated fills */
+    --success-subtle: #122519;
+    --danger-subtle:  #2d1212;
+    --danger-hover-bg: #3d1515;
   }
 }

@@ -60,7 +60,7 @@
     border-color: var(--border-strong);
     color: var(--danger);
   }
-  .btn-danger:hover:not(:disabled) { background: #fbeaea; }
+  .btn-danger:hover:not(:disabled) { background: var(--danger-hover-bg); }
 
   /* Increase tap target height on mobile (≥40px) without changing desktop layout */
   @media (max-width: 480px) {
