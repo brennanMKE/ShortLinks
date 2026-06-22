@@ -125,6 +125,15 @@ textarea {
   border-radius: var(--radius);
   padding: var(--space-2) var(--space-3);
   width: 100%;
+  /* Explicit line-height + a token-derived min-height so EVERY control is the
+     same height — including an empty datetime-local, which (after
+     -webkit-appearance:none, #0053) has no content to give it height and would
+     otherwise render shorter than the text inputs. min-height (border-box) ==
+     one line of text + vertical padding + borders, i.e. a single-line input's
+     natural height, so the text inputs are unchanged and the date field grows
+     to match. */
+  line-height: var(--lh);
+  min-height: calc(var(--fs-base) * var(--lh) + var(--space-2) * 2 + var(--border-w) * 2);
 }
 
 /* iOS Safari renders date/time inputs as NATIVE controls that ignore width:100%
