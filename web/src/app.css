@@ -127,13 +127,17 @@ textarea {
   width: 100%;
 }
 
-/* iOS Safari gives native date/time controls a wide intrinsic min-width that beats
-   width: 100% and overflows the panel (the Expires field, #0053). min-width: 0 lets
-   width: 100% win so they match the text inputs. (box-sizing: border-box already
-   comes from the universal * reset above.) */
+/* iOS Safari renders date/time inputs as NATIVE controls that ignore width:100%
+   and render at their own intrinsic width, overflowing the panel (the Expires
+   field, #0053). Removing the native appearance makes them behave like a normal
+   styleable box that obeys width:100% / min-width:0, matching the text inputs.
+   min-width:0 alone was not enough; -webkit-appearance:none is the load-bearing
+   part. (box-sizing:border-box already comes from the universal * reset above.) */
 input[type="date"],
 input[type="time"],
 input[type="datetime-local"] {
+  -webkit-appearance: none;
+  appearance: none;
   min-width: 0;
 }
 
