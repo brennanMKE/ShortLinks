@@ -40,7 +40,7 @@ die(){  printf '\n\033[31m\xe2\x9c\x97 ERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # ---- preflight -------------------------------------------------------------
 step "Preflight"
-for c in git go npm curl systemctl strings; do
+for c in git go npm curl systemctl; do
   command -v "$c" >/dev/null 2>&1 || die "required command not found: $c"
 done
 HEAD_SHA="$(git rev-parse --short HEAD)"
@@ -73,22 +73,23 @@ BUILT_CSS="$(grep -oE 'index-[A-Za-z0-9_-]+\.css' web/dist/index.html | head -1 
 ok "SPA built: $BUILT_JS, $BUILT_CSS"
 
 # ---- gate 2: build the binary, confirm it EMBEDS this fresh bundle ----------
-# web/embed.go does `//go:embed all:dist`. An older / mis-caching Go toolchain can
-# reuse a cached build of that package and embed a STALE web/dist. So we verify the
-# binary actually contains the bundle we just built, and self-heal with a cache
-# clean + rebuild if it doesn't — rather than ever shipping a stale binary.
+# web/embed.go does `//go:embed all:dist`. Verify the freshly built binary actually
+# CONTAINS the bundle we just built. We use `grep -a` (scans the whole file) rather
+# than `strings`, which can give false negatives. If the bundle is missing, print a
+# self-contained diagnosis and stop — before the service is ever touched.
 step "Building the Go binary (embeds web/dist/)"
 TMPBIN="$(mktemp)"; trap 'rm -f "$TMPBIN"' EXIT
 go build -o "$TMPBIN" ./cmd/shortlinks
-if ! strings "$TMPBIN" | grep -qF "$BUILT_JS"; then
-  info "first build did not embed $BUILT_JS (stale Go build cache) — cleaning cache and rebuilding (slower)…"
-  go clean -cache 2>/dev/null || true
-  go build -o "$TMPBIN" ./cmd/shortlinks
+if ! grep -aq "$BUILT_JS" "$TMPBIN"; then
+  printf '\n    DIAGNOSIS (copy/paste this whole block — no other commands needed):\n'
+  printf '      bundle npm just built : %s\n' "$BUILT_JS"
+  printf '      hash(es) in binary    : %s\n' "$(grep -ao 'index-[A-Za-z0-9_-]*\.js' "$TMPBIN" | sort -u | tr '\n' ' ')"
+  printf '      web/dist/index.html   : %s\n' "$(grep -o 'index-[A-Za-z0-9_-]*\.js' web/dist/index.html | head -1)"
+  printf '      web/dist resolves to  : %s\n' "$(readlink -f web/dist 2>/dev/null || echo '?')"
+  printf '      GOWORK=%s  vendor=%s  go=%s\n' "$(go env GOWORK)" "$([ -d vendor ] && echo present || echo none)" "$(go env GOVERSION)"
+  die "the built binary does NOT contain $BUILT_JS — go build compiled a different web/dist than npm wrote (see diagnosis above). Likely a go.work workspace (GOWORK set), a vendor/ tree, or web/dist resolving to a different path."
 fi
-strings "$TMPBIN" | grep -qF "$BUILT_JS" \
-  || die "the built binary STILL does not embed the fresh SPA bundle ($BUILT_JS) even after a clean rebuild.
-    Check 'go version' (an old Go can mis-cache //go:embed) and that web/embed.go embeds web/dist."
-ok "binary built and verified to embed $BUILT_JS"
+ok "binary verified to embed $BUILT_JS"
 
 # ---- gate 3: confirmation before restart -----------------------------------
 step "Ready to deploy — review before restarting"
