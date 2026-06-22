@@ -112,6 +112,8 @@ input[type="password"],
 input[type="search"],
 input[type="number"],
 input[type="url"],
+input[type="date"],
+input[type="time"],
 input[type="datetime-local"],
 select,
 textarea {
@@ -123,6 +125,16 @@ textarea {
   border-radius: var(--radius);
   padding: var(--space-2) var(--space-3);
   width: 100%;
+}
+
+/* iOS Safari gives native date/time controls a wide intrinsic min-width that beats
+   width: 100% and overflows the panel (the Expires field, #0053). min-width: 0 lets
+   width: 100% win so they match the text inputs. (box-sizing: border-box already
+   comes from the universal * reset above.) */
+input[type="date"],
+input[type="time"],
+input[type="datetime-local"] {
+  min-width: 0;
 }
 
 input:focus,
