@@ -336,7 +336,42 @@ must receive an email verification link to complete their enrollment.
 
 ## Updating (redeploy)
 
-To deploy a new version after pulling code changes:
+### Recommended: the gated deploy script
+
+From the repo checkout on the host, on the latest commit:
+
+```bash
+git pull --rebase origin main
+./scripts/deploy.sh
+```
+
+`scripts/deploy.sh` runs the entire redeploy with a verification gate at every
+step and **refuses to restart the service unless a genuinely fresh binary is
+ready**. In order it: rebuilds the SPA (failing if it produced no hashed
+assets), builds the Go binary and verifies with `grep -a` that the binary
+actually **embeds the bundle it just built** (catching the most common failure —
+a binary built against a stale `web/dist`), asks for a `[y/N]` confirmation,
+installs to the path in the systemd unit's `ExecStart` and `systemctl restart`s,
+then curls the live site and fails unless it is serving that exact bundle. If
+any artifact isn't what's expected it stops with an error (and prints a
+diagnosis for the embed check) instead of shipping a broken deploy. Override
+defaults with `SERVICE=… PUBLIC_URL=… BIN=… ./scripts/deploy.sh`.
+
+### Is a migration needed this deploy?
+
+A migration is required only when someone added a
+`migrations/NNNN_*.{up,down}.sql` pair — pure handler/frontend/query changes
+never need one. Check before deploying:
+
+```bash
+git diff --name-only <last-deployed-sha>..HEAD -- migrations/   # any output => yes
+# or compare the DB's applied version to the highest migration file:
+migrate -path migrations -database "$DATABASE_URL" version
+```
+
+### Manual steps (what the script automates)
+
+To deploy a new version by hand after pulling code changes:
 
 ```bash
 cd /opt/shortlinks
@@ -362,6 +397,95 @@ If a deploy only changes configuration, edit `/etc/shortlinks/config.env` and ru
 `sudo systemctl restart shortlinks` — no rebuild needed. If the systemd unit file
 itself changed, re-copy it and run `sudo systemctl daemon-reload` before
 restarting.
+
+---
+
+## Troubleshooting: a deploy ran but the site doesn't show the changes
+
+The SPA is **compiled into the Go binary** (`web/embed.go`, `//go:embed
+all:dist`) and served by that binary behind Apache. So "my changes don't appear"
+almost always means one link in this chain is stale:
+
+> latest commit → `npm run build` writes `web/dist/` → `go build` embeds it →
+> binary installed to the `ExecStart` path → service restarted → Apache proxies
+> it → browser.
+
+**Fastest single check — compare the served bundle to the built bundle:**
+
+```bash
+# what the LIVE site serves right now:
+curl -s https://go.sstools.co/ | grep -oE '/assets/index-[^"]+'
+# what the current source builds to (on the host, after `npm run build`):
+grep -oE 'index-[A-Za-z0-9_-]+\.(js|css)' web/dist/index.html
+```
+
+If those hashes differ, the new build isn't being served. Causes, most common
+first:
+
+**1. The SPA wasn't rebuilt before the binary.** `web/dist/` is embedded at
+`go build` time, so the binary is only as fresh as `web/dist` was at that
+moment. Running `go build` without first running `npm run build` embeds the old
+(or placeholder) bundle. Confirm what the binary actually contains:
+
+```bash
+grep -ao 'index-[A-Za-z0-9_-]*\.js' /usr/local/bin/shortlinks | sort -u
+```
+
+Use `grep -a` (whole-file scan), **not** `strings` — `strings` can falsely
+report the bundle missing on some platforms.
+
+**2. The service wasn't restarted onto the new binary.** A new file on disk does
+nothing until the process restarts. Use `sudo systemctl restart shortlinks`
+(not `start`), then confirm it picked up the new binary:
+
+```bash
+systemctl show -p ExecMainStartTimestamp shortlinks   # should read "just now"
+```
+
+**3. The binary was built to a different path than systemd runs.**
+`go build -o shortlinks` writes to the current directory, but systemd runs
+whatever `ExecStart` points at (`/usr/local/bin/shortlinks`). Rebuild one,
+restart the other, and nothing changes — always `sudo install` to the
+`ExecStart` path.
+
+**4. The build host isn't on the latest commit.** `git -C <repo> rev-parse
+--short HEAD` on the box must match what you intend to ship. No `git pull` on the
+host ⇒ old code in, old code out.
+
+**5. `go build` compiled a different `web/dist` than you rebuilt.** If the embed
+is stale even after a clean rebuild, `go build` is reading a different source
+tree. Check for a workspace/vendor redirect or a symlinked dist:
+
+```bash
+go env GOWORK            # non-empty => a go.work workspace may select another module copy
+ls -ld vendor 2>/dev/null
+readlink -f web/dist     # is it where you expect, and a real dir (not a symlink)?
+```
+
+`go:embed` reads `web/dist` relative to `web/embed.go` **in the module that
+`go build` actually compiles**.
+
+**6. Apache is serving a static copy instead of proxying to the binary.** If the
+vhost has a `DocumentRoot`/`Alias` pointing at a static SPA directory instead of
+`ProxyPass` to `127.0.0.1:8080`, rebuilding the binary changes nothing — you must
+refresh that directory (or fix the vhost to proxy). Check:
+
+```bash
+grep -rE 'DocumentRoot|Alias|ProxyPass' /etc/httpd/conf.d/ /etc/apache2/sites-enabled/ 2>/dev/null
+```
+
+This project's vhost (`deploy/apache/go.sstools.co.conf`) proxies all traffic to
+the Go service, so the binary is the source of truth — but verify the *deployed*
+config matches.
+
+**7. Caching (browser / CDN / proxy).** Hashed `assets/*` filenames bust
+themselves, but `index.html` can be cached. Test with `curl` (bypasses the
+browser) and a hard refresh; if a CDN or caching proxy fronts Apache, purge it or
+check its cache headers.
+
+`scripts/deploy.sh` checks #1, #2, #3, and #7 automatically (its build-embed
+gate, restart check, and live-bundle gate) and prints a diagnosis for #5 — so
+prefer it over the manual steps, which are easy to get subtly wrong.
 
 ---
 
