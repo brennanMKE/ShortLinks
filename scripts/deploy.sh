@@ -73,11 +73,21 @@ BUILT_CSS="$(grep -oE 'index-[A-Za-z0-9_-]+\.css' web/dist/index.html | head -1 
 ok "SPA built: $BUILT_JS, $BUILT_CSS"
 
 # ---- gate 2: build the binary, confirm it EMBEDS this fresh bundle ----------
+# web/embed.go does `//go:embed all:dist`. An older / mis-caching Go toolchain can
+# reuse a cached build of that package and embed a STALE web/dist. So we verify the
+# binary actually contains the bundle we just built, and self-heal with a cache
+# clean + rebuild if it doesn't — rather than ever shipping a stale binary.
 step "Building the Go binary (embeds web/dist/)"
 TMPBIN="$(mktemp)"; trap 'rm -f "$TMPBIN"' EXIT
 go build -o "$TMPBIN" ./cmd/shortlinks
+if ! strings "$TMPBIN" | grep -qF "$BUILT_JS"; then
+  info "first build did not embed $BUILT_JS (stale Go build cache) — cleaning cache and rebuilding (slower)…"
+  go clean -cache 2>/dev/null || true
+  go build -o "$TMPBIN" ./cmd/shortlinks
+fi
 strings "$TMPBIN" | grep -qF "$BUILT_JS" \
-  || die "the freshly built binary does NOT embed the fresh SPA bundle ($BUILT_JS). Aborting before the service is touched. (Did 'npm run build' regenerate web/dist before 'go build'?)"
+  || die "the built binary STILL does not embed the fresh SPA bundle ($BUILT_JS) even after a clean rebuild.
+    Check 'go version' (an old Go can mis-cache //go:embed) and that web/embed.go embeds web/dist."
 ok "binary built and verified to embed $BUILT_JS"
 
 # ---- gate 3: confirmation before restart -----------------------------------
