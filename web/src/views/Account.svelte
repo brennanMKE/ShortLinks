@@ -19,6 +19,7 @@
   import type { Credential } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import { APP_NAME } from '../lib/branding';
 
   let loading = $state(true);
   let loadError = $state<string | null>(null);
@@ -138,7 +139,7 @@
 
 <div class="app-shell account-shell">
   <header class="app-header">
-    <h1 class="app-title">go.sstools.co</h1>
+    <h1 class="app-title">{APP_NAME}</h1>
     <nav class="nav-tabs" aria-label="Primary">
       <button type="button" class="nav-tab" onclick={() => go('dashboard')}>Dashboard</button>
       <button type="button" class="nav-tab active" aria-current="page">Account</button>

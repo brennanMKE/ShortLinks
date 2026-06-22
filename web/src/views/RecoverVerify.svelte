@@ -24,6 +24,7 @@
   import { get } from 'svelte/store';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import { APP_NAME } from '../lib/branding';
 
   type Status = 'verifying' | 'creating' | 'finishing' | 'error';
 
@@ -132,7 +133,7 @@
 
 <main class="verify-shell">
   <header class="brand">
-    <h1 class="brand-title">go.sstools.co</h1>
+    <h1 class="brand-title">{APP_NAME}</h1>
   </header>
 
   <Panel>

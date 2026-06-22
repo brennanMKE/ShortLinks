@@ -38,6 +38,7 @@
   } from '../lib/webauthn';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import { APP_NAME } from '../lib/branding';
 
   let email = $state('');
   let signingIn = $state(false);
@@ -206,7 +207,7 @@
 
 <main class="login-shell">
   <header class="brand">
-    <h1 class="brand-title">go.sstools.co</h1>
+    <h1 class="brand-title">{APP_NAME}</h1>
     <p class="text-muted tagline">Sign in with your passkey</p>
   </header>
 

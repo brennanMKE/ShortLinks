@@ -52,6 +52,7 @@
   import type { Setting, FilterRule, AdminUser, AuditEntry } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import { APP_NAME } from '../lib/branding';
 
   type Section = 'settings' | 'filters' | 'users' | 'audit';
   let section = $state<Section>('settings');
@@ -426,7 +427,7 @@
 
 <div class="app-shell">
   <header class="app-header">
-    <h1 class="app-title">go.sstools.co</h1>
+    <h1 class="app-title">{APP_NAME}</h1>
     <nav class="nav-tabs" aria-label="Primary">
       <button type="button" class="nav-tab" onclick={() => go('dashboard')}>Dashboard</button>
       <button type="button" class="nav-tab" onclick={() => go('account')}>Account</button>

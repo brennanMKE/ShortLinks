@@ -57,6 +57,7 @@
   import type { UtmParams } from '../lib/utm';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import { APP_NAME } from '../lib/branding';
 
   const PER_PAGE = 20;
 
@@ -246,7 +247,7 @@
 
 <div class="app-shell">
   <header class="app-header">
-    <h1 class="app-title">go.sstools.co</h1>
+    <h1 class="app-title">{APP_NAME}</h1>
     <nav class="nav-tabs" aria-label="Primary">
       <button type="button" class="nav-tab active" aria-current="page">Dashboard</button>
       <button type="button" class="nav-tab" onclick={() => go('account')}>Account</button>
