@@ -65,6 +65,8 @@ sudo systemctl start shortlinks
 
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for full EC2 setup instructions and [`docs/email_setup.md`](docs/email_setup.md) for AWS SES configuration.
 
+Full developer/operator documentation lives in [`docs/`](docs/README.md) — architecture, configuration, database, auth, passkeys, links, analytics, UTM, URL filtering, audit, events, and the frontend.
+
 ## Configuration
 
 All configuration is via environment variables. Copy `.env.example` to `.env` and fill in the values. In production, `/etc/shortlinks/config.env` is loaded by the systemd unit.
