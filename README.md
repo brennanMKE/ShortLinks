@@ -28,6 +28,30 @@ A self-hosted URL shortener built with Go, PostgreSQL, and Svelte. Deployed on A
 
 ## Quick Start (Development)
 
+One command — no PostgreSQL, no systemd, no migrations:
+
+```bash
+./scripts/dev.sh
+```
+
+Open **http://localhost:5173**. You land on the dashboard as the mock admin,
+no passkey needed. The Go API runs on `:8080` (`STORAGE=json`, in-memory dev
+store); Vite runs on `:5173` and proxies all API/auth traffic to `:8080`.
+Ctrl-C stops both. See [`docs/dev.md`](docs/dev.md) for details and options.
+
+### Built-SPA variant
+
+To test the production embedding before deploying:
+
+```bash
+./scripts/dev.sh --built   # npm build + go run, open http://localhost:8080
+```
+
+### Legacy manual setup (requires Postgres)
+
+<details>
+<summary>Expand</summary>
+
 ```bash
 # 1. Copy and fill in environment variables
 cp .env.example .env
@@ -45,7 +69,10 @@ go run ./cmd/shortlinks serve
 cd web && npm install && npm run dev
 ```
 
-The Svelte dev server proxies `/api`, `/auth`, and `/u` to the Go service on `localhost:8080`. Open `http://localhost:5173` in your browser.
+The Svelte dev server proxies `/api`, `/auth`, and `/u` to the Go service on
+`localhost:8080`. Open `http://localhost:5173` in your browser.
+
+</details>
 
 ## Production Build
 
