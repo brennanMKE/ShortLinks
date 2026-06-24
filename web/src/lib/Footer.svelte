@@ -9,7 +9,7 @@
       target="_blank"
       rel="noopener noreferrer"
       class="footer-link"
-    >{APP_NAME} — open source on GitHub</a>
+    >{APP_NAME} — GitHub</a>
   </p>
 </footer>
 
