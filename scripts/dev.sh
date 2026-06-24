@@ -58,6 +58,23 @@ ok "storage: $STORAGE (no Postgres)"
 ok "admin:   $ADMIN_EMAIL"
 ok "port:    $PORT"
 
+# Free the dev ports if a previous run left a server bound. `go run` leaks its
+# compiled child process when its parent is killed, so a stale server can keep
+# holding :8080 — which both blocks startup ("address already in use") AND keeps
+# serving an OLD build. Always start from a clean port.
+free_port() {
+  local p="$1" pids
+  pids="$(lsof -ti tcp:"$p" 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    info "freeing port $p (stale process: $(printf '%s' "$pids" | tr '\n' ' '))"
+    # shellcheck disable=SC2086
+    kill -9 $pids 2>/dev/null || true
+    sleep 1
+  fi
+}
+free_port "$PORT"
+free_port 5173
+
 # ── Built-SPA mode ───────────────────────────────────────────────────────────
 if [ "$MODE" = "built" ]; then
   step "Building Svelte SPA (web/)"
@@ -88,6 +105,8 @@ cleanup() {
   printf '\n'
   step "Shutting down…"
   kill "$GO_PID" 2>/dev/null || true
+  pkill -P "$GO_PID" 2>/dev/null || true   # the go-run child server (go run leaks it otherwise)
+  free_port "$PORT" 2>/dev/null || true    # backstop so :PORT is actually released on exit
   # Vite (npm run dev) is the foreground process; it handles its own SIGINT.
   ok "stopped"
 }
