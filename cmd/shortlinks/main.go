@@ -17,6 +17,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/config"
 	"github.com/brennanMKE/ShortLinks/internal/db"
+	"github.com/brennanMKE/ShortLinks/internal/devstore"
 	"github.com/brennanMKE/ShortLinks/internal/events"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
@@ -50,14 +51,28 @@ func main() {
 	}
 }
 
-// serve loads configuration, connects the database pool, mounts the routes, and
-// listens on the configured port until the process is terminated.
+// serve loads configuration, connects the database pool (Postgres path) or
+// constructs the in-memory dev store (dev path), mounts the routes, and listens
+// on the configured port until the process is terminated.
 func serve() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
 
+	// ── Backend selection ────────────────────────────────────────────────────
+	// Dev mode is engaged ONLY by an explicit STORAGE=json — never by an empty
+	// DATABASE_URL — so production can never silently fall back to the in-memory
+	// store and lose data. Without STORAGE=json the Postgres path always runs.
+	if cfg.DevMode() {
+		return serveDevMode(cfg)
+	}
+	return servePostgres(cfg)
+}
+
+// servePostgres is the production path: connects to Postgres, constructs the
+// real stores, and serves. This is the original serve() logic, unchanged.
+func servePostgres(cfg *config.Config) error {
 	ctx := context.Background()
 	pool, err := db.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -161,6 +176,93 @@ func serve() error {
 		return requireSession(middleware.RequireAdmin(next))
 	}
 
+	return mountAndServe(cfg, pool,
+		authH, credsH, settingsH, adminUsersH, adminAuditH,
+		urlFiltersH, eventsH, redirectH, linksH, meH,
+		requireSession, requireAdmin)
+}
+
+// serveDevMode boots the app without PostgreSQL using the in-memory dev store.
+// All handler interfaces are satisfied by *devstore.Store or its companion
+// types. The Postgres connect, pgxpool, and migration paths are entirely skipped.
+func serveDevMode(cfg *config.Config) error {
+	log.Printf("shortlinks: STORAGE=json — starting with in-memory dev store (no Postgres)")
+
+	ds := devstore.New(cfg.AdminEmail)
+
+	// WebAuthn is still needed for the config but auth routes are stubbed.
+	// In dev mode WebAuthnRPID/Origin may be empty; provide localhost defaults.
+	if cfg.WebAuthnRPID == "" {
+		cfg.WebAuthnRPID = "localhost"
+	}
+	if cfg.WebAuthnRPOrigin == "" {
+		cfg.WebAuthnRPOrigin = fmt.Sprintf("http://localhost:%d", cfg.Port)
+	}
+
+	// Auth handler — registration/login/recovery are all stubs in dev mode.
+	// Logout still works (deletes the dev session cookie).
+	authH := handlers.NewAuthHandler(
+		devstore.DevRegistrar{},
+		devstore.NewDevLoginService(ds),
+		devstore.DevRecoverer{},
+	)
+
+	// Credential, settings, user-management, and audit handlers use the dev store.
+	credsH := handlers.NewCredentialsHandler(ds, nil /* no audit in dev */)
+	settingsH := handlers.NewSettingsHandler(ds, nil)
+	adminUsersH := handlers.NewAdminUsersHandler(ds, nil)
+	adminAuditH := handlers.NewAdminAuditHandler(ds)
+
+	// URL filters: dev store satisfies both filterRuleStore and ruleCacheInvalidator.
+	urlFiltersH := handlers.NewURLFiltersHandler(ds, ds, nil)
+
+	// SSE broker.
+	broker := events.NewBroker()
+	eventsH := handlers.NewEventsHandler(broker)
+
+	// Redirect path: the dev store implements handlers.LinkResolver directly
+	// (via its Resolve method), so we bypass links.NewResolver which requires
+	// a concrete *links.Store. The NoCacheEvictor no-ops cache eviction since
+	// we're using the store's own in-memory lookup with no Ristretto cache.
+	redirectH := handlers.NewRedirectHandler(ds, handlers.NewClickRecorder(ds))
+
+	// Links handler: dev store satisfies linkStore, cacheEvictor (no-op via
+	// NoCacheEvictor), ruleProvider (ds.Rules), and statsProvider.
+	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds)
+
+	meH := handlers.NewMeHandler()
+
+	// Session middleware backed by the dev store.
+	requireSession := middleware.RequireSession(ds)
+	requireAdmin := func(next http.Handler) http.Handler {
+		return requireSession(middleware.RequireAdmin(next))
+	}
+
+	return mountAndServe(cfg, ds,
+		authH, credsH, settingsH, adminUsersH, adminAuditH,
+		urlFiltersH, eventsH, redirectH, linksH, meH,
+		requireSession, requireAdmin)
+}
+
+// mountAndServe registers all routes on a new ServeMux and starts listening.
+// This is shared between the Postgres and dev paths to avoid code duplication.
+// The `db` parameter satisfies handlers.Pinger for GET /health.
+func mountAndServe(
+	cfg *config.Config,
+	pinger handlers.Pinger,
+	authH *handlers.AuthHandler,
+	credsH *handlers.CredentialsHandler,
+	settingsH *handlers.SettingsHandler,
+	adminUsersH *handlers.AdminUsersHandler,
+	adminAuditH *handlers.AdminAuditHandler,
+	urlFiltersH *handlers.URLFiltersHandler,
+	eventsH *handlers.EventsHandler,
+	redirectH *handlers.RedirectHandler,
+	linksH *handlers.LinksHandler,
+	meH *handlers.MeHandler,
+	requireSession func(http.Handler) http.Handler,
+	requireAdmin func(http.Handler) http.Handler,
+) error {
 	// Per-IP rate limiters for the abuse-prone public auth endpoints (PRD Phase
 	// 2). Burst equals the per-window allowance so a fresh IP gets its full
 	// quota immediately, then refills at the sustained rate.
@@ -169,7 +271,7 @@ func serve() error {
 	recoverLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)   // 3 / hour / IP
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /health", handlers.NewHealthHandler(pool))
+	mux.Handle("GET /health", handlers.NewHealthHandler(pinger))
 
 	// Public redirect path (#0009): resolve key → 302 to destination with inbound
 	// UTM merged, recording the click asynchronously (#0030). No session required.

@@ -26,6 +26,12 @@ type Config struct {
 	// Database
 	DatabaseURL string
 
+	// Storage backend selector. ONLY the explicit value "json" selects the
+	// in-memory dev backend (see DevMode); anything else — including the default
+	// empty value — uses Postgres. An empty DATABASE_URL does NOT engage dev mode,
+	// so production can't accidentally fall back to the in-memory store.
+	Storage string
+
 	// WebAuthn
 	WebAuthnRPID     string
 	WebAuthnRPOrigin string
@@ -46,6 +52,13 @@ type Config struct {
 
 	// Bootstrap
 	AdminEmail string
+}
+
+// DevMode reports whether the dev store should be used instead of Postgres.
+// It is true only when STORAGE=json is explicitly set. DATABASE_URL remains
+// required in non-dev mode; set STORAGE=json to skip the DB entirely.
+func (c *Config) DevMode() bool {
+	return c.Storage == "json"
 }
 
 // Load reads configuration from the environment. In development it first loads
@@ -78,6 +91,7 @@ func loadFromFile(path string) (*Config, error) {
 		Port:             getInt("PORT", defaultPort, &errs),
 		BaseURL:          os.Getenv("BASE_URL"),
 		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		Storage:          os.Getenv("STORAGE"),
 		WebAuthnRPID:     os.Getenv("WEBAUTHN_RP_ID"),
 		WebAuthnRPOrigin: os.Getenv("WEBAUTHN_RP_ORIGIN"),
 		SessionSecret:    os.Getenv("SESSION_SECRET"),
@@ -91,20 +105,24 @@ func loadFromFile(path string) (*Config, error) {
 		AdminEmail:       os.Getenv("ADMIN_EMAIL"),
 	}
 
-	// Validate required fields. Collect every missing one.
+	// Validate required fields. When STORAGE=json (dev mode) DATABASE_URL is
+	// not required; in all other cases every variable below must be present.
+	// Collect every missing required variable so the error is comprehensive.
+	devMode := cfg.DevMode()
 	required := []struct {
-		name  string
-		value string
+		name      string
+		value     string
+		skipInDev bool // when true, skip this check in dev mode
 	}{
-		{"BASE_URL", cfg.BaseURL},
-		{"DATABASE_URL", cfg.DatabaseURL},
-		{"WEBAUTHN_RP_ID", cfg.WebAuthnRPID},
-		{"WEBAUTHN_RP_ORIGIN", cfg.WebAuthnRPOrigin},
-		{"SESSION_SECRET", cfg.SessionSecret},
-		{"ADMIN_EMAIL", cfg.AdminEmail},
+		{"BASE_URL", cfg.BaseURL, false},
+		{"DATABASE_URL", cfg.DatabaseURL, true}, // not required when STORAGE=json
+		{"WEBAUTHN_RP_ID", cfg.WebAuthnRPID, false},
+		{"WEBAUTHN_RP_ORIGIN", cfg.WebAuthnRPOrigin, false},
+		{"SESSION_SECRET", cfg.SessionSecret, false},
+		{"ADMIN_EMAIL", cfg.AdminEmail, false},
 	}
 	for _, r := range required {
-		if r.value == "" {
+		if r.value == "" && !(r.skipInDev && devMode) {
 			errs = append(errs, fmt.Sprintf("missing required variable %s", r.name))
 		}
 	}
