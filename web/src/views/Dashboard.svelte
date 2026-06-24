@@ -321,23 +321,21 @@
 
       <div class="field">
         <label for="expires">Expires <span class="text-faint">(optional)</span></label>
-        <div class="expires-wrap">
+        <div class="expires-wrap" class:has-value={expiresAt !== ''}>
           <input
             id="expires"
             type="datetime-local"
             bind:value={expiresAt}
             disabled={submitting}
           />
-          {#if expiresAt !== ''}
-            <button
-              type="button"
-              class="expires-clear"
-              disabled={submitting}
-              onclick={() => { expiresAt = ''; }}
-              aria-label="Clear expiry date"
-              title="Clear expiry date"
-            >×</button>
-          {/if}
+          <button
+            type="button"
+            class="expires-clear"
+            disabled={submitting}
+            onclick={() => { expiresAt = ''; }}
+            aria-label="Clear expiry date"
+            title="Clear expiry date"
+          >×</button>
         </div>
       </div>
 
@@ -644,18 +642,14 @@
     border-color: var(--danger) !important;
   }
 
-  /* Clear control for the optional Expires field (#0076). It sits BELOW the input
-     as a small text link; the <input> itself is unchanged — same width and height
-     as the other fields. This only restores the ability to clear the date back to
-     empty (the native clear button was removed by #0053's -webkit-appearance:none).
-     It clears ONLY expiresAt, never the rest of the form. */
   /* In-field clear for the optional Expires date (#0076). The wrapper is relative
      and the "×" sits absolutely over the input's right edge — where the native
      clear button used to be (the one #0053's -webkit-appearance:none stripped).
      The input keeps its full width and #0053 height: width:100% + box-sizing
      border-box mean the right padding is internal (no box change) and the × is
-     out of flow. Shown only when a value is set; clears ONLY expiresAt
-     (type=button — never submits the form). */
+     out of flow. It clears ONLY expiresAt (type=button — never submits the form).
+     The × is shown the moment the field is FOCUSED or has a value — not only after
+     a value commits — so it can't be missed while picking a date. */
   .expires-wrap {
     position: relative;
   }
@@ -678,6 +672,14 @@
     font-size: var(--fs-lg);
     line-height: 1;
     cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.1s ease;
+  }
+  .expires-wrap:focus-within .expires-clear,
+  .expires-wrap.has-value .expires-clear {
+    opacity: 1;
+    pointer-events: auto;
   }
   .expires-clear:hover:not(:disabled) {
     color: var(--text);
