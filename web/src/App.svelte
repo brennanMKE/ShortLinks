@@ -9,6 +9,7 @@
   import Admin from './views/Admin.svelte';
   import RegisterVerify from './views/RegisterVerify.svelte';
   import RecoverVerify from './views/RecoverVerify.svelte';
+  import Footer from './lib/Footer.svelte';
 
   let loading = $state(true);
 
@@ -91,3 +92,5 @@
 {:else if $currentView === 'recover-verify'}
   <RecoverVerify />
 {/if}
+
+<Footer />
