@@ -327,6 +327,14 @@
           bind:value={expiresAt}
           disabled={submitting}
         />
+        {#if expiresAt !== ''}
+          <button
+            type="button"
+            class="expires-clear"
+            disabled={submitting}
+            onclick={() => { expiresAt = ''; }}
+          >Clear expiry date</button>
+        {/if}
       </div>
 
       <!-- UTM builder — collapsible section (#0048) -->
@@ -631,6 +639,32 @@
   .input-error {
     border-color: var(--danger) !important;
   }
+
+  /* Clear control for the optional Expires field (#0076). It sits BELOW the input
+     as a small text link; the <input> itself is unchanged — same width and height
+     as the other fields. This only restores the ability to clear the date back to
+     empty (the native clear button was removed by #0053's -webkit-appearance:none).
+     It clears ONLY expiresAt, never the rest of the form. */
+  .expires-clear {
+    display: inline-block;
+    margin-top: var(--space-2);
+    font-family: var(--font);
+    font-size: var(--fs-sm);
+    line-height: 1;
+    padding: var(--space-1) 0;
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .expires-clear:hover:not(:disabled) {
+    text-decoration: underline;
+  }
+  .expires-clear:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
   .pager {
     display: flex;
     align-items: center;
