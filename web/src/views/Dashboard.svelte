@@ -321,20 +321,24 @@
 
       <div class="field">
         <label for="expires">Expires <span class="text-faint">(optional)</span></label>
-        <input
-          id="expires"
-          type="datetime-local"
-          bind:value={expiresAt}
-          disabled={submitting}
-        />
-        {#if expiresAt !== ''}
-          <button
-            type="button"
-            class="expires-clear"
+        <div class="expires-wrap">
+          <input
+            id="expires"
+            type="datetime-local"
+            bind:value={expiresAt}
             disabled={submitting}
-            onclick={() => { expiresAt = ''; }}
-          >Clear expiry date</button>
-        {/if}
+          />
+          {#if expiresAt !== ''}
+            <button
+              type="button"
+              class="expires-clear"
+              disabled={submitting}
+              onclick={() => { expiresAt = ''; }}
+              aria-label="Clear expiry date"
+              title="Clear expiry date"
+            >×</button>
+          {/if}
+        </div>
       </div>
 
       <!-- UTM builder — collapsible section (#0048) -->
@@ -645,20 +649,38 @@
      as the other fields. This only restores the ability to clear the date back to
      empty (the native clear button was removed by #0053's -webkit-appearance:none).
      It clears ONLY expiresAt, never the rest of the form. */
+  /* In-field clear for the optional Expires date (#0076). The wrapper is relative
+     and the "×" sits absolutely over the input's right edge — where the native
+     clear button used to be (the one #0053's -webkit-appearance:none stripped).
+     The input keeps its full width and #0053 height: width:100% + box-sizing
+     border-box mean the right padding is internal (no box change) and the × is
+     out of flow. Shown only when a value is set; clears ONLY expiresAt
+     (type=button — never submits the form). */
+  .expires-wrap {
+    position: relative;
+  }
+  .expires-wrap input {
+    padding-right: var(--space-6);
+  }
   .expires-clear {
-    display: inline-block;
-    margin-top: var(--space-2);
-    font-family: var(--font);
-    font-size: var(--fs-sm);
-    line-height: 1;
-    padding: var(--space-1) 0;
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 100%;
+    width: var(--space-6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
     border: none;
     background: transparent;
-    color: var(--accent);
+    color: var(--text-muted);
+    font-size: var(--fs-lg);
+    line-height: 1;
     cursor: pointer;
   }
   .expires-clear:hover:not(:disabled) {
-    text-decoration: underline;
+    color: var(--text);
   }
   .expires-clear:disabled {
     opacity: 0.5;
