@@ -179,7 +179,7 @@ func servePostgres(cfg *config.Config) error {
 	return mountAndServe(cfg, pool,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
 		urlFiltersH, eventsH, redirectH, linksH, meH,
-		requireSession, requireAdmin)
+		requireSession, requireAdmin, nil /* no outer middleware in production */)
 }
 
 // serveDevMode boots the app without PostgreSQL using the in-memory dev store.
@@ -238,15 +238,24 @@ func serveDevMode(cfg *config.Config) error {
 		return requireSession(middleware.RequireAdmin(next))
 	}
 
+	// Dev-only auto-login middleware: on every request that has no session cookie,
+	// mint a dev session for the seeded mock admin and inject it into the request
+	// so RequireSession accepts it immediately — no passkey ceremony needed.
+	// The hard guardrail (cfg.DevMode() check) is enforced inside DevAutoLogin.
+	devAutoLogin := middleware.DevAutoLogin(ds, cfg.DevMode())
+
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
 		urlFiltersH, eventsH, redirectH, linksH, meH,
-		requireSession, requireAdmin)
+		requireSession, requireAdmin, devAutoLogin)
 }
 
 // mountAndServe registers all routes on a new ServeMux and starts listening.
 // This is shared between the Postgres and dev paths to avoid code duplication.
 // The `db` parameter satisfies handlers.Pinger for GET /health.
+// outerMiddleware, when non-nil, wraps the entire mux as the outermost handler.
+// It is used in dev mode only (serveDevMode) to apply the auto-login middleware;
+// the production path always passes nil.
 func mountAndServe(
 	cfg *config.Config,
 	pinger handlers.Pinger,
@@ -262,6 +271,7 @@ func mountAndServe(
 	meH *handlers.MeHandler,
 	requireSession func(http.Handler) http.Handler,
 	requireAdmin func(http.Handler) http.Handler,
+	outerMiddleware func(http.Handler) http.Handler,
 ) error {
 	// Per-IP rate limiters for the abuse-prone public auth endpoints (PRD Phase
 	// 2). Burst equals the per-window allowance so a fresh IP gets its full
@@ -352,5 +362,12 @@ func mountAndServe(
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	log.Printf("shortlinks %s listening on %s", version, addr)
-	return http.ListenAndServe(addr, mux)
+
+	// Apply the outer middleware (dev auto-login) when provided. This must never
+	// be non-nil on the production path — servePostgres always passes nil.
+	var handler http.Handler = mux
+	if outerMiddleware != nil {
+		handler = outerMiddleware(mux)
+	}
+	return http.ListenAndServe(addr, handler)
 }
