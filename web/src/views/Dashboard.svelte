@@ -68,6 +68,41 @@
   let expiresAt = $state('');
   let submitting = $state(false);
 
+  // Optional expiry (#0076). expiresAt === '' means the link NEVER expires, and
+  // the field is shown BLANK — no native "mm/dd/yyyy" mask. A native
+  // datetime-local is layered transparently over the field purely as the picker
+  // engine + value holder; our own text shows the chosen date. This looks blank
+  // when empty and identical across browsers (no fragile mask-hiding CSS).
+  let expiresInput = $state<HTMLInputElement | null>(null);
+  const hasExpiry = $derived(expiresAt !== '');
+
+  // Friendly display of the chosen date, e.g. "Dec 31, 2026, 11:59 PM". expiresAt
+  // is local wall-clock ("YYYY-MM-DDTHH:mm"), so new Date() parses it as local.
+  const expiryLabel = $derived(
+    expiresAt
+      ? new Date(expiresAt).toLocaleString(undefined, {
+          year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+        })
+      : '',
+  );
+
+  // Open the native date picker. Wired to both click and focus so it appears as
+  // soon as the field is engaged (including tabbing in). showPicker needs user
+  // activation and can throw — a focused input is a fine fallback.
+  function openExpiryPicker() {
+    try {
+      expiresInput?.showPicker();
+    } catch {
+      /* no activation / unsupported — the focused input still accepts a date */
+    }
+  }
+
+  // Clear the date: empties the field and dismisses the picker (blur closes it).
+  function clearExpiry() {
+    expiresAt = '';
+    expiresInput?.blur();
+  }
+
   // ── UTM builder state ───────────────────────────────────────────────────────
   let utmOpen = $state(false);
   let utmParams = $state<UtmParams>(emptyUtmParams());
@@ -319,23 +354,50 @@
         {/if}
       </div>
 
+      <!-- Expires (#0076): blank when no date is set (link never expires); shows
+           the chosen date otherwise. The calendar button opens the native picker;
+           clicking or tabbing into the field opens it too; the × (only when a date
+           is set) clears it and closes the picker. A transparent native
+           datetime-local is layered on top as the picker engine + value holder. -->
       <div class="field">
         <label for="expires">Expires <span class="text-faint">(optional)</span></label>
-        <div class="expires-wrap" class:has-value={expiresAt !== ''}>
+        <div class="dtfield" class:has-value={hasExpiry}>
+          <span class="dtfield-text">{expiryLabel}</span>
           <input
             id="expires"
+            class="dtfield-native"
             type="datetime-local"
+            bind:this={expiresInput}
             bind:value={expiresAt}
+            onclick={openExpiryPicker}
+            onfocus={openExpiryPicker}
             disabled={submitting}
           />
+          {#if hasExpiry}
+            <button
+              type="button"
+              class="dtfield-btn dtfield-clear"
+              tabindex="-1"
+              disabled={submitting}
+              onclick={clearExpiry}
+              aria-label="Clear expiration date"
+              title="Clear expiration date"
+            >×</button>
+          {/if}
           <button
             type="button"
-            class="expires-clear"
+            class="dtfield-btn dtfield-cal"
+            tabindex="-1"
             disabled={submitting}
-            onclick={() => { expiresAt = ''; }}
-            aria-label="Clear expiry date"
-            title="Clear expiry date"
-          >×</button>
+            onclick={openExpiryPicker}
+            aria-label="Choose expiration date"
+            title="Choose expiration date"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="2" y="3.2" width="12" height="10.8" rx="2" stroke="currentColor" stroke-width="1.4" />
+              <path d="M2 6.6h12M5.5 1.8v2.6M10.5 1.8v2.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -642,51 +704,87 @@
     border-color: var(--danger) !important;
   }
 
-  /* In-field clear for the optional Expires date (#0076). The wrapper is relative
-     and the "×" sits absolutely over the input's right edge — where the native
-     clear button used to be (the one #0053's -webkit-appearance:none stripped).
-     The input keeps its full width and #0053 height: width:100% + box-sizing
-     border-box mean the right padding is internal (no box change) and the × is
-     out of flow. It clears ONLY expiresAt (type=button — never submits the form).
-     The × is shown the moment the field is FOCUSED or has a value — not only after
-     a value commits — so it can't be missed while picking a date. */
-  .expires-wrap {
+  /* Custom Expires date field (#0076). Looks like a normal text input, but is
+     BLANK when no date is set (no native "mm/dd/yyyy" mask). A native
+     datetime-local is layered transparently on top (.dtfield-native, opacity 0)
+     purely as the picker engine + value holder; .dtfield-text shows our own
+     formatted date. The calendar button opens the picker; the × (only when set)
+     clears it. Box matches the other inputs (border, radius, #0053-derived
+     min-height) so the row lines up. */
+  .dtfield {
     position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    background: var(--bg-panel);
+    border: var(--border-w) solid var(--border-strong);
+    border-radius: var(--radius);
+    min-height: calc(var(--fs-base) * var(--lh) + var(--space-2) * 2 + var(--border-w) * 2);
+    padding-left: var(--space-3);
   }
-  .expires-wrap input {
-    padding-right: var(--space-6);
+  /* Mirror input:focus from app.css so engaging the field looks like any input. */
+  .dtfield:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-subtle);
   }
-  .expires-clear {
+  .dtfield-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: var(--fs-base);
+    line-height: var(--lh);
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* The real control: invisible but full-size, on top of the text so clicks and
+     focus reach it. -webkit-appearance:none keeps #0053's width behaviour. */
+  .dtfield-native {
     position: absolute;
-    top: 0;
-    right: 0;
+    inset: 0;
+    width: 100%;
     height: 100%;
-    width: var(--space-6);
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    opacity: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    min-width: 0;
+    cursor: pointer;
+    z-index: 1;
+  }
+  .dtfield-native:disabled {
+    cursor: default;
+  }
+  /* Calendar / clear buttons sit above the transparent native input so they stay
+     clickable. tabindex=-1 in markup keeps tab order on the input itself. */
+  .dtfield-btn {
+    position: relative;
+    z-index: 2;
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: center;
+    width: var(--space-6);
+    align-self: stretch;
     padding: 0;
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: var(--fs-lg);
-    line-height: 1;
     cursor: pointer;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.1s ease;
   }
-  .expires-wrap:focus-within .expires-clear,
-  .expires-wrap.has-value .expires-clear {
-    opacity: 1;
-    pointer-events: auto;
-  }
-  .expires-clear:hover:not(:disabled) {
+  .dtfield-btn:hover:not(:disabled) {
     color: var(--text);
   }
-  .expires-clear:disabled {
+  .dtfield-btn:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  .dtfield-clear {
+    font-size: var(--fs-lg);
+    line-height: 1;
   }
 
   .pager {
