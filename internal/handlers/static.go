@@ -3,6 +3,7 @@ package handlers
 import (
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 )
 
@@ -43,6 +44,17 @@ func (h *SPAHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if name != "" && h.fileExists(name) {
 		h.fileSrv.ServeHTTP(w, r)
+		return
+	}
+
+	// A request for a path that looks like a static asset (it has a file
+	// extension, e.g. /favicon.ico) but has no matching embedded file must NOT
+	// fall back to the HTML shell. Returning index.html for /favicon.ico made
+	// browsers receive an HTML document for an icon URL, which they can cache as
+	// a broken/garbage icon. Such paths get a clean 404 instead. SPA deep links
+	// (/dashboard, /account — no extension) still fall through to index.html.
+	if path.Ext(name) != "" {
+		http.NotFound(w, r)
 		return
 	}
 

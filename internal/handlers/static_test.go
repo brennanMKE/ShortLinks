@@ -90,6 +90,28 @@ func TestSPAAppleTouchIconServedFromDist(t *testing.T) {
 	}
 }
 
+// TestSPAMissingAssetReturns404 confirms a request for a path that looks like a
+// static asset (has a file extension) but has no embedded file returns 404 —
+// NOT the HTML shell. /favicon.ico is the motivating case: the site ships
+// PNG-only favicons (no favicon.ico), and serving index.html for /favicon.ico
+// let browsers cache an HTML document as a broken icon.
+func TestSPAMissingAssetReturns404(t *testing.T) {
+	fsys := distFS(map[string]string{
+		"index.html":  "<!doctype html><title>Short Links</title><div id=\"app\"></div>",
+		"favicon.png": "\x89PNG\r\n\x1a\nfake",
+	})
+
+	for _, p := range []string{"/favicon.ico", "/missing.png", "/nope.css"} {
+		rec := serveSPA(fsys, p)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s: status = %d, want 404", p, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "<!doctype html>") {
+			t.Errorf("GET %s returned index.html — missing asset must 404, not serve the SPA shell", p)
+		}
+	}
+}
+
 // TestSPAUnknownPathFallsBackToIndex confirms SPA deep-link fallback still
 // works: a path that has no matching file in the dist FS returns index.html.
 func TestSPAUnknownPathFallsBackToIndex(t *testing.T) {
