@@ -4,10 +4,34 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 )
+
+// bearerPrefix is the RFC 6750 Authorization scheme (matched case-insensitively).
+const bearerPrefix = "bearer "
+
+// sessionToken extracts the raw session token from the request, preferring an
+// "Authorization: Bearer <token>" header (used by native/API clients, e.g. the
+// iPhone app — #0077) over the shortlinks_session cookie (used by the browser
+// SPA). The two transports carry the SAME opaque token; this only changes how
+// it's read. A present-but-malformed Authorization header (wrong scheme, empty
+// token) falls through to the cookie so the browser SPA is never affected.
+// Returns "" when neither source carries a token.
+func sessionToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); len(h) > len(bearerPrefix) &&
+		strings.EqualFold(h[:len(bearerPrefix)], bearerPrefix) {
+		if tok := strings.TrimSpace(h[len(bearerPrefix):]); tok != "" {
+			return tok
+		}
+	}
+	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
+		return c.Value
+	}
+	return ""
+}
 
 // AuthUser is the authenticated principal attached to a request's context by
 // RequireSession. Handlers retrieve it with UserFromContext. It carries exactly
@@ -60,14 +84,15 @@ func withUser(ctx context.Context, u *AuthUser) context.Context {
 }
 
 // RequireSession returns middleware that guards protected routes. On each
-// request it reads the shortlinks_session cookie, validates the session against
-// the database, and—on success—attaches the authenticated AuthUser to the
-// request context before calling next. The validation also applies the 30-day
-// sliding window (bumps last_seen_at and extends expires_at) per the PRD's
-// Session Security rules.
+// request it reads the session token — from an "Authorization: Bearer <token>"
+// header (native/API clients, #0077) or the shortlinks_session cookie (the
+// browser SPA), see sessionToken — validates it against the database, and—on
+// success—attaches the authenticated AuthUser to the request context before
+// calling next. The validation also applies the 30-day sliding window (bumps
+// last_seen_at and extends expires_at) per the PRD's Session Security rules.
 //
 // It writes a 401 JSON response and stops the chain when:
-//   - the session cookie is absent,
+//   - no session token is present (neither header nor cookie),
 //   - the token is unknown or the session has expired (the expired row is
 //     reaped best-effort by the resolver), or
 //   - the owning account has been deactivated (active = false).
@@ -76,13 +101,13 @@ func withUser(ctx context.Context, u *AuthUser) context.Context {
 func RequireSession(resolver SessionResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			cookie, err := r.Cookie(auth.SessionCookieName)
-			if err != nil || cookie.Value == "" {
+			token := sessionToken(r)
+			if token == "" {
 				writeUnauthenticated(w)
 				return
 			}
 
-			u, err := resolver.ResolveSession(r.Context(), cookie.Value, nowFunc())
+			u, err := resolver.ResolveSession(r.Context(), token, nowFunc())
 			if err != nil {
 				// Unknown/expired token and deactivated account both deny
 				// access. Per the PRD a deactivated user "can't use the API",
