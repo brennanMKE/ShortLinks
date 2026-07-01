@@ -13,6 +13,7 @@ with the architecture overview, then dive into the subsystem you need.
 ## Data & backend
 
 - [Database schema & migrations](database.md) — tables, `golang-migrate`, the `seed` command
+- [Database backups](backups.md) — nightly `pg_dump`, common backup root, offsite pull to a Mac mini, restore drills
 - [Links, redirects & caching](links.md) — key generation, the `/u/{key}` redirect path, the Ristretto cache
 - [Click analytics & metrics](analytics.md) — click recording and the dashboard stats queries
 - [UTM / marketing parameters](utm.md) — the UTM builder, redirect passthrough, and analytics

@@ -5,6 +5,18 @@ down) the application **login role** and **database**. They do **not** create
 any tables — the schema is owned by [golang-migrate](https://github.com/golang-migrate/migrate)
 and lives in `migrations/`.
 
+## Backups
+
+Ongoing backup/restore tooling lives alongside these setup scripts:
+
+- `backup.sh` — nightly `pg_dump` of one or more databases into a common backup
+  root (run from cron on EC2)
+- `pull-backups.sh` — `rsync` the backup root offsite (run on the Mac mini)
+- `restore.sh` — restore a dump into a target database / run restore drills
+
+See [docs/backups.md](../../docs/backups.md) for the full setup, cron entries,
+and restore procedure.
+
 Run order on a fresh server:
 
 1. `create.sql` — create the role and database (this folder)
