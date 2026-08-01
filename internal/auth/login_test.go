@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -489,5 +490,96 @@ func TestLogin_BackupFlagsRoundTripStoreLoad(t *testing.T) {
 	}
 	if !recs[0].BackupState {
 		t.Error("CredentialsForUser record BackupState = false, want true")
+	}
+}
+
+// registerWithUnverifiedAuthenticator registers a normal synced passkey but
+// returns an authenticator configured to report UV=false on every assertion,
+// simulating Safari over Screen Sharing where Touch ID is unreachable and macOS
+// performs no local verification. Registration itself still asserts UV=true —
+// only the later login assertions are unverified — which mirrors reality: the
+// passkey was enrolled while sitting at the Mac and is used remotely later.
+func registerWithUnverifiedAuthenticator(t *testing.T, svc *RegistrationService, pool *pgxpool.Pool, email string) registeredAccount {
+	t.Helper()
+	acct := registerWithAuthenticator(t, svc, pool, email)
+	acct.authenticator.Options.UserNotVerified = true
+	return acct
+}
+
+// TestStartLogin_RequestsUserVerificationRequired is the primary regression test
+// for issue #0092. StartLogin called BeginLogin / BeginDiscoverableLogin with no
+// options, so the emitted assertion options inherited the (unset) RP-level
+// AuthenticatorSelection and went out with UserVerification == "" — which the
+// browser interprets as the spec default "preferred". FinishLogin meanwhile
+// enforces VerificationRequired, so any client that legitimately answered a
+// "preferred" request with UV=false could never sign in.
+//
+// Both login paths must request "required": the allowCredentials path (email
+// resolves to an account with credentials, BeginLogin) and the discoverable
+// path (no or unknown email, BeginDiscoverableLogin).
+func TestStartLogin_RequestsUserVerificationRequired(t *testing.T) {
+	pool := testPool(t)
+	setRegistrationsEnabled(t, pool, true)
+	regSvc := newService(t, pool, &recordingMailer{}, "")
+	loginSvc := newLoginService(t, pool)
+
+	const email = "uv-required@example.com"
+	registerWithAuthenticator(t, regSvc, pool, email)
+
+	cases := []struct {
+		name  string
+		email string
+	}{
+		{name: "allowCredentials path (known email)", email: email},
+		{name: "discoverable path (no email)", email: ""},
+		{name: "discoverable path (unknown email)", email: "nobody@example.com"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertion, err := loginSvc.StartLogin(context.Background(), tc.email)
+			if err != nil {
+				t.Fatalf("StartLogin(%q): %v", tc.email, err)
+			}
+			if got := assertion.Response.UserVerification; got != protocol.VerificationRequired {
+				t.Errorf("UserVerification = %q, want %q", got, protocol.VerificationRequired)
+			}
+
+			// Assert the wire form too: the browser reads the JSON, not the Go
+			// struct, and an omitempty tag or rename would silently drop it.
+			optionsJSON, err := json.Marshal(assertion)
+			if err != nil {
+				t.Fatalf("marshal assertion options: %v", err)
+			}
+			if !bytes.Contains(optionsJSON, []byte(`"userVerification":"required"`)) {
+				t.Errorf("assertion options JSON missing userVerification=required: %s", optionsJSON)
+			}
+		})
+	}
+}
+
+// TestLogin_UnverifiedAssertionRejected is the enforcement half of #0092. The
+// fix aligns the request with what FinishLogin already enforced; it must not be
+// "fixed" in the other direction by relaxing enforcement to accept UV=false.
+// This is a passkey-only admin app with no second factor, so an assertion whose
+// User Verified flag is unset must never produce a session.
+func TestLogin_UnverifiedAssertionRejected(t *testing.T) {
+	pool := testPool(t)
+	setRegistrationsEnabled(t, pool, true)
+	regSvc := newService(t, pool, &recordingMailer{}, "")
+	loginSvc := newLoginService(t, pool)
+
+	acct := registerWithUnverifiedAuthenticator(t, regSvc, pool, "unverified@example.com")
+	sessionsBefore := countSessionsForUser(t, pool, acct.user.ID)
+
+	result, err := driveLogin(t, loginSvc, acct, "")
+	if !errors.Is(err, ErrLoginFailed) {
+		t.Fatalf("FinishLogin with UV=false assertion: err = %v, want ErrLoginFailed", err)
+	}
+	if result.SessionToken != "" {
+		t.Error("a session token was issued for an unverified assertion")
+	}
+	if after := countSessionsForUser(t, pool, acct.user.ID); after != sessionsBefore {
+		t.Errorf("user sessions = %d, want %d (no new session)", after, sessionsBefore)
 	}
 }

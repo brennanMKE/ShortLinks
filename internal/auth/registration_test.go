@@ -509,3 +509,35 @@ func credentialDeviceName(t *testing.T, pool *pgxpool.Pool, userID int64) string
 	}
 	return name
 }
+
+// TestRegistrationOptions_UserVerificationAndResidentKeyRequired pins the
+// registration ceremony's authenticator selection. #0092 set
+// AuthenticatorSelection on the RP-level webauthn.Config so the login ceremony
+// would stop defaulting to "preferred"; registration overrides that config
+// wholesale via registrationOptions(), so this guards that enrollment still
+// demands a discoverable credential AND user verification, independent of
+// whatever the RP-level default happens to be.
+func TestRegistrationOptions_UserVerificationAndResidentKeyRequired(t *testing.T) {
+	cfg := &config.Config{WebAuthnRPID: testRPID, WebAuthnRPOrigin: testRPOrigin}
+	wa, err := NewWebAuthn(cfg)
+	if err != nil {
+		t.Fatalf("NewWebAuthn: %v", err)
+	}
+	user, err := NewRegistrationUser("options@example.com")
+	if err != nil {
+		t.Fatalf("NewRegistrationUser: %v", err)
+	}
+
+	creation, _, err := wa.BeginRegistration(user, registrationOptions()...)
+	if err != nil {
+		t.Fatalf("BeginRegistration: %v", err)
+	}
+
+	sel := creation.Response.AuthenticatorSelection
+	if sel.UserVerification != protocol.VerificationRequired {
+		t.Errorf("UserVerification = %q, want %q", sel.UserVerification, protocol.VerificationRequired)
+	}
+	if sel.ResidentKey != protocol.ResidentKeyRequirementRequired {
+		t.Errorf("ResidentKey = %q, want %q", sel.ResidentKey, protocol.ResidentKeyRequirementRequired)
+	}
+}

@@ -23,11 +23,22 @@ const userHandleLen = 16
 // This is the single construction point reused by the registration,
 // authentication (#0016), and recovery (#0017) ceremonies; build it once at
 // startup and inject it into the auth service.
+//
+// AuthenticatorSelection.UserVerification is set at the RP level so the login
+// ceremony inherits it: BeginLogin / BeginDiscoverableLogin take their
+// UserVerification from this config, and leaving it unset made the browser fall
+// back to the spec default of "preferred" while FinishLogin still enforced
+// "required" — locking out any client that legitimately returned UV=false
+// (#0092). Registration overrides AuthenticatorSelection wholesale via
+// registrationOptions(), which repeats the same value.
 func NewWebAuthn(cfg *config.Config) (*webauthn.WebAuthn, error) {
 	wa, err := webauthn.New(&webauthn.Config{
 		RPID:          cfg.WebAuthnRPID,
 		RPDisplayName: "ShortLinks",
 		RPOrigins:     []string{cfg.WebAuthnRPOrigin},
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			UserVerification: protocol.VerificationRequired,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("auth: configuring webauthn: %w", err)
