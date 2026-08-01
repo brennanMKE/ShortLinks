@@ -139,7 +139,7 @@ func (s *LoginService) FinishLogin(ctx context.Context, ip string, r *http.Reque
 
 	parsed, err := protocol.ParseCredentialRequestResponse(r)
 	if err != nil {
-		s.log.Warn("login: parsing assertion", "err", err)
+		s.log.Warn("login: parsing assertion", ceremonyWarnArgs(err)...)
 		return LoginResult{}, ErrLoginFailed
 	}
 
@@ -190,7 +190,7 @@ func (s *LoginService) FinishLogin(ctx context.Context, ip string, r *http.Reque
 
 	validated, err := s.wa.ValidateLogin(loginUser, session, parsed)
 	if err != nil {
-		s.log.Warn("login: validating assertion", "err", err)
+		s.log.Warn("login: validating assertion", ceremonyWarnArgs(err)...)
 		return LoginResult{}, ErrLoginFailed
 	}
 
@@ -291,6 +291,31 @@ func (s *LoginService) Logout(ctx context.Context, token, ip string) error {
 		})
 	}
 	return nil
+}
+
+// ceremonyWarnArgs builds the slog arguments for a failed WebAuthn ceremony
+// step, appending the library's developer-facing DevInfo as a separate "info"
+// attribute when the error carries one.
+//
+// go-webauthn's (*protocol.Error).Error() returns only the Details field, which
+// is a coarse category string shared by several distinct checks — every
+// AuthenticatorData.Verify failure (RP ID hash mismatch, User Present unset,
+// User Verified unset) reports the identical "Error validating the
+// authenticator response". DevInfo is the only field that names which check
+// actually failed, and dropping it made #0092 diagnosable only by reading
+// library source. See #0093.
+//
+// DevInfo goes to the server journal exclusively: the handler still maps every
+// failure to a generic 401, so nothing here reaches the client. An error that
+// is not a *protocol.Error, or one whose DevInfo is empty, logs exactly as
+// before with no empty attribute.
+func ceremonyWarnArgs(err error) []any {
+	args := []any{"err", err}
+	var perr *protocol.Error
+	if errors.As(err, &perr) && perr.DevInfo != "" {
+		args = append(args, "info", perr.DevInfo)
+	}
+	return args
 }
 
 // credentialFromRecord rebuilds a webauthn.Credential from a stored row for use

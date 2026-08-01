@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -581,5 +584,107 @@ func TestLogin_UnverifiedAssertionRejected(t *testing.T) {
 	}
 	if after := countSessionsForUser(t, pool, acct.user.ID); after != sessionsBefore {
 		t.Errorf("user sessions = %d, want %d (no new session)", after, sessionsBefore)
+	}
+}
+
+// TestCeremonyWarnArgs covers the three shapes of error that reach a ceremony
+// warn site, per issue #0093: a *protocol.Error carrying DevInfo (the DevInfo
+// must be surfaced as a separate "info" attribute), a *protocol.Error with an
+// empty DevInfo, and an error that is not a *protocol.Error at all (both must
+// log exactly as before, with no empty attribute appended).
+func TestCeremonyWarnArgs(t *testing.T) {
+	withInfo := protocol.ErrVerification.WithInfo("User verification required but flag not set by authenticator")
+	noInfo := protocol.ErrVerification
+
+	cases := []struct {
+		name     string
+		err      error
+		wantLen  int
+		wantInfo string
+	}{
+		{
+			name:     "protocol.Error with DevInfo",
+			err:      withInfo,
+			wantLen:  4,
+			wantInfo: "User verification required but flag not set by authenticator",
+		},
+		{
+			name:    "protocol.Error with empty DevInfo",
+			err:     noInfo,
+			wantLen: 2,
+		},
+		{
+			name:    "wrapped protocol.Error with DevInfo",
+			err:     fmt.Errorf("auth: validating: %w", withInfo),
+			wantLen: 4,
+			// errors.As unwraps, so the DevInfo is still found.
+			wantInfo: "User verification required but flag not set by authenticator",
+		},
+		{
+			name:    "plain error",
+			err:     errors.New("boom"),
+			wantLen: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := ceremonyWarnArgs(tc.err)
+			if len(args) != tc.wantLen {
+				t.Fatalf("args = %v (len %d), want len %d", args, len(args), tc.wantLen)
+			}
+			if args[0] != "err" || args[1] != tc.err {
+				t.Errorf("args[0:2] = %v, want [err %v]", args[0:2], tc.err)
+			}
+			if tc.wantInfo == "" {
+				return
+			}
+			if args[2] != "info" {
+				t.Errorf("args[2] = %v, want \"info\"", args[2])
+			}
+			if args[3] != tc.wantInfo {
+				t.Errorf("args[3] = %v, want %q", args[3], tc.wantInfo)
+			}
+		})
+	}
+}
+
+// TestLogin_ValidationFailureLogsDevInfo is the end-to-end proof for #0093: a
+// real assertion that fails validation must produce a log record naming the
+// specific failing check, not just the generic category string.
+//
+// The failure is induced with an origin mismatch — the virtual authenticator
+// signs over a client-data origin the relying party does not accept — because
+// go-webauthn attaches the expected/received origins to that error's DevInfo.
+// Before the fix the record carried only err="Error validating origin".
+func TestLogin_ValidationFailureLogsDevInfo(t *testing.T) {
+	pool := testPool(t)
+	setRegistrationsEnabled(t, pool, true)
+	regSvc := newService(t, pool, &recordingMailer{}, "")
+	loginSvc := newLoginService(t, pool)
+
+	var buf bytes.Buffer
+	loginSvc.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	acct := registerWithAuthenticator(t, regSvc, pool, "devinfo@example.com")
+
+	// Re-point the relying party at an origin the server does not accept, so the
+	// assertion is otherwise valid but fails origin verification.
+	acct.rp = virtualwebauthn.RelyingParty{ID: testRPID, Name: "ShortLinks", Origin: "https://attacker.example"}
+
+	if _, err := driveLogin(t, loginSvc, acct, ""); !errors.Is(err, ErrLoginFailed) {
+		t.Fatalf("FinishLogin with mismatched origin: err = %v, want ErrLoginFailed", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "login: validating assertion") {
+		t.Fatalf("expected a validating-assertion warning, got: %s", logged)
+	}
+	if !strings.Contains(logged, "info=") {
+		t.Errorf("log record has no info attribute (DevInfo dropped): %s", logged)
+	}
+	// The DevInfo for an origin mismatch names the origin actually received.
+	if !strings.Contains(logged, "attacker.example") {
+		t.Errorf("log record does not name the received origin: %s", logged)
 	}
 }
