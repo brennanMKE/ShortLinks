@@ -22,6 +22,13 @@ const (
 	ActionCredentialAdded   = "credential.added"
 	ActionCredentialRevoked = "credential.revoked"
 
+	// Session lifecycle. account.logout (above) revokes exactly one session by
+	// its cookie token; session.revoked_all is the bulk "sign out everywhere"
+	// action (#0094) that revokes every session for the account in one call. It
+	// is deliberately not named account.* — it never touches the users row or
+	// any passkey_credentials row, only sessions.
+	ActionSessionsRevokedAll = "session.revoked_all"
+
 	// Link lifecycle.
 	ActionLinkCreated     = "link.created"
 	ActionLinkDeactivated = "link.deactivated"

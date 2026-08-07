@@ -8,7 +8,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentView, currentUser, links } from '../lib/stores';
-  import { listCredentials, renameCredential, revokeCredential, logout, ApiError } from '../lib/api';
+  import {
+    listCredentials,
+    renameCredential,
+    revokeCredential,
+    logout,
+    logoutAll,
+    ApiError,
+  } from '../lib/api';
   import {
     formatDate,
     lastUsedLabel,
@@ -134,6 +141,46 @@
     currentView.set('login');
   }
 
+  let signingOutAll = $state(false);
+  let signOutAllError = $state<string | null>(null);
+
+  // "Sign out everywhere" (#0094): revokes every session for this account —
+  // this browser, any other browser, and the iPhone app — but never touches
+  // enrolled passkeys. Destructive and not undoable, so it goes through a
+  // confirmation step first, same as revoking a passkey.
+  //
+  // Unlike handleSignOut, a failure here must NOT be presented as success: the
+  // whole point of the button is the guarantee that nothing is still
+  // authenticated, and on a failed request the server-side transaction rolled
+  // back, so every session — including the one on the device the user is
+  // trying to lock out — is still live. Only a 401 (the session backing this
+  // very request is already gone) legitimately takes the signed-out branch.
+  async function handleSignOutEverywhere() {
+    const confirmed = confirm(
+      'Sign out everywhere?\n\n' +
+        'This immediately signs out every device and app currently signed in to ' +
+        'this account, including the iPhone app — not just this browser.\n\n' +
+        'Your passkeys are not affected. You can sign back in right away with ' +
+        'your existing passkey.',
+    );
+    if (!confirmed) return;
+
+    signingOutAll = true;
+    signOutAllError = null;
+    try {
+      await logoutAll();
+    } catch (err) {
+      if (handleAuthError(err)) return;
+      signOutAllError = 'Could not sign out everywhere. Your other sessions may still be active. Please try again.';
+      return;
+    } finally {
+      signingOutAll = false;
+    }
+    currentUser.set(null);
+    links.set([]);
+    currentView.set('login');
+  }
+
   onMount(load);
 </script>
 
@@ -153,6 +200,18 @@
   <Panel title="Account">
     {#if $currentUser}
       <p class="text-muted">Signed in as <strong>{$currentUser.email}</strong></p>
+      <p class="text-muted intro">
+        If a session is live somewhere you no longer control — a lost device, a
+        shared computer — sign out everywhere to end every session at once,
+        including the iPhone app. Your passkeys keep working; nothing about your
+        account changes.
+      </p>
+      <Button variant="danger" disabled={signingOutAll} onclick={handleSignOutEverywhere}>
+        {signingOutAll ? 'Signing out everywhere…' : 'Sign out everywhere'}
+      </Button>
+      {#if signOutAllError}
+        <p class="text-error" role="alert">{signOutAllError}</p>
+      {/if}
     {/if}
   </Panel>
 

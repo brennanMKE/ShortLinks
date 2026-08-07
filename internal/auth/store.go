@@ -619,6 +619,21 @@ func (s *Store) DeleteSession(ctx context.Context, token string) (int64, error) 
 	}
 }
 
+// DeleteSessionsForUser removes every sessions row belonging to userID inside
+// the caller's transaction, returning the number of rows deleted. This is the
+// bulk counterpart to DeleteSession, backing "sign out everywhere" (#0094): it
+// revokes every live session for one account — including, when called from the
+// session guard's own request, the caller's current session — in a single
+// statement. Like DeleteSession it is idempotent: a user with no live sessions
+// (or a second call) deletes zero rows and is not an error.
+func (s *Store) DeleteSessionsForUser(ctx context.Context, q querier, userID int64) (int64, error) {
+	tag, err := q.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("auth: deleting sessions for user: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // ErrSessionInvalid is returned when a session token is unknown or its session
 // has expired. The two cases are deliberately collapsed so the auth middleware
 // can map both to a single 401 without leaking which occurred.

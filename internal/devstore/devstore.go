@@ -45,11 +45,11 @@ const seedAdminID int64 = 1
 // in a single struct to keep wiring simple — main.go constructs one *Store and
 // passes it to every constructor that needs a store argument.
 type Store struct {
-	mu      sync.Mutex
-	users   []auth.ManagedUser
-	links   []links.Link
-	rules   []filters.FilterRule
-	audit   []audit.Record
+	mu       sync.Mutex
+	users    []auth.ManagedUser
+	links    []links.Link
+	rules    []filters.FilterRule
+	audit    []audit.Record
 	sessions map[string]sessionEntry // token → session
 	settings []auth.Setting
 	// nextLinkID is the auto-increment counter for link IDs.
@@ -175,6 +175,22 @@ func (s *Store) DeleteSession(_ context.Context, token string) (int64, error) {
 	}
 	delete(s.sessions, token)
 	return e.userID, nil
+}
+
+// DeleteSessionsForUser removes every session belonging to userID and returns
+// how many were deleted ("sign out everywhere", #0094). Mirrors
+// auth.Store.DeleteSessionsForUser; idempotent like DeleteSession.
+func (s *Store) DeleteSessionsForUser(_ context.Context, userID int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for tok, e := range s.sessions {
+		if e.userID == userID {
+			delete(s.sessions, tok)
+			n++
+		}
+	}
+	return n, nil
 }
 
 // ── settingStore (handlers.SettingsHandler) ─────────────────────────────────
@@ -843,6 +859,13 @@ func (d *devLoginService) FinishLogin(_ context.Context, _ string, _ *http.Reque
 func (d *devLoginService) Logout(ctx context.Context, token, _ string) error {
 	_, err := d.store.DeleteSession(ctx, token)
 	return err
+}
+
+// LogoutAll deletes every dev session for userID ("sign out everywhere",
+// #0094). Dev mode has no mailer/audit wiring, so this is just the bulk
+// session delete.
+func (d *devLoginService) LogoutAll(ctx context.Context, userID int64, _, _ string) (int64, error) {
+	return d.store.DeleteSessionsForUser(ctx, userID)
 }
 
 // NewDevLoginService returns an authenticator-compatible service that handles

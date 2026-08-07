@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
 )
@@ -35,21 +36,45 @@ type LoginService struct {
 	store *Store
 	wa    *webauthn.WebAuthn
 	log   *slog.Logger
-	// auditor records the account.login and account.logout audit entries
-	// (#0025). May be nil in unit tests that do not assert audit rows.
+	// auditor records the account.login, account.logout, and
+	// session.revoked_all audit entries (#0025, #0094). May be nil in unit
+	// tests that do not assert audit rows.
 	auditor *audit.Logger
+	// mailer sends the SendSessionsRevoked notification from LogoutAll
+	// (#0094). Logout/FinishLogin have no mail dependency; only the bulk
+	// revoke needs one. May be nil, in which case LogoutAll skips the send
+	// entirely (unit tests that only care about session/audit behavior).
+	mailer Mailer
 	// now is injectable so TTLs and timestamps are deterministic in tests;
 	// defaults to time.Now.
 	now func() time.Time
+	// commit performs the final tx.Commit for LogoutAll. It is a function
+	// field (rather than calling tx.Commit directly) purely so tests can
+	// simulate a commit failure and prove the notification email is never
+	// sent when the transaction does not actually commit. Defaults to a thin
+	// wrapper over tx.Commit; every other ceremony in this file calls
+	// tx.Commit directly since nothing downstream of their commit needs this
+	// seam.
+	commit func(ctx context.Context, tx pgx.Tx) error
 }
 
 // NewLoginService wires the login ceremony from its dependencies. A nil logger
 // falls back to the default slog logger; a nil auditor disables audit writes.
-func NewLoginService(store *Store, wa *webauthn.WebAuthn, auditor *audit.Logger, logger *slog.Logger) *LoginService {
+// A nil mailer disables the LogoutAll notification email (Logout and
+// FinishLogin never send mail).
+func NewLoginService(store *Store, wa *webauthn.WebAuthn, mailer Mailer, auditor *audit.Logger, logger *slog.Logger) *LoginService {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &LoginService{store: store, wa: wa, log: logger, auditor: auditor, now: time.Now}
+	return &LoginService{
+		store:   store,
+		wa:      wa,
+		log:     logger,
+		auditor: auditor,
+		mailer:  mailer,
+		now:     time.Now,
+		commit:  func(ctx context.Context, tx pgx.Tx) error { return tx.Commit(ctx) },
+	}
 }
 
 // StartLogin is step 1. It issues an assertion challenge and returns the
@@ -291,6 +316,73 @@ func (s *LoginService) Logout(ctx context.Context, token, ip string) error {
 		})
 	}
 	return nil
+}
+
+// LogoutAll revokes every session belonging to userID — including, when the
+// caller is the session guard's own request, the current session — in one
+// transaction, and writes the session.revoked_all audit entry recording the
+// revoked count in the same transaction. It is the "sign out everywhere"
+// action (#0094): the session-lifetime complement to RevokeCredential
+// (#0019), which it never touches — nor the users row. A user with zero live
+// sessions (or a second call) revokes zero rows and is not an error, the same
+// idempotency contract as Logout.
+//
+// email addresses the best-effort notification email, sent only AFTER the
+// transaction commits and never allowed to fail the operation: a send failure
+// is logged and swallowed, mirroring the fire-and-forget audit-write
+// precedent immediately above in Logout. Sending after commit (rather than
+// before, or in the same transaction) matters here specifically because this
+// is a security action — an email claiming "everything is signed out" must
+// never go out for a revoke that then rolled back. email is passed by the
+// caller (the session guard's AuthUser already carries it) rather than looked
+// up here, avoiding an extra query. A nil mailer (e.g. some unit tests) simply
+// skips the send.
+func (s *LoginService) LogoutAll(ctx context.Context, userID int64, email, ip string) (int64, error) {
+	now := s.now()
+
+	tx, err := s.store.Pool().Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("auth: begin logout-all tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	revoked, err := s.store.DeleteSessionsForUser(ctx, tx, userID)
+	if err != nil {
+		return 0, err
+	}
+
+	// session.revoked_all: actor and affected user are the same account, as
+	// with account.logout. The revoked count is recorded so the audit log
+	// distinguishes "revoked 4 sessions" from a no-op.
+	if s.auditor != nil {
+		actor := userID
+		if err := s.auditor.WriteTx(ctx, tx, audit.Entry{
+			ActorID:    &actor,
+			UserID:     &actor,
+			Action:     audit.ActionSessionsRevokedAll,
+			TargetType: audit.TargetUser,
+			TargetID:   &actor,
+			Metadata:   map[string]any{"revoked_count": revoked},
+			IP:         ip,
+		}); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := s.commit(ctx, tx); err != nil {
+		return 0, fmt.Errorf("auth: commit logout-all tx: %w", err)
+	}
+
+	// Fire-and-forget: the sessions are already gone and the audit row already
+	// committed, so a failed send must not fail LogoutAll. Only reachable after
+	// a successful commit — see the doc comment above.
+	if s.mailer != nil && email != "" {
+		if err := s.mailer.SendSessionsRevoked(ctx, email, now); err != nil {
+			s.log.Warn("logout-all: sessions-revoked notification failed", "user_id", userID, "err", err)
+		}
+	}
+
+	return revoked, nil
 }
 
 // ceremonyWarnArgs builds the slog arguments for a failed WebAuthn ceremony

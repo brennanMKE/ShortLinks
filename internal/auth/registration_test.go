@@ -34,6 +34,15 @@ type recordingMailer struct {
 	calls  int
 	lastTo string
 	token  string
+
+	// sessionsRevoked* track SendSessionsRevoked calls for the #0094 "sign out
+	// everywhere" tests. sessionsRevokedErr lets a test simulate a mailer
+	// failure to prove LogoutAll swallows it (fire-and-forget, like the
+	// Logout audit write).
+	sessionsRevokedCalls int
+	sessionsRevokedTo    string
+	sessionsRevokedAt    time.Time
+	sessionsRevokedErr   error
 }
 
 func (m *recordingMailer) SendVerification(_ context.Context, toEmail, token string) error {
@@ -47,10 +56,28 @@ func (m *recordingMailer) SendVerification(_ context.Context, toEmail, token str
 
 func (m *recordingMailer) SendRecovery(_ context.Context, _, _ string) error { return nil }
 
+func (m *recordingMailer) SendSessionsRevoked(_ context.Context, toEmail string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessionsRevokedCalls++
+	m.sessionsRevokedTo = toEmail
+	m.sessionsRevokedAt = at
+	return m.sessionsRevokedErr
+}
+
 func (m *recordingMailer) recorded() (int, string, string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.calls, m.lastTo, m.token
+}
+
+// sessionsRevokedRecorded returns the SendSessionsRevoked call count, last
+// recipient, and last timestamp, guarded by the same mutex as the other
+// recorded fields.
+func (m *recordingMailer) sessionsRevokedRecorded() (int, string, time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sessionsRevokedCalls, m.sessionsRevokedTo, m.sessionsRevokedAt
 }
 
 // testPool connects to TEST_DATABASE_URL or skips. It also registers a cleanup

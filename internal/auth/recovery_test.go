@@ -44,6 +44,13 @@ func (m *recoveryRecordingMailer) SendRecovery(_ context.Context, toEmail, token
 	return nil
 }
 
+// SendSessionsRevoked is a no-op stub so recoveryRecordingMailer keeps
+// satisfying the Mailer interface (#0094); the recovery-flow tests do not
+// assert on it.
+func (m *recoveryRecordingMailer) SendSessionsRevoked(_ context.Context, _ string, _ time.Time) error {
+	return nil
+}
+
 func (m *recoveryRecordingMailer) recorded() (recoveryCalls, verifyCalls int, to, token string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

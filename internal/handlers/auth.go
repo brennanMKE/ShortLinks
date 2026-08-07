@@ -11,6 +11,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 
 	"github.com/brennanMKE/ShortLinks/internal/auth"
+	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
 
 // maxAuthBodyBytes caps request bodies for the auth endpoints. The attestation
@@ -33,6 +34,9 @@ type authenticator interface {
 	StartLogin(ctx context.Context, email string) (*protocol.CredentialAssertion, error)
 	FinishLogin(ctx context.Context, ip string, r *http.Request) (auth.LoginResult, error)
 	Logout(ctx context.Context, token, ip string) error
+	// LogoutAll revokes every session for userID ("sign out everywhere",
+	// #0094) and returns the number of sessions revoked.
+	LogoutAll(ctx context.Context, userID int64, email, ip string) (int64, error)
 }
 
 // recoverer is the behavior the auth handler needs from the recovery service.
@@ -53,6 +57,8 @@ type recoverer interface {
 //	GET  /auth/login/start      — issue an assertion challenge (optional ?email=)
 //	POST /auth/login/finish     — submit assertion, verify, create session
 //	POST /auth/logout           — delete the session, clear the cookie
+//	POST /auth/logout/all       — revoke EVERY session for the caller ("sign out
+//	                               everywhere", #0094), session-guarded
 //	POST /auth/recover          — submit email, send recovery link (generic 200)
 //	GET  /auth/recover/verify   — validate recovery token, return WebAuthn options
 //	POST /auth/recover/finish   — submit attestation, add credential + session
@@ -223,6 +229,33 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearSessionCookie(w)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Signed out"})
+}
+
+// LogoutAll handles POST /auth/logout/all — "sign out everywhere" (#0094). It
+// MUST be mounted behind middleware.RequireSession: it reads the authenticated
+// user from the request context (id + email, so the service needs no extra
+// lookup), revokes every session belonging to that account — including this
+// one — and clears the session cookie exactly as Logout does. Idempotent, like
+// Logout: a user with no other live sessions still gets 200 with
+// revoked_count including at least this request's own session.
+func (h *AuthHandler) LogoutAll(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+
+	revoked, err := h.login.LogoutAll(r.Context(), u.ID, u.Email, clientIP(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	clearSessionCookie(w)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":       "Signed out everywhere",
+		"revoked_count": revoked,
+	})
 }
 
 // recoverRequest is the POST /auth/recover body.

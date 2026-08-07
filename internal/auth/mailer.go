@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"log"
+	"time"
 )
 
 // Mailer sends transactional emails for the authentication flows: magic-link
@@ -24,6 +25,15 @@ type Mailer interface {
 	// SPA browser path. The SPA calls GET /auth/recover/verify?token={token}
 	// for WebAuthn creation options.
 	SendRecovery(ctx context.Context, toEmail, token string) error
+
+	// SendSessionsRevoked notifies toEmail that every active session was just
+	// signed out ("sign out everywhere", #0094) at the given time. Unlike
+	// SendVerification/SendRecovery this is a plain notification: no token, no
+	// link with credentials, nothing single-use — it carries no TTL and is safe
+	// to re-read. It must say the account's EXISTING passkey still works;
+	// enrolling a new one is only a conditional follow-up for the lost-device
+	// case, never the primary instruction (see issue #0094's rationale).
+	SendSessionsRevoked(ctx context.Context, toEmail string, at time.Time) error
 }
 
 // NoOpMailer is a Mailer that does not send anything. It logs the would-be
@@ -44,6 +54,13 @@ func (m NoOpMailer) SendVerification(_ context.Context, toEmail, token string) e
 // SendRecovery logs the recovery link instead of sending it.
 func (m NoOpMailer) SendRecovery(_ context.Context, toEmail, token string) error {
 	log.Printf("NoOpMailer: recovery email to %s: %s", toEmail, recoveryURL(m.BaseURL, token))
+	return nil
+}
+
+// SendSessionsRevoked logs the would-be sessions-revoked notice instead of
+// sending it, same as the other two methods.
+func (m NoOpMailer) SendSessionsRevoked(_ context.Context, toEmail string, at time.Time) error {
+	log.Printf("NoOpMailer: sessions-revoked notice to %s at %s", toEmail, at.UTC().Format(time.RFC3339))
 	return nil
 }
 

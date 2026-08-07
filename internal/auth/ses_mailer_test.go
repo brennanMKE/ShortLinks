@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/config"
 )
@@ -111,6 +112,40 @@ func TestSESMailer_SendRecovery_InjectedTransport(t *testing.T) {
 	wantLink := "https://go.sstools.co/recover/verify?token=rec-789"
 	if !strings.Contains(msg, wantLink) {
 		t.Errorf("message missing recovery link %q\nfull message:\n%s", wantLink, msg)
+	}
+}
+
+// TestSESMailer_SendSessionsRevoked_InjectedTransport asserts the "sign out
+// everywhere" notification (#0094): no token/link-with-credentials, the
+// account's EXISTING passkey is what still works (never "a new passkey" — see
+// the issue's copy-correction rationale), and the timestamp is included.
+func TestSESMailer_SendSessionsRevoked_InjectedTransport(t *testing.T) {
+	var rec recorder
+	m := newTestMailer(rec.capture)
+
+	at := time.Date(2026, 8, 6, 15, 4, 5, 0, time.UTC)
+	if err := m.SendSessionsRevoked(context.Background(), "dana@example.com", at); err != nil {
+		t.Fatalf("SendSessionsRevoked: %v", err)
+	}
+
+	if len(rec.to) != 1 || rec.to[0] != "dana@example.com" {
+		t.Errorf("envelope to = %v, want [dana@example.com]", rec.to)
+	}
+	msg := string(rec.msg)
+	if !strings.Contains(msg, "Subject: All sessions signed out\r\n") {
+		t.Errorf("message missing subject\nfull message:\n%s", msg)
+	}
+	if !strings.Contains(msg, "existing passkey") {
+		t.Errorf("message must tell the user their EXISTING passkey still works\nfull message:\n%s", msg)
+	}
+	if strings.Contains(msg, "a new passkey") || strings.Contains(msg, "sign in with a new") {
+		t.Errorf("message must NOT instruct signing in with a new passkey (see #0094 rationale)\nfull message:\n%s", msg)
+	}
+	if !strings.Contains(msg, "https://go.sstools.co") {
+		t.Errorf("message missing base URL\nfull message:\n%s", msg)
+	}
+	if !strings.Contains(msg, at.Format(time.RFC1123Z)) {
+		t.Errorf("message missing formatted timestamp\nfull message:\n%s", msg)
 	}
 }
 
@@ -315,5 +350,8 @@ func TestNoOpMailer(t *testing.T) {
 	}
 	if err := m.SendRecovery(context.Background(), "a@example.com", "t"); err != nil {
 		t.Errorf("NoOpMailer.SendRecovery: %v", err)
+	}
+	if err := m.SendSessionsRevoked(context.Background(), "a@example.com", time.Now()); err != nil {
+		t.Errorf("NoOpMailer.SendSessionsRevoked: %v", err)
 	}
 }

@@ -58,6 +58,12 @@ type fakeAuthenticator struct {
 
 	logoutGot string
 	logoutErr error
+
+	logoutAllUserID int64
+	logoutAllEmail  string
+	logoutAllIP     string
+	logoutAllResult int64
+	logoutAllErr    error
 }
 
 func (f *fakeAuthenticator) StartLogin(_ context.Context, email string) (*protocol.CredentialAssertion, error) {
@@ -72,6 +78,13 @@ func (f *fakeAuthenticator) FinishLogin(_ context.Context, _ string, _ *http.Req
 func (f *fakeAuthenticator) Logout(_ context.Context, token, _ string) error {
 	f.logoutGot = token
 	return f.logoutErr
+}
+
+func (f *fakeAuthenticator) LogoutAll(_ context.Context, userID int64, email, ip string) (int64, error) {
+	f.logoutAllUserID = userID
+	f.logoutAllEmail = email
+	f.logoutAllIP = ip
+	return f.logoutAllResult, f.logoutAllErr
 }
 
 // fakeRecoverer is an in-memory recovery service for handler tests.
@@ -472,6 +485,34 @@ func TestLogout_NoCookie(t *testing.T) {
 	}
 	if a.logoutGot != "" {
 		t.Errorf("service should not be called without a cookie; got %q", a.logoutGot)
+	}
+}
+
+// TestLogoutAll_NoContextUser401 asserts that calling the handler directly
+// (bypassing middleware.RequireSession, which in production always attaches
+// the AuthUser first) yields 401 and never reaches the service — proving the
+// handler itself enforces "no context user, no revoke" rather than trusting
+// an absent user. The full authenticated path (real session, real revoke,
+// cookie clearing, DB assertions) is covered by the DB-backed HTTP tests in
+// logout_all_test.go, matching how every other RequireSession-guarded route in
+// this package is tested (see credentials_test.go, me_test.go).
+func TestLogoutAll_NoContextUser401(t *testing.T) {
+	a := &fakeAuthenticator{logoutAllResult: 3}
+	h := NewAuthHandler(&fakeRegistrar{}, a, nil)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout/all", nil)
+
+	h.LogoutAll(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%s", rr.Code, rr.Body.String())
+	}
+	if a.logoutAllUserID != 0 || a.logoutAllEmail != "" {
+		t.Errorf("service should not be called without a context user; got userID=%d email=%q",
+			a.logoutAllUserID, a.logoutAllEmail)
+	}
+	if len(rr.Result().Cookies()) != 0 {
+		t.Error("no cookie should be cleared on a 401")
 	}
 }
 

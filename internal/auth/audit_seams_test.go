@@ -24,7 +24,7 @@ func newAuditedServices(t *testing.T, pool *pgxpool.Pool) (*RegistrationService,
 	logger := audit.New(pool)
 	store := NewStore(pool)
 	reg := NewRegistrationService(store, wa, &recordingMailer{}, logger, cfg)
-	login := NewLoginService(store, wa, logger, nil)
+	login := NewLoginService(store, wa, &recordingMailer{}, logger, nil)
 	return reg, login
 }
 

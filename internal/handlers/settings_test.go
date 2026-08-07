@@ -437,3 +437,6 @@ type gateMailer struct{}
 
 func (gateMailer) SendVerification(context.Context, string, string) error { return nil }
 func (gateMailer) SendRecovery(context.Context, string, string) error     { return nil }
+func (gateMailer) SendSessionsRevoked(context.Context, string, time.Time) error {
+	return nil
+}

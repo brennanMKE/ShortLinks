@@ -100,7 +100,7 @@ func servePostgres(cfg *config.Config) error {
 
 	store := auth.NewStore(pool)
 	regSvc := auth.NewRegistrationService(store, wa, mailer, auditLogger, cfg)
-	loginSvc := auth.NewLoginService(store, wa, auditLogger, slog.Default())
+	loginSvc := auth.NewLoginService(store, wa, mailer, auditLogger, slog.Default())
 	recoverSvc := auth.NewRecoveryService(store, wa, mailer, auditLogger)
 	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc)
 	credsH := handlers.NewCredentialsHandler(store, auditLogger)
@@ -294,6 +294,11 @@ func mountAndServe(
 	mux.Handle("GET /auth/login/start", loginLimiter.Middleware(http.HandlerFunc(authH.LoginStart)))
 	mux.HandleFunc("POST /auth/login/finish", authH.LoginFinish)
 	mux.HandleFunc("POST /auth/logout", authH.Logout)
+	// "Sign out everywhere" (#0094) — session-guarded: revokes every session
+	// for the authenticated account (including this one), never touches
+	// passkey_credentials or users. Complements DELETE /account/credentials/{id}
+	// (#0019), the credential-level lever.
+	mux.Handle("POST /auth/logout/all", requireSession(http.HandlerFunc(authH.LogoutAll)))
 	mux.Handle("POST /auth/recover", recoverLimiter.Middleware(http.HandlerFunc(authH.RecoverStart)))
 	mux.HandleFunc("GET /auth/recover/verify", authH.RecoverVerify)
 	mux.HandleFunc("POST /auth/recover/finish", authH.RecoverFinish)

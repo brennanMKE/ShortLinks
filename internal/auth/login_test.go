@@ -109,15 +109,25 @@ func driveLogin(t *testing.T, loginSvc *LoginService, acct registeredAccount, em
 }
 
 // newLoginService builds a LoginService over the same test pool and RP config as
-// the registration service.
+// the registration service. No auditor, and a plain recordingMailer that no
+// test in this file asserts on — tests that need to observe or fail the
+// mailer use newLoginServiceWithMailer instead.
 func newLoginService(t *testing.T, pool *pgxpool.Pool) *LoginService {
+	t.Helper()
+	return newLoginServiceWithMailer(t, pool, &recordingMailer{})
+}
+
+// newLoginServiceWithMailer is like newLoginService but takes an explicit
+// mailer, letting #0094 LogoutAll tests inject a recordingMailer they can
+// inspect (or stub to error) without an auditor getting in the way.
+func newLoginServiceWithMailer(t *testing.T, pool *pgxpool.Pool, mailer Mailer) *LoginService {
 	t.Helper()
 	cfg := &config.Config{WebAuthnRPID: testRPID, WebAuthnRPOrigin: testRPOrigin}
 	wa, err := NewWebAuthn(cfg)
 	if err != nil {
 		t.Fatalf("NewWebAuthn: %v", err)
 	}
-	return NewLoginService(NewStore(pool), wa, nil, nil)
+	return NewLoginService(NewStore(pool), wa, mailer, nil, nil)
 }
 
 // TestLogin_EndToEnd_DiscoverableCreatesSession is the key proof: a credential

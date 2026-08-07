@@ -156,6 +156,16 @@ export function logout(): Promise<void> {
   return apiPost<void>('/auth/logout');
 }
 
+/**
+ * POST /auth/logout/all — "sign out everywhere" (#0094): revokes every
+ * session for the caller's account, including this one, on every device and
+ * client (browser, iPhone app). It never touches enrolled passkeys — those
+ * are what the next sign-in uses. Returns the number of sessions revoked.
+ */
+export function logoutAll(): Promise<{ message: string; revoked_count: number }> {
+  return apiPost<{ message: string; revoked_count: number }>('/auth/logout/all');
+}
+
 // ── Auth ceremony (login + registration entry) ──────────────────────────────
 
 /**

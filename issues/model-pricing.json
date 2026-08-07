@@ -1,8 +1,21 @@
 {
-  "fetched": "2026-06-18",
+  "fetched": "2026-08-07",
   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
   "currency": "USD per MTok",
+  "notes": "cache_write_5m = 1.25x input; cache_read = 0.1x input. claude-sonnet-5 is at introductory pricing ($2/$10) through 2026-08-31; its standard rate is $3.00/$15.00 (cache_write_5m 3.75, cache_read 0.30).",
   "models": {
+    "claude-opus-5": {
+      "input": 5.00,
+      "output": 25.00,
+      "cache_write_5m": 6.25,
+      "cache_read": 0.50
+    },
+    "claude-sonnet-5": {
+      "input": 2.00,
+      "output": 10.00,
+      "cache_write_5m": 2.50,
+      "cache_read": 0.20
+    },
     "claude-opus-4-8": {
       "input": 5.00,
       "output": 25.00,
