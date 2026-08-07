@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -169,6 +170,165 @@ func TestLogoutAll_HTTP_RevokesAllSessionsAndClearsCookie(t *testing.T) {
 	}
 	if row.Metadata["revoked_count"] != float64(2) {
 		t.Errorf("metadata.revoked_count = %v, want 2", row.Metadata["revoked_count"])
+	}
+}
+
+// transport identifies how a request in TestLogoutAll_HTTP_Transports
+// authenticates: via the shortlinks_session cookie or via an
+// "Authorization: Bearer <token>" header. middleware.sessionToken
+// (internal/middleware/auth.go) accepts either and both carry the same opaque
+// session token, so a transport value only changes how the request is built,
+// never which token is used.
+type transport int
+
+const (
+	viaCookie transport = iota
+	viaBearer
+)
+
+func (tr transport) String() string {
+	if tr == viaBearer {
+		return "bearer"
+	}
+	return "cookie"
+}
+
+// authenticateVia attaches token to req using the given transport: as the
+// shortlinks_session cookie (reusing the existing withCookie helper) or as an
+// Authorization: Bearer header. It is the header-swap the issue calls for —
+// no new request-building scaffolding beyond picking which credential the
+// request carries.
+func authenticateVia(req *http.Request, tr transport, token string) *http.Request {
+	if tr == viaBearer {
+		req.Header.Set("Authorization", "Bearer "+token)
+		return req
+	}
+	return withCookie(req, token)
+}
+
+// TestLogoutAll_HTTP_Transports is the Bearer-transport counterpart to
+// TestLogoutAll_HTTP_RevokesAllSessionsAndClearsCookie (#0096). It pins the
+// fact that middleware.sessionToken's two transports (Authorization: Bearer
+// and the shortlinks_session cookie) and auth.Store.DeleteSessionsForUser's
+// transport-agnostic bulk delete really do add up to "sign out everywhere":
+// a session revoked by a request authenticated over ONE transport is rejected
+// on its very next use over EITHER transport — including the OTHER one. That
+// cross pairing (Bearer kills a cookie session, and a cookie request kills a
+// Bearer session) is the direction that actually encodes "everywhere"; same-
+// transport-both-ways is the degenerate case a cookie-only or Bearer-only
+// suite would already cover.
+//
+// It is a table test over revokeTransport x checkTransport (the issue's
+// suggested {cookie,bearer} x {cookie,bearer}): for every combination, Alice
+// gets two live sessions, the revoke request is authenticated via
+// revokeTransport using session 1, and session 2's token is then replayed via
+// checkTransport and must be rejected (401). Each subtest also re-asserts
+// every claim the original cookie-only HTTP test makes (200 + revoked_count,
+// the response's clearing cookie, zero sessions left for Alice, Bob's
+// untouched session, and the notification email) so no coverage is lost by
+// generalizing over transport.
+func TestLogoutAll_HTTP_Transports(t *testing.T) {
+	pool := credsTestPool(t)
+
+	cases := []struct {
+		revokeTransport transport
+		checkTransport  transport
+	}{
+		{viaCookie, viaCookie},
+		{viaCookie, viaBearer},
+		{viaBearer, viaCookie},
+		{viaBearer, viaBearer},
+	}
+
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("revoke=%s/check=%s", tc.revokeTransport, tc.checkTransport), func(t *testing.T) {
+			mailer := &logoutAllRecordingMailer{}
+			srv := httptest.NewServer(logoutAllMux(t, pool, mailer))
+			defer srv.Close()
+
+			aliceEmail := fmt.Sprintf("alice-transport-%d@example.com", i)
+			alice := seedUser(t, pool, aliceEmail)
+			revokeToken := fmt.Sprintf("alice-revoke-token-%d", i)
+			checkToken := fmt.Sprintf("alice-check-token-%d", i)
+			seedSession(t, pool, alice, revokeToken)
+			seedSession(t, pool, alice, checkToken)
+
+			bob := seedUser(t, pool, fmt.Sprintf("bob-transport-%d@example.com", i))
+			seedSession(t, pool, bob, fmt.Sprintf("bob-token-%d", i))
+
+			// The revoke request itself is authenticated via revokeTransport,
+			// using session 1's token.
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/auth/logout/all", nil)
+			resp, err := srv.Client().Do(authenticateVia(req, tc.revokeTransport, revokeToken))
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+
+			var body struct {
+				Message      string `json:"message"`
+				RevokedCount int64  `json:"revoked_count"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.RevokedCount != 2 {
+				t.Errorf("revoked_count = %d, want 2", body.RevokedCount)
+			}
+
+			// LogoutAll clears the session cookie unconditionally (see
+			// handlers/auth.go), regardless of which transport authenticated
+			// the request.
+			cookies := resp.Cookies()
+			if len(cookies) != 1 {
+				t.Fatalf("expected 1 (clearing) cookie, got %d", len(cookies))
+			}
+			if c := cookies[0]; c.Name != auth.SessionCookieName || c.MaxAge != -1 {
+				t.Errorf("clearing cookie = %s MaxAge=%d, want %s MaxAge=-1", c.Name, c.MaxAge, auth.SessionCookieName)
+			}
+
+			// DB state: alice has zero sessions, bob's is untouched — including
+			// when the revoke itself was authenticated over Bearer.
+			if got := countSessionsForUser(t, pool, alice); got != 0 {
+				t.Errorf("alice sessions = %d, want 0", got)
+			}
+			if got := countSessionsForUser(t, pool, bob); got != 1 {
+				t.Errorf("bob sessions = %d, want 1 (untouched)", got)
+			}
+
+			// The OTHER live session's token — never presented on the revoke
+			// request itself — is replayed via checkTransport and must be
+			// rejected. When revokeTransport != checkTransport this is the
+			// cross pairing: one transport's request killed the session the
+			// other transport is now trying to use.
+			req2, _ := http.NewRequest(http.MethodPost, srv.URL+"/auth/logout/all", nil)
+			resp2, err := srv.Client().Do(authenticateVia(req2, tc.checkTransport, checkToken))
+			if err != nil {
+				t.Fatalf("second request: %v", err)
+			}
+			defer resp2.Body.Close()
+			if resp2.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status for reused old %s token = %d, want 401", tc.checkTransport, resp2.StatusCode)
+			}
+
+			if mailer.calls != 1 {
+				t.Errorf("SendSessionsRevoked calls = %d, want 1", mailer.calls)
+			}
+			if mailer.to != aliceEmail {
+				t.Errorf("notified address = %q, want %s", mailer.to, aliceEmail)
+			}
+
+			row := lastAuditFor(t, pool, audit.ActionSessionsRevokedAll)
+			if row.ActorID == nil || *row.ActorID != alice {
+				t.Errorf("actor_id = %v, want %d", row.ActorID, alice)
+			}
+			if row.Metadata["revoked_count"] != float64(2) {
+				t.Errorf("metadata.revoked_count = %v, want 2", row.Metadata["revoked_count"])
+			}
+		})
 	}
 }
 
