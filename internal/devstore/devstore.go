@@ -31,6 +31,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/cache"
+	"github.com/brennanMKE/ShortLinks/internal/campaigns"
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
@@ -45,17 +46,20 @@ const seedAdminID int64 = 1
 // in a single struct to keep wiring simple — main.go constructs one *Store and
 // passes it to every constructor that needs a store argument.
 type Store struct {
-	mu       sync.Mutex
-	users    []auth.ManagedUser
-	links    []links.Link
-	rules    []filters.FilterRule
-	audit    []audit.Record
-	sessions map[string]sessionEntry // token → session
-	settings []auth.Setting
+	mu        sync.Mutex
+	users     []auth.ManagedUser
+	links     []links.Link
+	rules     []filters.FilterRule
+	campaigns []campaigns.Campaign
+	audit     []audit.Record
+	sessions  map[string]sessionEntry // token → session
+	settings  []auth.Setting
 	// nextLinkID is the auto-increment counter for link IDs.
 	nextLinkID int64
 	// nextRuleID is the auto-increment counter for filter rule IDs.
 	nextRuleID int64
+	// nextCampaignID is the auto-increment counter for campaign IDs.
+	nextCampaignID int64
 	// nextAuditID is the auto-increment counter for audit record IDs.
 	nextAuditID int64
 }
@@ -74,10 +78,11 @@ func New(adminEmail string) *Store {
 	now := time.Now()
 
 	s := &Store{
-		sessions:    make(map[string]sessionEntry),
-		nextLinkID:  3, // IDs 1 and 2 are used by seeded links
-		nextRuleID:  1,
-		nextAuditID: 1,
+		sessions:       make(map[string]sessionEntry),
+		nextLinkID:     3, // IDs 1 and 2 are used by seeded links
+		nextRuleID:     1,
+		nextCampaignID: 1,
+		nextAuditID:    1,
 	}
 
 	// Seed the mock admin user (id=1).
@@ -458,6 +463,190 @@ func (s *Store) LoadActive(_ context.Context) ([]filters.Rule, error) {
 		}
 	}
 	return out, nil
+}
+
+// ── campaignStore (handlers.CampaignsHandler) ───────────────────────────────
+//
+// Slug generation reuses the real campaigns.Slugify/GenerateUniqueSlug pure
+// functions (no DB round trip needed for either in-memory or Postgres), so
+// dev-mode slugs behave identically to production. auditor/entry are accepted
+// to satisfy the interface but ignored, matching DeactivateUser/
+// ReactivateUser above and the package doc's "pass nil auditor to all
+// handlers in dev mode" note — main.go wires NewCampaignsHandler(ds, nil).
+
+// copyTimePtr returns a fresh copy of t (nil in, nil out). campaigns.Campaign
+// stores StartsAt/EndsAt as *time.Time; without this, storing a caller's
+// pointer directly — or returning the store's own pointer directly — would
+// alias mutable state across the store boundary. A caller mutating
+// *returned.StartsAt would then silently corrupt what the store holds (or
+// vice versa): confirmed by a probe that wrote 1999 through a returned
+// pointer and observed a subsequent GetCampaignBySlug echo it back. #0102's
+// window-clamping arithmetic is exactly the kind of code that could trigger
+// this if it ever mutates through the pointer instead of rebinding it.
+func copyTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := *t
+	return &v
+}
+
+// cloneCampaign returns a copy of c whose StartsAt/EndsAt point at freshly
+// allocated time.Time values, sharing no pointer with c. Called on every
+// value that crosses the store boundary in either direction (an incoming
+// NewCampaign/CampaignUpdate's pointers before storing them, and every
+// campaigns.Campaign returned to a caller) so mutating a pointer on one side
+// can never reach the other.
+func cloneCampaign(c campaigns.Campaign) campaigns.Campaign {
+	c.StartsAt = copyTimePtr(c.StartsAt)
+	c.EndsAt = copyTimePtr(c.EndsAt)
+	return c
+}
+
+// CreateCampaign inserts a new campaign owned by in.UserID.
+func (s *Store) CreateCampaign(_ context.Context, in campaigns.NewCampaign, _ *audit.Logger, _ audit.Entry) (campaigns.Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	base := campaigns.Slugify(in.Name)
+	slug, err := campaigns.GenerateUniqueSlug(base, func(candidate string) (bool, error) {
+		for _, c := range s.campaigns {
+			if c.UserID == in.UserID && c.Slug == candidate {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		return campaigns.Campaign{}, err
+	}
+
+	defaultUTMCampaign := in.DefaultUTMCampaign
+	if defaultUTMCampaign == "" {
+		defaultUTMCampaign = slug
+	}
+
+	now := time.Now()
+	stored := campaigns.Campaign{
+		ID:                 s.nextCampaignID,
+		UserID:             in.UserID,
+		Name:               in.Name,
+		Slug:               slug,
+		Description:        in.Description,
+		StartsAt:           copyTimePtr(in.StartsAt), // never alias the caller's pointer
+		EndsAt:             copyTimePtr(in.EndsAt),
+		Archived:           false,
+		DefaultUTMSource:   in.DefaultUTMSource,
+		DefaultUTMMedium:   in.DefaultUTMMedium,
+		DefaultUTMCampaign: defaultUTMCampaign,
+		DefaultUTMTerm:     in.DefaultUTMTerm,
+		DefaultUTMContent:  in.DefaultUTMContent,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	s.nextCampaignID++
+	s.campaigns = append(s.campaigns, stored)
+	return cloneCampaign(stored), nil // a second, independent copy for the caller
+}
+
+// ListCampaignsForUser returns userID's campaigns, most recently created
+// first, matching campaigns.Store.ListCampaignsForUser's ordering.
+func (s *Store) ListCampaignsForUser(_ context.Context, userID int64) ([]campaigns.Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]campaigns.Campaign, 0)
+	for i := len(s.campaigns) - 1; i >= 0; i-- {
+		if c := s.campaigns[i]; c.UserID == userID {
+			out = append(out, cloneCampaign(c))
+		}
+	}
+	return out, nil
+}
+
+// GetCampaignBySlug returns a campaign by slug, scoped to userID.
+func (s *Store) GetCampaignBySlug(_ context.Context, userID int64, slug string) (campaigns.Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.campaigns {
+		if c.UserID == userID && c.Slug == slug {
+			return cloneCampaign(c), nil
+		}
+	}
+	return campaigns.Campaign{}, campaigns.ErrCampaignNotFound
+}
+
+// UpdateCampaign applies a partial update to userID's own campaign (by slug).
+// Matches campaigns.Store.UpdateCampaign's no-op behavior: an update with no
+// fields set does NOT touch UpdatedAt (see the len(setClauses)==0 early
+// return in store.go) — a dev-built UI keying off updated_at must see the
+// same behavior it would get from Postgres.
+func (s *Store) UpdateCampaign(_ context.Context, userID int64, slug string, upd campaigns.CampaignUpdate, _ *audit.Logger, _ audit.Entry) (campaigns.Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, c := range s.campaigns {
+		if c.UserID != userID || c.Slug != slug {
+			continue
+		}
+		changed := false
+		if upd.Name != nil {
+			s.campaigns[i].Name = *upd.Name
+			changed = true
+		}
+		if upd.Description != nil {
+			s.campaigns[i].Description = *upd.Description
+			changed = true
+		}
+		if upd.StartsAt != nil {
+			s.campaigns[i].StartsAt = copyTimePtr(*upd.StartsAt) // never alias the caller's pointer
+			changed = true
+		}
+		if upd.EndsAt != nil {
+			s.campaigns[i].EndsAt = copyTimePtr(*upd.EndsAt)
+			changed = true
+		}
+		if upd.Archived != nil {
+			s.campaigns[i].Archived = *upd.Archived
+			changed = true
+		}
+		if upd.DefaultUTMSource != nil {
+			s.campaigns[i].DefaultUTMSource = *upd.DefaultUTMSource
+			changed = true
+		}
+		if upd.DefaultUTMMedium != nil {
+			s.campaigns[i].DefaultUTMMedium = *upd.DefaultUTMMedium
+			changed = true
+		}
+		if upd.DefaultUTMCampaign != nil {
+			s.campaigns[i].DefaultUTMCampaign = *upd.DefaultUTMCampaign
+			changed = true
+		}
+		if upd.DefaultUTMTerm != nil {
+			s.campaigns[i].DefaultUTMTerm = *upd.DefaultUTMTerm
+			changed = true
+		}
+		if upd.DefaultUTMContent != nil {
+			s.campaigns[i].DefaultUTMContent = *upd.DefaultUTMContent
+			changed = true
+		}
+		if changed {
+			s.campaigns[i].UpdatedAt = time.Now()
+		}
+		return cloneCampaign(s.campaigns[i]), nil
+	}
+	return campaigns.Campaign{}, campaigns.ErrCampaignNotFound
+}
+
+// DeleteCampaign permanently removes userID's own campaign (by slug).
+func (s *Store) DeleteCampaign(_ context.Context, userID int64, slug string, _ *audit.Logger, _ audit.Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, c := range s.campaigns {
+		if c.UserID == userID && c.Slug == slug {
+			s.campaigns = append(s.campaigns[:i], s.campaigns[i+1:]...)
+			return nil
+		}
+	}
+	return campaigns.ErrCampaignNotFound
 }
 
 // ── linkStore (handlers.LinksHandler) ───────────────────────────────────────
@@ -916,6 +1105,20 @@ var _ interface {
 	Update(ctx context.Context, id int64, upd filters.RuleUpdate) (filters.FilterRule, error)
 	Delete(ctx context.Context, id int64) error
 	LoadActive(ctx context.Context) ([]filters.Rule, error)
+} = (*Store)(nil)
+
+// campaignStore (handlers.CampaignsHandler). Method names are prefixed with
+// "Campaign" specifically so this interface and the filterRuleStore one above
+// (bare Create/Update/Delete/Get/List) can both be satisfied by the same
+// *Store — see the "Every method name is prefixed" note on
+// campaigns.Store for why bare names would make that structurally
+// impossible.
+var _ interface {
+	CreateCampaign(ctx context.Context, in campaigns.NewCampaign, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
+	UpdateCampaign(ctx context.Context, userID int64, slug string, upd campaigns.CampaignUpdate, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
+	DeleteCampaign(ctx context.Context, userID int64, slug string, auditor *audit.Logger, entry audit.Entry) error
+	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.Campaign, error)
+	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
 } = (*Store)(nil)
 
 var _ interface {

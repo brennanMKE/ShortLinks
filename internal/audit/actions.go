@@ -42,6 +42,12 @@ const (
 
 	// Settings.
 	ActionSettingsUpdated = "settings.updated"
+
+	// Campaign lifecycle (#0098). campaign.link_assigned / .link_unassigned
+	// belong to #0099 (link membership) and have no call site yet.
+	ActionCampaignCreated = "campaign.created"
+	ActionCampaignUpdated = "campaign.updated"
+	ActionCampaignDeleted = "campaign.deleted"
 )
 
 // Target-type constants are the canonical values written to
@@ -52,4 +58,5 @@ const (
 	TargetCredential = "credential"
 	TargetSettings   = "settings"
 	TargetURLFilter  = "url_filter"
+	TargetCampaign   = "campaign"
 )

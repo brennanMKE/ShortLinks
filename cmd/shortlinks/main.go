@@ -14,6 +14,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/cache"
+	"github.com/brennanMKE/ShortLinks/internal/campaigns"
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/config"
 	"github.com/brennanMKE/ShortLinks/internal/db"
@@ -160,6 +161,14 @@ func servePostgres(cfg *config.Config) error {
 	// and the stats store so GET /api/links/{key} returns the #0030 utm_stats.
 	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore)
 
+	// Campaign CRUD API (#0098). The campaigns store reuses the shared pgx pool.
+	// campaign.created/updated/deleted audit entries are written by the store
+	// INSIDE the same transaction as the mutation (audit.WriteTx), unlike the
+	// links handler's fire-and-forget Record — see campaigns.Store's doc
+	// comments. No link membership, click attribution, or stats yet (#0099,
+	// #0100, #0102).
+	campaignsH := handlers.NewCampaignsHandler(campaigns.NewStore(pool), auditLogger)
+
 	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
 	// read straight off the RequireSession-attached context, so the Svelte SPA
 	// can gate the admin view. Stateless — no data-layer dependency.
@@ -178,7 +187,7 @@ func servePostgres(cfg *config.Config) error {
 
 	return mountAndServe(cfg, pool,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
-		urlFiltersH, eventsH, redirectH, linksH, meH,
+		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH,
 		requireSession, requireAdmin, nil /* no outer middleware in production */)
 }
 
@@ -245,9 +254,18 @@ func serveDevMode(cfg *config.Config) error {
 	// The hard guardrail (cfg.DevMode() check) is enforced inside DevAutoLogin.
 	devAutoLogin := middleware.DevAutoLogin(ds, cfg.DevMode())
 
+	// Campaign CRUD API (#0098): devstore.Store now implements campaignStore
+	// in-memory (CreateCampaign/UpdateCampaign/DeleteCampaign/
+	// ListCampaignsForUser/GetCampaignBySlug), so dev mode gets working
+	// routes rather than falling through to the SPA catch-all with a
+	// misleading 200 text/html — a real 404-on-unmounted-route problem the
+	// review caught, since #0103's UI work runs against ./scripts/dev.sh
+	// (STORAGE=json) and needs genuine JSON responses to build against.
+	campaignsH := handlers.NewCampaignsHandler(ds, nil)
+
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
-		urlFiltersH, eventsH, redirectH, linksH, meH,
+		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH,
 		requireSession, requireAdmin, devAutoLogin)
 }
 
@@ -257,6 +275,9 @@ func serveDevMode(cfg *config.Config) error {
 // outerMiddleware, when non-nil, wraps the entire mux as the outermost handler.
 // It is used in dev mode only (serveDevMode) to apply the auto-login middleware;
 // the production path always passes nil.
+// campaignsH may be nil (serveDevMode has no dev-store campaigns backing yet),
+// in which case the /api/campaigns routes are simply not mounted rather than
+// registered against a nil handler.
 func mountAndServe(
 	cfg *config.Config,
 	pinger handlers.Pinger,
@@ -269,6 +290,7 @@ func mountAndServe(
 	eventsH *handlers.EventsHandler,
 	redirectH *handlers.RedirectHandler,
 	linksH *handlers.LinksHandler,
+	campaignsH *handlers.CampaignsHandler,
 	meH *handlers.MeHandler,
 	requireSession func(http.Handler) http.Handler,
 	requireAdmin func(http.Handler) http.Handler,
@@ -350,6 +372,18 @@ func mountAndServe(
 	mux.Handle("GET /api/links/{key}", requireSession(http.HandlerFunc(linksH.Get)))
 	mux.Handle("PATCH /api/links/{key}", requireSession(http.HandlerFunc(linksH.Patch)))
 	mux.Handle("DELETE /api/links/{key}", requireSession(http.HandlerFunc(linksH.Delete)))
+
+	// Campaign CRUD API (#0098) — all behind RequireSession and scoped to the
+	// authenticated user in the store. No link membership, click attribution, or
+	// stats yet (#0099, #0100, #0102). Not mounted when campaignsH is nil (dev
+	// mode has no dev-store backing for campaigns).
+	if campaignsH != nil {
+		mux.Handle("GET /api/campaigns", requireSession(http.HandlerFunc(campaignsH.List)))
+		mux.Handle("POST /api/campaigns", requireSession(http.HandlerFunc(campaignsH.Create)))
+		mux.Handle("GET /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Get)))
+		mux.Handle("PATCH /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Patch)))
+		mux.Handle("DELETE /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Delete)))
+	}
 
 	// Current user profile (#0027) — behind RequireSession; returns the caller's
 	// {id, email, is_admin} for the SPA to gate the admin view.
