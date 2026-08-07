@@ -114,7 +114,21 @@ func (m *SESMailer) send(ctx context.Context, toEmail, subject, textBody string)
 		send = starttlsSendMail
 	}
 	if err := send(addr, auth, fromAddress(m.from), []string{toEmail}, msg); err != nil {
-		return fmt.Errorf("auth: sending email to %s: %w", toEmail, err)
+		// Recipient omitted deliberately: this error propagates to
+		// AuthHandler's unauthenticated RegisterStart/RecoverStart 500 branches
+		// (#0097), which log it verbatim, and both routes are unauthenticated so
+		// any caller could otherwise write an arbitrary address into the journal.
+		// Nothing diagnostic is lost, but the two callers recover it differently:
+		// on recovery, account.recovery_started's audit row carries user_id and
+		// joins straight to users.email (recovery.go:98-104); on registration,
+		// account.registration_started carries no actor_id/user_id/target_id (the
+		// account doesn't exist yet — registration.go:104-109), so the address
+		// isn't on that row at all. It is still recoverable there, just by a
+		// two-step correlation instead of a join: registration.go:97 commits it
+		// to pending_registrations immediately before this send, so an operator
+		// matches the outage's timestamp and the audit row's IP to the pending
+		// registration rather than reading it off the audit entry directly.
+		return fmt.Errorf("auth: sending email: %w", err)
 	}
 	return nil
 }

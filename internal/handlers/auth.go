@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -66,14 +67,27 @@ type AuthHandler struct {
 	reg      registrar
 	login    authenticator
 	recovery recoverer
+	// log records the seven StatusInternalServerError branches below (#0097).
+	// Logging happens here, in the handler, rather than in the three services
+	// behind it: RegistrationService and RecoveryService hold no logger at all,
+	// and only LoginService does (for its own unrelated fire-and-forget mailer
+	// warning), so a service-side approach would have been inconsistent across
+	// the seven sites. The handler is also what decides the request failed, so
+	// one log line per branch lives next to that decision. Never nil after
+	// NewAuthHandler.
+	log *slog.Logger
 }
 
 // NewAuthHandler constructs an AuthHandler over the registration, login, and
 // recovery services. Any dependency may be nil where only a subset of routes is
 // exercised (e.g. existing registration handler tests pass nil for login and
-// recovery).
-func NewAuthHandler(reg registrar, login authenticator, recovery recoverer) *AuthHandler {
-	return &AuthHandler{reg: reg, login: login, recovery: recovery}
+// recovery). A nil logger falls back to slog.Default(), matching the
+// nil-tolerance convention used by auth.NewLoginService.
+func NewAuthHandler(reg registrar, login authenticator, recovery recoverer, logger *slog.Logger) *AuthHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &AuthHandler{reg: reg, login: login, recovery: recovery, log: logger}
 }
 
 // startRequest is the POST /auth/register/start body.
@@ -103,6 +117,7 @@ func (h *AuthHandler) RegisterStart(w http.ResponseWriter, r *http.Request) {
 		// Do not reveal whether the email is already registered: respond as if
 		// the email was sent. This avoids leaking account existence.
 	default:
+		h.log.Error("auth: register start failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -125,6 +140,7 @@ func (h *AuthHandler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrTokenInvalid):
 		writeError(w, http.StatusBadRequest, "token invalid or expired")
 	default:
+		h.log.Error("auth: register verify failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 }
@@ -192,6 +208,7 @@ func (h *AuthHandler) LoginStart(w http.ResponseWriter, r *http.Request) {
 
 	assertion, err := h.login.StartLogin(r.Context(), email)
 	if err != nil {
+		h.log.Error("auth: login start failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -223,6 +240,13 @@ func (h *AuthHandler) LoginFinish(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
 		if derr := h.login.Logout(r.Context(), c.Value, clientIP(r)); derr != nil {
+			// No authenticated user_id is available here: this route runs ahead
+			// of middleware.RequireSession (a stale/unknown cookie must still
+			// clear cleanly), and authenticator.Logout's signature returns only
+			// an error, not the session's owning user, on failure. The repo has
+			// no request-logging middleware at all, so "ip" is included as the
+			// only correlating identifier this line can carry.
+			h.log.Error("auth: logout failed", "err", derr, "ip", clientIP(r))
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
@@ -247,6 +271,7 @@ func (h *AuthHandler) LogoutAll(w http.ResponseWriter, r *http.Request) {
 
 	revoked, err := h.login.LogoutAll(r.Context(), u.ID, u.Email, clientIP(r))
 	if err != nil {
+		h.log.Error("auth: logout-all failed", "err", err, "user_id", u.ID)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -282,6 +307,7 @@ func (h *AuthHandler) RecoverStart(w http.ResponseWriter, r *http.Request) {
 	if err := h.recovery.StartRecovery(r.Context(), req.Email, clientIP(r)); err != nil {
 		// The service swallows unknown/inactive/invalid emails (returning nil);
 		// any error here is a real failure (token creation or mail delivery).
+		h.log.Error("auth: recover start failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -306,6 +332,7 @@ func (h *AuthHandler) RecoverVerify(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrTokenInvalid):
 		writeError(w, http.StatusBadRequest, "token invalid or expired")
 	default:
+		h.log.Error("auth: recover verify failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 }

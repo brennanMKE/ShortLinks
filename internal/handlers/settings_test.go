@@ -369,7 +369,7 @@ func TestAdminSettings_PatchOpensRegistrationGate(t *testing.T) {
 		t.Fatalf("NewWebAuthn: %v", err)
 	}
 	regSvc := auth.NewRegistrationService(store, wa, &gateMailer{}, nil, cfg)
-	authH := NewAuthHandler(regSvc, nil, nil)
+	authH := NewAuthHandler(regSvc, nil, nil, nil)
 
 	settingsH := NewSettingsHandler(store, nil)
 	requireSession := middleware.RequireSession(store)

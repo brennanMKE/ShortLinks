@@ -102,7 +102,7 @@ func servePostgres(cfg *config.Config) error {
 	regSvc := auth.NewRegistrationService(store, wa, mailer, auditLogger, cfg)
 	loginSvc := auth.NewLoginService(store, wa, mailer, auditLogger, slog.Default())
 	recoverSvc := auth.NewRecoveryService(store, wa, mailer, auditLogger)
-	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc)
+	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc, slog.Default())
 	credsH := handlers.NewCredentialsHandler(store, auditLogger)
 	settingsH := handlers.NewSettingsHandler(store, auditLogger)
 	// Admin user management (#0028): list/detail/deactivate/reactivate. The
@@ -205,6 +205,7 @@ func serveDevMode(cfg *config.Config) error {
 		devstore.DevRegistrar{},
 		devstore.NewDevLoginService(ds),
 		devstore.DevRecoverer{},
+		slog.Default(),
 	)
 
 	// Credential, settings, user-management, and audit handlers use the dev store.

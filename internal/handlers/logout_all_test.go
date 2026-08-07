@@ -51,7 +51,7 @@ func logoutAllMux(t *testing.T, pool *pgxpool.Pool, mailer auth.Mailer) http.Han
 		t.Fatalf("NewWebAuthn: %v", err)
 	}
 	loginSvc := auth.NewLoginService(store, wa, mailer, audit.New(pool), nil)
-	h := NewAuthHandler(nil, loginSvc, nil)
+	h := NewAuthHandler(nil, loginSvc, nil, nil)
 	requireSession := middleware.RequireSession(store)
 	mux := http.NewServeMux()
 	mux.Handle("POST /auth/logout/all", requireSession(http.HandlerFunc(h.LogoutAll)))
