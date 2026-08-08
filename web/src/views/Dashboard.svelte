@@ -58,6 +58,8 @@
   import type { UtmParams } from '../lib/utm';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import UtmField from '../lib/UtmField.svelte';
+  import UtmConventions from '../lib/UtmConventions.svelte';
   import { APP_NAME } from '../lib/branding';
 
   const PER_PAGE = 20;
@@ -508,56 +510,45 @@
 
         {#if utmOpen}
           <div class="utm-fields">
-            <div class="field">
-              <label for="utm-source">Source <span class="text-faint">(utm_source)</span></label>
-              <input
-                id="utm-source"
-                type="text"
-                placeholder="e.g. newsletter, google, twitter"
-                bind:value={utmParams.utm_source}
-                disabled={submitting}
-              />
-            </div>
-            <div class="field">
-              <label for="utm-medium">Medium <span class="text-faint">(utm_medium)</span></label>
-              <input
-                id="utm-medium"
-                type="text"
-                placeholder="e.g. email, cpc, social"
-                bind:value={utmParams.utm_medium}
-                disabled={submitting}
-              />
-            </div>
-            <div class="field">
-              <label for="utm-campaign">Campaign <span class="text-faint">(utm_campaign)</span></label>
-              <input
-                id="utm-campaign"
-                type="text"
-                placeholder="e.g. spring-launch, black-friday"
-                bind:value={utmParams.utm_campaign}
-                disabled={submitting}
-              />
-            </div>
-            <div class="field">
-              <label for="utm-term">Term <span class="text-faint">(utm_term, optional)</span></label>
-              <input
-                id="utm-term"
-                type="text"
-                placeholder="e.g. running+shoes"
-                bind:value={utmParams.utm_term}
-                disabled={submitting}
-              />
-            </div>
-            <div class="field">
-              <label for="utm-content">Content <span class="text-faint">(utm_content, optional)</span></label>
-              <input
-                id="utm-content"
-                type="text"
-                placeholder="e.g. hero-cta, sidebar-link"
-                bind:value={utmParams.utm_content}
-                disabled={submitting}
-              />
-            </div>
+            <UtmConventions />
+
+            {#if destinationUrl.trim() !== ''}
+              <div class="utm-preview">
+                <p class="utm-preview-label">Destination preview</p>
+                <p class="utm-preview-url" title={composedUrl}>{composedUrl}</p>
+              </div>
+            {/if}
+
+            <UtmField
+              fieldKey="utm_source"
+              id="utm-source"
+              bind:value={utmParams.utm_source}
+              disabled={submitting}
+            />
+            <UtmField
+              fieldKey="utm_medium"
+              id="utm-medium"
+              bind:value={utmParams.utm_medium}
+              disabled={submitting}
+            />
+            <UtmField
+              fieldKey="utm_campaign"
+              id="utm-campaign"
+              bind:value={utmParams.utm_campaign}
+              disabled={submitting}
+            />
+            <UtmField
+              fieldKey="utm_term"
+              id="utm-term"
+              bind:value={utmParams.utm_term}
+              disabled={submitting}
+            />
+            <UtmField
+              fieldKey="utm_content"
+              id="utm-content"
+              bind:value={utmParams.utm_content}
+              disabled={submitting}
+            />
             <div class="field">
               <label for="placement">Placement <span class="text-faint">(optional)</span></label>
               <input
@@ -568,13 +559,6 @@
                 disabled={submitting}
               />
             </div>
-
-            {#if destinationUrl.trim() !== ''}
-              <div class="utm-preview">
-                <p class="utm-preview-label">Destination preview</p>
-                <p class="utm-preview-url" title={composedUrl}>{composedUrl}</p>
-              </div>
-            {/if}
           </div>
         {/if}
       </div>
@@ -945,6 +929,7 @@
 
   .utm-preview {
     margin-top: var(--space-2);
+    margin-bottom: var(--space-3);
     padding: var(--space-2) var(--space-3);
     background: var(--bg-subtle);
     border: var(--border-w) solid var(--border);

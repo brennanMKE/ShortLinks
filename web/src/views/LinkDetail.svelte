@@ -39,6 +39,8 @@
   import Panel from '../lib/Panel.svelte';
   import ClicksChart from '../lib/ClicksChart.svelte';
   import UTMBarChart from '../lib/UTMBarChart.svelte';
+  import UtmField from '../lib/UtmField.svelte';
+  import UtmConventions from '../lib/UtmConventions.svelte';
 
   let loading = $state(true);
   let notFound = $state(false);
@@ -337,30 +339,7 @@
 
             {#if editUtmOpen}
               <div class="utm-fields">
-                <div class="field">
-                  <label for="edit-utm-source">Source <span class="text-faint">(utm_source)</span></label>
-                  <input id="edit-utm-source" type="text" bind:value={editUtmParams.utm_source} disabled={saving} />
-                </div>
-                <div class="field">
-                  <label for="edit-utm-medium">Medium <span class="text-faint">(utm_medium)</span></label>
-                  <input id="edit-utm-medium" type="text" bind:value={editUtmParams.utm_medium} disabled={saving} />
-                </div>
-                <div class="field">
-                  <label for="edit-utm-campaign">Campaign <span class="text-faint">(utm_campaign)</span></label>
-                  <input id="edit-utm-campaign" type="text" bind:value={editUtmParams.utm_campaign} disabled={saving} />
-                </div>
-                <div class="field">
-                  <label for="edit-utm-term">Term <span class="text-faint">(utm_term, optional)</span></label>
-                  <input id="edit-utm-term" type="text" bind:value={editUtmParams.utm_term} disabled={saving} />
-                </div>
-                <div class="field">
-                  <label for="edit-utm-content">Content <span class="text-faint">(utm_content, optional)</span></label>
-                  <input id="edit-utm-content" type="text" bind:value={editUtmParams.utm_content} disabled={saving} />
-                </div>
-                <div class="field">
-                  <label for="edit-placement">Placement <span class="text-faint">(optional)</span></label>
-                  <input id="edit-placement" type="text" bind:value={editPlacement} disabled={saving} />
-                </div>
+                <UtmConventions />
 
                 {#if editDestinationUrl.trim() !== ''}
                   <div class="utm-preview">
@@ -368,6 +347,16 @@
                     <p class="utm-preview-url" title={editComposedUrl}>{editComposedUrl}</p>
                   </div>
                 {/if}
+
+                <UtmField fieldKey="utm_source" id="edit-utm-source" bind:value={editUtmParams.utm_source} disabled={saving} />
+                <UtmField fieldKey="utm_medium" id="edit-utm-medium" bind:value={editUtmParams.utm_medium} disabled={saving} />
+                <UtmField fieldKey="utm_campaign" id="edit-utm-campaign" bind:value={editUtmParams.utm_campaign} disabled={saving} />
+                <UtmField fieldKey="utm_term" id="edit-utm-term" bind:value={editUtmParams.utm_term} disabled={saving} />
+                <UtmField fieldKey="utm_content" id="edit-utm-content" bind:value={editUtmParams.utm_content} disabled={saving} />
+                <div class="field">
+                  <label for="edit-placement">Placement <span class="text-faint">(optional)</span></label>
+                  <input id="edit-placement" type="text" bind:value={editPlacement} disabled={saving} />
+                </div>
               </div>
             {/if}
           </div>
@@ -523,6 +512,7 @@
   }
   .utm-preview {
     margin-top: var(--space-2);
+    margin-bottom: var(--space-3);
     padding: var(--space-2) var(--space-3);
     background: var(--bg-subtle);
     border: var(--border-w) solid var(--border);
