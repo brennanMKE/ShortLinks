@@ -241,6 +241,19 @@ type rowQuerier interface {
 // here even after the link is later reassigned or unassigned — the whole
 // point of #0100's denormalization. The slices are always non-nil so the
 // JSON encodes as [] rather than null.
+//
+// WindowFrom/WindowTo (#0103 fix 4) are the resolved [from, to) window
+// campaignWindow actually computed and every query above filtered on —
+// "YYYY-MM-DD", UTC, matching DayBucket.Date's convention. Exposing the
+// window the server used (rather than making the frontend re-derive it from
+// the campaign's own starts_at/ends_at) is authoritative specifically
+// because campaignWindow clamps `to` at today for an in-flight dated
+// campaign: a client-side recomputation of the nominal span would drift
+// from that clamp and overstate the window (understating any "clicks per
+// day" figure derived from it by the same factor — the exact defect this
+// field exists to close). Set once, in campaignStatsQuery, from the SAME
+// resolved from/to every other field on this struct was computed from, so
+// it can never disagree with them.
 type CampaignStats struct {
 	ClickCount       int64    `json:"click_count"`
 	ExcludedBotCount int64    `json:"excluded_bot_count"`
@@ -248,6 +261,8 @@ type CampaignStats struct {
 	ByMedium         []Bucket `json:"by_medium"`
 	ByContent        []Bucket `json:"by_content"`
 	ByReferer        []Bucket `json:"by_referer"`
+	WindowFrom       string   `json:"window_from"` // "YYYY-MM-DD"
+	WindowTo         string   `json:"window_to"`   // "YYYY-MM-DD"
 }
 
 // CampaignSummary pairs CampaignStats with the clicks-over-time series for
@@ -405,6 +420,21 @@ func campaignStatsQuery(ctx context.Context, q rowQuerier, campaignID int64, fro
 		ByMedium:  []Bucket{},
 		ByContent: []Bucket{},
 		ByReferer: []Bucket{},
+		// The resolved window every query below (and this function's own
+		// COUNT) filters on — recorded from the exact from/to this function
+		// received, so it can never disagree with the counts alongside it.
+		//
+		// .UTC() is load-bearing, not decoration. time.Format renders in the
+		// value's own Location, and pgx decodes timestamptz into the PROCESS's
+		// local zone — so a campaign whose starts_at is UTC-midnight 2026-07-01
+		// formats as 2026-06-30 on any server with a negative offset. That
+		// silently shifts the window this field documents AND the divisor the
+		// UI computes clicks/day from. WindowTo happened to be immune because
+		// campaignWindow builds `today` with time.UTC explicitly, but the
+		// campaign-supplied branch is exactly the dated in-flight case these
+		// fields exist for.
+		WindowFrom: from.UTC().Format("2006-01-02"),
+		WindowTo:   to.UTC().Format("2006-01-02"),
 	}
 
 	if err := q.QueryRow(ctx,

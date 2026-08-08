@@ -318,7 +318,7 @@
     currentView.set('login');
   }
 
-  function go(view: 'account' | 'admin') {
+  function go(view: 'campaigns' | 'account' | 'admin') {
     currentView.set(view);
   }
 
@@ -351,6 +351,7 @@
     <h1 class="app-title">{APP_NAME}</h1>
     <nav class="nav-tabs" aria-label="Primary">
       <button type="button" class="nav-tab active" aria-current="page">Dashboard</button>
+      <button type="button" class="nav-tab" onclick={() => go('campaigns')}>Campaigns</button>
       <button type="button" class="nav-tab" onclick={() => go('account')}>Account</button>
       {#if $currentUser?.is_admin}
         <button type="button" class="nav-tab" onclick={() => go('admin')}>Admin</button>

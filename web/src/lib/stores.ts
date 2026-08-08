@@ -9,6 +9,8 @@ export type View =
   | 'login'
   | 'dashboard'
   | 'link-detail'
+  | 'campaigns'        // campaigns list (#0103)
+  | 'campaign-detail'  // single campaign: summary + links table (#0103)
   | 'account'
   | 'admin'
   | 'register-verify'  // magic-link registration landing (#0041)
@@ -34,6 +36,13 @@ export const links = writable<Link[]>([]);
  * there is no URL routing, the detail view reads which link to load from here.
  */
 export const selectedLinkKey = writable<string | null>(null);
+
+/**
+ * The slug of the campaign currently shown in the campaign-detail view, or
+ * null (#0103). Set by CampaignsList.svelte when a row is opened; read by
+ * CampaignDetail.svelte on mount, mirroring selectedLinkKey above.
+ */
+export const selectedCampaignSlug = writable<string | null>(null);
 
 /**
  * The magic-link token parsed from the landing URL (/register/verify or

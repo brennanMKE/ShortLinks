@@ -14,6 +14,9 @@ import type {
   AdminUser,
   Setting,
   Campaign,
+  CampaignWithCounts,
+  CampaignDetail,
+  CampaignRollup,
 } from './types';
 import type {
   ServerCredentialAssertion,
@@ -180,14 +183,104 @@ export function deactivateLink(key: string): Promise<{ message: string }> {
   return apiDelete<{ message: string }>(`/api/links/${encodeURIComponent(key)}`);
 }
 
-// ── Campaigns (#0098, #0099) ─────────────────────────────────────────────────
-// Full campaign CRUD + stats surface is #0102/#0103's frontend; this list
-// call is the minimal slice #0099 needs to populate the create form's
-// campaign-selection dropdown.
+// ── Campaigns (#0098, #0099, #0102, #0103) ──────────────────────────────────
 
-/** GET /api/campaigns — the caller's campaigns (archived included). */
-export function listCampaigns(): Promise<{ campaigns: (Campaign & { link_count: number; total_clicks: number })[] }> {
+/**
+ * GET /api/campaigns — the caller's campaigns (archived included; #0103's
+ * CampaignsList filters those client-side by default). Each item carries its
+ * real, ALL-TIME link_count/total_clicks (#0102).
+ */
+export function listCampaigns(): Promise<{ campaigns: CampaignWithCounts[] }> {
   return apiGet('/api/campaigns');
+}
+
+/** Body accepted by POST /api/campaigns. Only name is required — see internal/handlers/campaigns.go createCampaignRequest. */
+export interface CreateCampaignInput {
+  name: string;
+  description?: string;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  default_utm_source?: string;
+  default_utm_medium?: string;
+  default_utm_campaign?: string;
+  default_utm_term?: string;
+  default_utm_content?: string;
+}
+
+/** POST /api/campaigns — create a campaign; returns 201 with the full campaign object. */
+export function createCampaign(input: CreateCampaignInput): Promise<Campaign> {
+  return apiPost<Campaign>('/api/campaigns', input);
+}
+
+/**
+ * Fields PATCH /api/campaigns/{slug} can update — every field optional so the
+ * handler can distinguish "absent" from "present" (mirrors
+ * patchCampaignRequest). The slug itself is never patchable — it is fixed at
+ * creation (#0098 downstream constraint 4).
+ */
+export interface UpdateCampaignInput {
+  name?: string;
+  description?: string;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  archived?: boolean;
+  default_utm_source?: string;
+  default_utm_medium?: string;
+  default_utm_campaign?: string;
+  default_utm_term?: string;
+  default_utm_content?: string;
+}
+
+/** PATCH /api/campaigns/{slug} — update name/description/dates/archived/UTM defaults. */
+export function updateCampaign(slug: string, input: UpdateCampaignInput): Promise<Campaign> {
+  return apiPatch<Campaign>(`/api/campaigns/${encodeURIComponent(slug)}`, input);
+}
+
+/**
+ * GET /api/campaigns/{slug} — campaign metadata, its links, and (when a
+ * stats provider is wired) its windowed CampaignStats + clicks-over-time
+ * series. See types.ts's CampaignDetail doc comment for the all-time-vs-
+ * windowed numbers this response mixes.
+ */
+export function getCampaign(slug: string): Promise<CampaignDetail> {
+  return apiGet<CampaignDetail>(`/api/campaigns/${encodeURIComponent(slug)}`);
+}
+
+/**
+ * GET /api/campaigns/{slug}/stats — the full campaign rollup (CampaignStats,
+ * timeseries, by_link, series_by_link), all read from one snapshot. `from`/
+ * `to` are optional "YYYY-MM-DD" dates; omitting both applies the server's
+ * default window (the campaign's own starts_at/ends_at when both are set,
+ * otherwise the trailing 30 days). #0103 calls this with no window to get
+ * `by_link` for the links table's "clicks in window"/"share" columns, on the
+ * SAME default window GET /api/campaigns/{slug} already used for its stats.
+ */
+export function getCampaignStats(slug: string, from?: string, to?: string): Promise<CampaignRollup> {
+  const params = new URLSearchParams();
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  const qs = params.toString();
+  return apiGet<CampaignRollup>(
+    `/api/campaigns/${encodeURIComponent(slug)}/stats${qs ? `?${qs}` : ''}`,
+  );
+}
+
+/**
+ * POST /api/campaigns/{slug}/links — assign existing links (by key) to the
+ * campaign. Capped at 50 keys per request and NOT atomic across keys (see
+ * internal/handlers/campaigns.go AssignLinks' doc comment) — #0103's
+ * CampaignDetail chunks larger requests via lib/campaigns.ts's chunkKeys and
+ * surfaces a partial-success message rather than assuming all-or-nothing.
+ */
+export function assignLinksToCampaign(slug: string, keys: string[]): Promise<{ links: Link[] }> {
+  return apiPost<{ links: Link[] }>(`/api/campaigns/${encodeURIComponent(slug)}/links`, { keys });
+}
+
+/** DELETE /api/campaigns/{slug}/links/{key} — unassign one link from the campaign. */
+export function unassignLinkFromCampaign(slug: string, key: string): Promise<{ message: string }> {
+  return apiDelete<{ message: string }>(
+    `/api/campaigns/${encodeURIComponent(slug)}/links/${encodeURIComponent(key)}`,
+  );
 }
 
 /** POST /auth/logout — invalidate the current session. */

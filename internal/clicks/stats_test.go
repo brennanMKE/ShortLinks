@@ -767,6 +767,64 @@ func TestCampaignStats_DefaultWindowClampsEndsAtToToday(t *testing.T) {
 	}
 }
 
+// TestCampaignStats_WindowFromWindowToMatchQueriedRange (#0103 fix 4) pins
+// that CampaignStats.WindowFrom/WindowTo report exactly the window the
+// queries above them filtered on, for an EXPLICIT from/to — the frontend's
+// "clicks per day" average and window label are only as trustworthy as this
+// being exact, not a client-side approximation.
+func TestCampaignStats_WindowFromWindowToMatchQueriedRange(t *testing.T) {
+	pool := testPool(t)
+	stats := NewStatsStore(pool)
+	uid := seedUser(t, pool, "cs-window-explicit@example.com")
+	campID := seedCampaign(t, pool, uid, "Window Explicit", "cs-window-explicit")
+
+	from := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+
+	got, err := stats.CampaignStats(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("CampaignStats: %v", err)
+	}
+	if got.WindowFrom != "2026-03-01" {
+		t.Errorf("window_from = %q, want %q", got.WindowFrom, "2026-03-01")
+	}
+	if got.WindowTo != "2026-03-15" {
+		t.Errorf("window_to = %q, want %q", got.WindowTo, "2026-03-15")
+	}
+}
+
+// TestCampaignStats_WindowToReflectsTodayClamp (#0103 fix 4) is the exact
+// scenario the UI review reported: a dated, in-flight campaign whose
+// ends_at is months in the future. WindowTo must report the CLAMPED date
+// (today) that ClickCount above it was actually filtered by — not the
+// campaign's nominal ends_at — so a client dividing click_count by
+// (window_to - window_from) gets the true, un-inflated average instead of
+// silently understating it fivefold, as #0103 reported.
+func TestCampaignStats_WindowToReflectsTodayClamp(t *testing.T) {
+	pool := testPool(t)
+	stats := NewStatsStore(pool)
+	uid := seedUser(t, pool, "cs-window-clamp@example.com")
+	campID := seedCampaign(t, pool, uid, "Window Clamp", "cs-window-clamp")
+
+	startsAt := time.Now().UTC().AddDate(0, 0, -10)
+	endsAt := time.Now().UTC().AddDate(0, 6, 0) // six months in the future
+	setCampaignWindow(t, pool, campID, startsAt, endsAt)
+
+	wantFrom := startsAt.Format("2006-01-02")
+	wantTo := time.Now().UTC().Format("2006-01-02")
+
+	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("CampaignStats: %v", err)
+	}
+	if got.WindowFrom != wantFrom {
+		t.Errorf("window_from = %q, want %q (the campaign's own starts_at)", got.WindowFrom, wantFrom)
+	}
+	if got.WindowTo != wantTo {
+		t.Errorf("window_to = %q, want %q (clamped to today, NOT ends_at's %s)", got.WindowTo, wantTo, endsAt.Format("2006-01-02"))
+	}
+}
+
 // TestCampaignClicksOverTime_BasicBuckets mirrors TestClicksOverTime_BasicBuckets
 // at the campaign layer.
 func TestCampaignClicksOverTime_BasicBuckets(t *testing.T) {
@@ -1561,5 +1619,54 @@ func TestCampaignRollup_TimeseriesConsistentWithClickCountUnderConcurrentWrites(
 	}
 	if iterations < 10 {
 		t.Fatalf("only completed %d iterations in %v — increase concurrencyDuration or investigate slow reads before trusting a pass here", iterations, 2*concurrencyDuration)
+	}
+}
+
+// TestCampaignStats_WindowFromSurvivesDatabaseRoundTripInNonUTCZone is the
+// test the first two window tests could not be: it seeds a UTC-MIDNIGHT
+// starts_at, reads it back THROUGH pgx, and asserts the formatted date.
+//
+// Why the other two are blind to this: the explicit-range test passes
+// time.Time values constructed with time.UTC that never touch the database,
+// so pgx's decoding location never enters. The clamp test seeds a value
+// carrying a wall-clock time-of-day, so shifting it by a UTC offset usually
+// lands on the same calendar date — it passes under every TZ at most hours
+// and would only fail at particular ones, which makes it latently flaky
+// rather than protective.
+//
+// The defect this pins: time.Format renders in the value's own Location, and
+// pgx decodes timestamptz into the process's local zone. Without .UTC() in
+// campaignStatsQuery, a UTC-midnight 2026-07-01 formats as 2026-06-30 on any
+// server with a negative offset — shifting both the documented window and the
+// divisor the UI computes clicks/day from. It is the Go mirror of the TZ-flip
+// round-trip tests on the JS side.
+func TestCampaignStats_WindowFromSurvivesDatabaseRoundTripInNonUTCZone(t *testing.T) {
+	// A negative offset is what makes UTC midnight fall on the previous day.
+	// Fixed rather than time.Local so the test means the same thing wherever
+	// it runs — including a UTC CI box, where the bug is otherwise invisible.
+	t.Setenv("TZ", "America/Los_Angeles")
+
+	pool := testPool(t)
+	stats := NewStatsStore(pool)
+	uid := seedUser(t, pool, "cs-window-tz@example.com")
+	campID := seedCampaign(t, pool, uid, "Window TZ", "cs-window-tz")
+
+	// UTC midnight: the exact value whose local rendering is the day before.
+	startsAt := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE campaigns SET starts_at = $1, ends_at = $2 WHERE id = $3`,
+		startsAt, startsAt.AddDate(0, 6, 0), campID,
+	); err != nil {
+		t.Fatalf("seed campaign dates: %v", err)
+	}
+
+	// Zero from/to so campaignWindow resolves the window from the campaign's
+	// own dates — the branch that reads back through pgx.
+	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("CampaignStats: %v", err)
+	}
+	if got.WindowFrom != "2026-07-01" {
+		t.Errorf("window_from = %q, want %q — the campaign's starts_at is UTC-midnight 2026-07-01; a previous-day value means it was formatted in the process's local zone rather than UTC", got.WindowFrom, "2026-07-01")
 	}
 }

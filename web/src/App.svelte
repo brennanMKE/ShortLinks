@@ -5,6 +5,8 @@
   import Login from './views/Login.svelte';
   import Dashboard from './views/Dashboard.svelte';
   import LinkDetail from './views/LinkDetail.svelte';
+  import CampaignsList from './views/CampaignsList.svelte';
+  import CampaignDetail from './views/CampaignDetail.svelte';
   import Account from './views/Account.svelte';
   import Admin from './views/Admin.svelte';
   import RegisterVerify from './views/RegisterVerify.svelte';
@@ -83,6 +85,10 @@
   <Dashboard />
 {:else if $currentView === 'link-detail'}
   <LinkDetail />
+{:else if $currentView === 'campaigns'}
+  <CampaignsList />
+{:else if $currentView === 'campaign-detail'}
+  <CampaignDetail />
 {:else if $currentView === 'account'}
   <Account />
 {:else if $currentView === 'admin'}
