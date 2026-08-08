@@ -114,6 +114,140 @@ func TestListCampaignsForUser_EmptyForUserWithNoCampaigns(t *testing.T) {
 	}
 }
 
+// TestListCampaignsForUser_LinkCountReflectsAssignedLinksAndZeroClicks
+// asserts the #0102 dev-mode twin of ListCampaignsForUser: link_count is
+// real (tracked from the in-memory links), while total_clicks stays 0 —
+// dev mode never persists a click (RecordClick is a no-op), so there is
+// nothing to aggregate. See devstore.Store.campaignWithCountsLocked's doc
+// comment for why that is the deliberate, documented convention rather than
+// an oversight.
+func TestListCampaignsForUser_LinkCountReflectsAssignedLinksAndZeroClicks(t *testing.T) {
+	s := devstore.New("admin@test.local")
+	ctx := context.Background()
+	const userID = int64(1) // seeded admin, owns the "wiki" link
+
+	c, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: userID, Name: "Counts"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	before, err := s.ListCampaignsForUser(ctx, userID)
+	if err != nil {
+		t.Fatalf("ListCampaignsForUser (before): %v", err)
+	}
+	var beforeRow campaigns.CampaignWithCounts
+	for _, row := range before {
+		if row.ID == c.ID {
+			beforeRow = row
+		}
+	}
+	if beforeRow.LinkCount != 0 || beforeRow.TotalClicks != 0 {
+		t.Errorf("before assignment: link_count=%d total_clicks=%d, want 0/0", beforeRow.LinkCount, beforeRow.TotalClicks)
+	}
+
+	wiki, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink: %v", err)
+	}
+	if err := s.AssignLinkToCampaign(ctx, userID, c.ID, wiki.ID, nil, audit.Entry{}); err != nil {
+		t.Fatalf("AssignLinkToCampaign: %v", err)
+	}
+
+	after, err := s.ListCampaignsForUser(ctx, userID)
+	if err != nil {
+		t.Fatalf("ListCampaignsForUser (after): %v", err)
+	}
+	var afterRow campaigns.CampaignWithCounts
+	for _, row := range after {
+		if row.ID == c.ID {
+			afterRow = row
+		}
+	}
+	if afterRow.LinkCount != 1 {
+		t.Errorf("link_count after assignment = %d, want 1", afterRow.LinkCount)
+	}
+	if afterRow.TotalClicks != 0 {
+		t.Errorf("total_clicks = %d, want 0 (dev mode never persists clicks)", afterRow.TotalClicks)
+	}
+}
+
+// TestGetCampaignBySlugWithCounts_RoundTrip mirrors
+// TestCreateCampaign_RoundTrip but through the #0102 counts-carrying lookup,
+// and asserts ownership matches GetCampaignBySlug's ErrCampaignNotFound
+// contract.
+func TestGetCampaignBySlugWithCounts_RoundTrip(t *testing.T) {
+	s := devstore.New("")
+	ctx := context.Background()
+	const alice, bob = int64(1), int64(2)
+
+	created, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: alice, Name: "Detail"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	got, err := s.GetCampaignBySlugWithCounts(ctx, alice, created.Slug)
+	if err != nil {
+		t.Fatalf("GetCampaignBySlugWithCounts: %v", err)
+	}
+	if got.ID != created.ID || got.LinkCount != 0 || got.TotalClicks != 0 {
+		t.Errorf("got = %+v, want id=%d link_count=0 total_clicks=0", got, created.ID)
+	}
+
+	if _, err := s.GetCampaignBySlugWithCounts(ctx, bob, created.Slug); !errors.Is(err, campaigns.ErrCampaignNotFound) {
+		t.Errorf("bob GetCampaignBySlugWithCounts(alice's slug) err = %v, want ErrCampaignNotFound", err)
+	}
+}
+
+// TestCampaignStatsProvider_ReturnsEmptyZeroValues asserts the four #0102
+// campaignStatsProvider dev-mode twins return zero totals and empty
+// (non-nil) slices — never nil and never an error — matching
+// UTMStatsForLink/ClicksOverTime's existing dev-mode convention (no click
+// data is ever persisted in dev mode, so there is nothing to aggregate).
+func TestCampaignStatsProvider_ReturnsEmptyZeroValues(t *testing.T) {
+	s := devstore.New("")
+	ctx := context.Background()
+
+	stats, err := s.CampaignStats(ctx, 1, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("CampaignStats: %v", err)
+	}
+	if stats.ClickCount != 0 || stats.ExcludedBotCount != 0 {
+		t.Errorf("CampaignStats totals = %+v, want zero", stats)
+	}
+	for name, b := range map[string]bool{
+		"BySource": stats.BySource == nil, "ByMedium": stats.ByMedium == nil,
+		"ByContent": stats.ByContent == nil, "ByReferer": stats.ByReferer == nil,
+	} {
+		if b {
+			t.Errorf("CampaignStats.%s is nil, want empty non-nil", name)
+		}
+	}
+
+	ts, err := s.CampaignClicksOverTime(ctx, 1, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("CampaignClicksOverTime: %v", err)
+	}
+	if ts.Days == nil || len(ts.Days) != 0 {
+		t.Errorf("CampaignClicksOverTime.Days = %+v, want empty non-nil", ts.Days)
+	}
+
+	byLink, err := s.CampaignClicksByLink(ctx, 1, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("CampaignClicksByLink: %v", err)
+	}
+	if byLink == nil || len(byLink) != 0 {
+		t.Errorf("CampaignClicksByLink = %+v, want empty non-nil", byLink)
+	}
+
+	series, err := s.CampaignSeriesByLink(ctx, 1, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("CampaignSeriesByLink: %v", err)
+	}
+	if series == nil || len(series) != 0 {
+		t.Errorf("CampaignSeriesByLink = %+v, want empty non-nil", series)
+	}
+}
+
 // TestCampaignOwnership_NonOwnerCannotReadUpdateOrDelete is the
 // security-relevant case: a non-owner's GetCampaignBySlug, UpdateCampaign,
 // and DeleteCampaign all report campaigns.ErrCampaignNotFound (never leaking

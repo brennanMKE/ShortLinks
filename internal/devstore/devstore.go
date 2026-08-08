@@ -550,17 +550,39 @@ func (s *Store) CreateCampaign(_ context.Context, in campaigns.NewCampaign, _ *a
 }
 
 // ListCampaignsForUser returns userID's campaigns, most recently created
-// first, matching campaigns.Store.ListCampaignsForUser's ordering.
-func (s *Store) ListCampaignsForUser(_ context.Context, userID int64) ([]campaigns.Campaign, error) {
+// first, matching campaigns.Store.ListCampaignsForUser's ordering, each
+// paired with its link_count/total_clicks (#0102).
+func (s *Store) ListCampaignsForUser(_ context.Context, userID int64) ([]campaigns.CampaignWithCounts, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]campaigns.Campaign, 0)
+	out := make([]campaigns.CampaignWithCounts, 0)
 	for i := len(s.campaigns) - 1; i >= 0; i-- {
 		if c := s.campaigns[i]; c.UserID == userID {
-			out = append(out, cloneCampaign(c))
+			out = append(out, s.campaignWithCountsLocked(c))
 		}
 	}
 	return out, nil
+}
+
+// campaignWithCountsLocked pairs a cloned copy of c with its link_count/
+// total_clicks (#0102). Callers must already hold s.mu. LinkCount is real
+// (counted from the in-memory links this campaign's own AssignLinkToCampaign/
+// UnassignLinkFromCampaign track); TotalClicks is always 0, matching
+// UTMStatsForLink/ClicksOverTime/RecordClick's existing dev-mode
+// convention — dev mode never persists a click, so there is no click data to
+// aggregate (see RecordClick's doc comment).
+func (s *Store) campaignWithCountsLocked(c campaigns.Campaign) campaigns.CampaignWithCounts {
+	var linkCount int64
+	for _, l := range s.links {
+		if l.CampaignID != nil && *l.CampaignID == c.ID {
+			linkCount++
+		}
+	}
+	return campaigns.CampaignWithCounts{
+		Campaign:    cloneCampaign(c),
+		LinkCount:   linkCount,
+		TotalClicks: 0,
+	}
 }
 
 // GetCampaignBySlug returns a campaign by slug, scoped to userID.
@@ -573,6 +595,22 @@ func (s *Store) GetCampaignBySlug(_ context.Context, userID int64, slug string) 
 		}
 	}
 	return campaigns.Campaign{}, campaigns.ErrCampaignNotFound
+}
+
+// GetCampaignBySlugWithCounts returns a campaign by slug, scoped to userID,
+// paired with its link_count/total_clicks (#0102) — the dev-mode twin of
+// campaigns.Store.GetCampaignBySlugWithCounts, required so GET
+// /api/campaigns/{slug} does not regress to the SPA-catch-all failure in dev
+// mode (#0098's downstream constraint 2).
+func (s *Store) GetCampaignBySlugWithCounts(_ context.Context, userID int64, slug string) (campaigns.CampaignWithCounts, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.campaigns {
+		if c.UserID == userID && c.Slug == slug {
+			return s.campaignWithCountsLocked(c), nil
+		}
+	}
+	return campaigns.CampaignWithCounts{}, campaigns.ErrCampaignNotFound
 }
 
 // GetCampaignByID returns a campaign by id, scoped to userID — mirrors
@@ -1073,6 +1111,88 @@ func (s *Store) ClicksOverTime(_ context.Context, _ int64, _, _ time.Time) (clic
 	return clicks.TimeseriesResult{Days: []clicks.DayBucket{}}, nil
 }
 
+// ── campaignStatsProvider (handlers.CampaignsHandler) ───────────────────────
+// Returns empty/zero campaign stats (#0102) for the same reason
+// UTMStatsForLink/ClicksOverTime do above: dev mode never persists a click
+// (RecordClick is a no-op), so there is no click data to aggregate. Real
+// wiring uses *clicks.StatsStore; these twins exist only so GET
+// /api/campaigns/{slug}/stats and the stats/timeseries fields on GET
+// /api/campaigns/{slug} return valid (empty) JSON in dev mode rather than
+// panicking on a nil stats provider or falling through to the SPA
+// catch-all — the same #0098 lesson (#0098's downstream constraint 2) that
+// motivated every other devstore twin in this file.
+
+// CampaignStats returns zero totals and empty (non-nil) breakdowns.
+func (s *Store) CampaignStats(_ context.Context, _ int64, _, _ time.Time) (clicks.CampaignStats, error) {
+	return clicks.CampaignStats{
+		BySource:  []clicks.Bucket{},
+		ByMedium:  []clicks.Bucket{},
+		ByContent: []clicks.Bucket{},
+		ByReferer: []clicks.Bucket{},
+	}, nil
+}
+
+// CampaignClicksOverTime returns an empty timeseries.
+func (s *Store) CampaignClicksOverTime(_ context.Context, _ int64, _, _ time.Time) (clicks.TimeseriesResult, error) {
+	return clicks.TimeseriesResult{Days: []clicks.DayBucket{}}, nil
+}
+
+// CampaignClicksByLink returns an empty (non-nil) breakdown.
+func (s *Store) CampaignClicksByLink(_ context.Context, _ int64, _, _ time.Time) ([]clicks.LinkBucket, error) {
+	return []clicks.LinkBucket{}, nil
+}
+
+// CampaignSeriesByLink returns an empty (non-nil) series list — no "Other"
+// row either, since there is nothing to fold.
+func (s *Store) CampaignSeriesByLink(_ context.Context, _ int64, _, _ time.Time) ([]clicks.LinkSeries, error) {
+	return []clicks.LinkSeries{}, nil
+}
+
+// CampaignSummary returns zero/empty CampaignStats paired with an empty
+// timeseries — the dev-mode twin of clicks.StatsStore.CampaignSummary, the
+// method handlers.CampaignsHandler.Get actually calls (#0102 review: the
+// handler no longer calls the four individual methods above directly, so
+// this and CampaignRollup are the ones that must exist for dev mode to
+// implement handlers.campaignStatsProvider). The four individual methods
+// above are kept as direct-call twins of clicks.StatsStore's own public
+// surface, even though nothing in this package's interface assertions
+// requires them anymore.
+func (s *Store) CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignSummary, error) {
+	stats, err := s.CampaignStats(ctx, campaignID, from, to)
+	if err != nil {
+		return clicks.CampaignSummary{}, err
+	}
+	ts, err := s.CampaignClicksOverTime(ctx, campaignID, from, to)
+	if err != nil {
+		return clicks.CampaignSummary{}, err
+	}
+	return clicks.CampaignSummary{Stats: stats, Timeseries: ts}, nil
+}
+
+// CampaignRollup returns zero/empty values for every quarter of the payload
+// — the dev-mode twin of clicks.StatsStore.CampaignRollup, the method
+// handlers.CampaignsHandler.Stats calls.
+func (s *Store) CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignRollup, error) {
+	summary, err := s.CampaignSummary(ctx, campaignID, from, to)
+	if err != nil {
+		return clicks.CampaignRollup{}, err
+	}
+	byLink, err := s.CampaignClicksByLink(ctx, campaignID, from, to)
+	if err != nil {
+		return clicks.CampaignRollup{}, err
+	}
+	seriesByLink, err := s.CampaignSeriesByLink(ctx, campaignID, from, to)
+	if err != nil {
+		return clicks.CampaignRollup{}, err
+	}
+	return clicks.CampaignRollup{
+		Stats:        summary.Stats,
+		Timeseries:   summary.Timeseries,
+		ByLink:       byLink,
+		SeriesByLink: seriesByLink,
+	}, nil
+}
+
 // ── ClickSink (handlers.NewClickRecorder adapter) ───────────────────────────
 
 // RecordClick is a no-op in dev mode (clicks are not persisted).
@@ -1298,10 +1418,25 @@ var _ interface {
 	CreateCampaign(ctx context.Context, in campaigns.NewCampaign, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
 	UpdateCampaign(ctx context.Context, userID int64, slug string, upd campaigns.CampaignUpdate, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
 	DeleteCampaign(ctx context.Context, userID int64, slug string, auditor *audit.Logger, entry audit.Entry) error
-	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.Campaign, error)
+	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.CampaignWithCounts, error)
 	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
+	GetCampaignBySlugWithCounts(ctx context.Context, userID int64, slug string) (campaigns.CampaignWithCounts, error)
 	AssignLinkToCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
 	UnassignLinkFromCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
+} = (*Store)(nil)
+
+// campaignStatsProvider (handlers.CampaignsHandler, #0102): the two
+// snapshot-consistent rollup methods the handler actually calls
+// (CampaignSummary for Get, CampaignRollup for Stats) — mirroring the
+// statsProvider assertion below for links. The four individual
+// clicks.StatsStore-mirroring methods (CampaignStats/CampaignClicksOverTime/
+// CampaignClicksByLink/CampaignSeriesByLink) still exist on *Store above but
+// are no longer part of this interface, since the handler stopped calling
+// them directly once combining their results one-at-a-time was found to let
+// each quarter of a response read a different snapshot.
+var _ interface {
+	CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignSummary, error)
+	CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignRollup, error)
 } = (*Store)(nil)
 
 var _ interface {

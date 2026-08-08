@@ -210,19 +210,89 @@ func slugExists(ctx context.Context, q querier, userID int64, slug string) (bool
 	return exists, nil
 }
 
+// CampaignWithCounts pairs a Campaign with the link_count/total_clicks
+// summary #0098 stubbed as 0 on GET /api/campaigns and #0102 fills in.
+// LinkCount is the number of links currently assigned to the campaign (its
+// links.campaign_id, the CURRENT/live relationship — unlike click
+// attribution, which is intentionally historical); TotalClicks is the
+// campaign's bot-excluded click total across all of its clicks
+// (clicks.campaign_id, #0100's denormalization, so it is unaffected by a
+// link being reassigned or unassigned after the fact).
+type CampaignWithCounts struct {
+	Campaign
+	LinkCount   int64
+	TotalClicks int64
+}
+
+// campaignCountColumns is the pair of correlated-subquery columns appended to
+// every SELECT that returns a CampaignWithCounts. Reuses the SAME
+// bot-exclusion spelling links.Store already uses for its own click_count
+// correlated subqueries (`AND c.is_bot = FALSE` — see ListLinks/GetLink in
+// internal/links/store.go) rather than inventing a fifth independent
+// "count clicks excluding bots" implementation (#0101's downstream
+// constraint 3 names this directly). Each subquery is scoped to the outer
+// campaigns row alone — no JOIN, no GROUP BY — so a campaign with zero links
+// or whose every click is bot-flagged still returns its own row with 0/0
+// rather than disappearing the way a filtering JOIN...WHERE would (#0101's
+// LEFT JOIN...ON-vs-WHERE trap, generalized in #0102's acceptance criteria
+// to "a campaign whose every click is a bot click must still appear").
+const campaignCountColumns = `,
+	       (SELECT COUNT(*) FROM links lk WHERE lk.campaign_id = c.id) AS link_count,
+	       (SELECT COUNT(*) FROM clicks ck WHERE ck.campaign_id = c.id AND ck.is_bot = FALSE) AS total_clicks`
+
+// scanCampaignWithCounts decodes a campaigns row plus the two
+// campaignCountColumns appended by every query that uses them. The base
+// column order must match scanCampaign's expectations (its own SELECT lists
+// alias the campaigns table as "c" to match).
+func scanCampaignWithCounts(row pgx.Row) (CampaignWithCounts, error) {
+	var out CampaignWithCounts
+	var description *string
+	var startsAt, endsAt *time.Time
+	var defSource, defMedium, defCampaign, defTerm, defContent *string
+	if err := row.Scan(
+		&out.ID, &out.UserID, &out.Name, &out.Slug, &description, &startsAt, &endsAt, &out.Archived,
+		&defSource, &defMedium, &defCampaign, &defTerm, &defContent,
+		&out.CreatedAt, &out.UpdatedAt,
+		&out.LinkCount, &out.TotalClicks,
+	); err != nil {
+		return CampaignWithCounts{}, err
+	}
+	if description != nil {
+		out.Description = *description
+	}
+	out.StartsAt = startsAt
+	out.EndsAt = endsAt
+	if defSource != nil {
+		out.DefaultUTMSource = *defSource
+	}
+	if defMedium != nil {
+		out.DefaultUTMMedium = *defMedium
+	}
+	if defCampaign != nil {
+		out.DefaultUTMCampaign = *defCampaign
+	}
+	if defTerm != nil {
+		out.DefaultUTMTerm = *defTerm
+	}
+	if defContent != nil {
+		out.DefaultUTMContent = *defContent
+	}
+	return out, nil
+}
+
 // ListCampaignsForUser returns all of the user's campaigns, most recently
 // created first (ORDER BY created_at DESC, id DESC — the id tiebreaker keeps
-// the order deterministic even when two rows share a created_at timestamp).
-// Link count and total clicks are NOT included here — #0102 adds those; the
-// handler is responsible for reporting them as 0 until then.
-func (s *Store) ListCampaignsForUser(ctx context.Context, userID int64) ([]Campaign, error) {
+// the order deterministic even when two rows share a created_at timestamp),
+// each paired with its link_count/total_clicks (#0102).
+func (s *Store) ListCampaignsForUser(ctx context.Context, userID int64) ([]CampaignWithCounts, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, user_id, name, slug, description, starts_at, ends_at, archived,
-		        default_utm_source, default_utm_medium, default_utm_campaign,
-		        default_utm_term, default_utm_content, created_at, updated_at
-		   FROM campaigns
-		  WHERE user_id = $1
-		  ORDER BY created_at DESC, id DESC`,
+		`SELECT c.id, c.user_id, c.name, c.slug, c.description, c.starts_at, c.ends_at, c.archived,
+		        c.default_utm_source, c.default_utm_medium, c.default_utm_campaign,
+		        c.default_utm_term, c.default_utm_content, c.created_at, c.updated_at`+
+			campaignCountColumns+`
+		   FROM campaigns c
+		  WHERE c.user_id = $1
+		  ORDER BY c.created_at DESC, c.id DESC`,
 		userID,
 	)
 	if err != nil {
@@ -230,11 +300,11 @@ func (s *Store) ListCampaignsForUser(ctx context.Context, userID int64) ([]Campa
 	}
 	defer rows.Close()
 
-	out := make([]Campaign, 0)
+	out := make([]CampaignWithCounts, 0)
 	for rows.Next() {
-		c, err := scanCampaign(rows)
+		c, err := scanCampaignWithCounts(rows)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("campaigns: scanning campaign row: %w", err)
 		}
 		out = append(out, c)
 	}
@@ -242,6 +312,34 @@ func (s *Store) ListCampaignsForUser(ctx context.Context, userID int64) ([]Campa
 		return nil, fmt.Errorf("campaigns: iterating campaign rows: %w", err)
 	}
 	return out, nil
+}
+
+// GetCampaignBySlugWithCounts returns a single campaign by slug, scoped to
+// userID, paired with its link_count/total_clicks (#0102) — the detail-page
+// analog of ListCampaignsForUser's per-row counts. Kept as a separate method
+// from GetCampaignBySlug (rather than folding the two extra correlated
+// subqueries into it) because GetCampaignBySlug is also called internally by
+// UpdateCampaign/ArchiveCampaign's post-write re-read, where the counts are
+// never used and would be pure overhead on every PATCH. Ownership and the
+// indistinguishable-404 contract match GetCampaignBySlug exactly.
+func (s *Store) GetCampaignBySlugWithCounts(ctx context.Context, userID int64, slug string) (CampaignWithCounts, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT c.id, c.user_id, c.name, c.slug, c.description, c.starts_at, c.ends_at, c.archived,
+		        c.default_utm_source, c.default_utm_medium, c.default_utm_campaign,
+		        c.default_utm_term, c.default_utm_content, c.created_at, c.updated_at`+
+			campaignCountColumns+`
+		   FROM campaigns c
+		  WHERE c.user_id = $1 AND c.slug = $2`,
+		userID, slug,
+	)
+	c, err := scanCampaignWithCounts(row)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return CampaignWithCounts{}, ErrCampaignNotFound
+	case err != nil:
+		return CampaignWithCounts{}, fmt.Errorf("campaigns: scanning campaign row: %w", err)
+	}
+	return c, nil
 }
 
 // GetCampaignBySlug returns a single campaign by slug, scoped to userID.

@@ -82,6 +82,48 @@ func linkCampaignID(t *testing.T, pool *pgxpool.Pool, linkID int64) *int64 {
 	return id
 }
 
+// seedClick inserts a click row directly (raw SQL — this package does not
+// import internal/clicks) carrying the given link_id/campaign_id/is_bot,
+// backing the #0102 link_count/total_clicks aggregation tests below.
+func seedClick(t *testing.T, pool *pgxpool.Pool, linkID int64, campaignID *int64, isBot bool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO clicks (link_id, campaign_id, is_bot, clicked_at) VALUES ($1, $2, $3, now())`,
+		linkID, campaignID, isBot,
+	); err != nil {
+		t.Fatalf("seed click: %v", err)
+	}
+}
+
+// linkClickCount reads a single link's bot-excluded click count directly,
+// using the SAME correlated-subquery spelling (`AND c.is_bot = FALSE`)
+// links.Store.ListLinks/GetLink already use for their own click_count column
+// (see internal/links/store.go) — the actual cross-check
+// TestListCampaignsForUser_LinkCountAndTotalClicksAggregate's doc comment
+// claims: campaigns.total_clicks must equal the SUM of every assigned
+// link's own click_count, not merely an absolute number picked to match
+// whatever the store happens to compute.
+func linkClickCount(t *testing.T, pool *pgxpool.Pool, linkID int64) int64 {
+	t.Helper()
+	var n int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM clicks c WHERE c.link_id = $1 AND c.is_bot = FALSE`, linkID,
+	).Scan(&n); err != nil {
+		t.Fatalf("reading link click count: %v", err)
+	}
+	return n
+}
+
+// findCampaignWithCounts returns the entry for slug, or nil if absent.
+func findCampaignWithCounts(rows []CampaignWithCounts, slug string) *CampaignWithCounts {
+	for i := range rows {
+		if rows[i].Slug == slug {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
 func seedUser(t *testing.T, pool *pgxpool.Pool, email string) int64 {
 	t.Helper()
 	var id int64
@@ -520,6 +562,212 @@ func TestListCampaignsForUser_ScopedToOwnerAndOrderedMostRecentFirst(t *testing.
 	// two inserts land in the same timestamp tick.
 	if got[0].Name != "Alice Two" || got[1].Name != "Alice One" {
 		t.Errorf("order = [%q, %q], want [Alice Two, Alice One] (most recently created first)", got[0].Name, got[1].Name)
+	}
+}
+
+// TestListCampaignsForUser_LinkCountAndTotalClicksAggregate is the #0102
+// acceptance criterion at the store layer: link_count counts the links
+// currently assigned to the campaign, and total_clicks sums their bot-
+// excluded clicks — cross-checked against links.Store's own click_count
+// convention (`AND is_bot = FALSE`, the same spelling reused here) rather
+// than asserting only an absolute number, per #0101's downstream constraint
+// 3.
+func TestListCampaignsForUser_LinkCountAndTotalClicksAggregate(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: alice, Name: "Summer"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	link1 := seedLink(t, pool, alice, "cnt0001", "https://example.com/1", &c.ID)
+	link2 := seedLink(t, pool, alice, "cnt0002", "https://example.com/2", &c.ID)
+	// A link belonging to alice but NOT assigned to this campaign must not
+	// contribute to either count.
+	_ = seedLink(t, pool, alice, "cnt0003", "https://example.com/3", nil)
+
+	seedClick(t, pool, link1, &c.ID, false)
+	seedClick(t, pool, link1, &c.ID, false)
+	seedClick(t, pool, link2, &c.ID, false)
+	seedClick(t, pool, link2, &c.ID, true) // bot click, excluded
+
+	got, err := store.ListCampaignsForUser(context.Background(), alice)
+	if err != nil {
+		t.Fatalf("ListCampaignsForUser: %v", err)
+	}
+	row := findCampaignWithCounts(got, c.Slug)
+	if row == nil {
+		t.Fatalf("campaign %q missing from list: %+v", c.Slug, got)
+	}
+	if row.LinkCount != 2 {
+		t.Errorf("link_count = %d, want 2 (the unassigned link must not count)", row.LinkCount)
+	}
+	if row.TotalClicks != 3 {
+		t.Errorf("total_clicks = %d, want 3 (bot click excluded)", row.TotalClicks)
+	}
+
+	// THE CROSS-CHECK the doc comment above promises: total_clicks must equal
+	// the sum of each assigned link's own (independently-queried) click
+	// count, using links.Store's own bot-exclusion spelling. This is what
+	// actually proves campaignCountColumns' subquery and links.Store's
+	// click_count subquery agree — asserting only the absolute number "3"
+	// does not, since a coincidental off-by-nothing bug in BOTH places could
+	// still satisfy that assertion.
+	wantTotal := linkClickCount(t, pool, link1) + linkClickCount(t, pool, link2)
+	if row.TotalClicks != wantTotal {
+		t.Errorf("total_clicks = %d, want %d (sum of each assigned link's own click_count)", row.TotalClicks, wantTotal)
+	}
+}
+
+// TestListCampaignsForUser_EmptyCampaignReturnsZeroCounts asserts a campaign
+// with no links and no clicks appears with 0/0, not omitted or errored.
+func TestListCampaignsForUser_EmptyCampaignReturnsZeroCounts(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: alice, Name: "Empty"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	got, err := store.ListCampaignsForUser(context.Background(), alice)
+	if err != nil {
+		t.Fatalf("ListCampaignsForUser: %v", err)
+	}
+	row := findCampaignWithCounts(got, c.Slug)
+	if row == nil {
+		t.Fatalf("campaign %q missing from list: %+v", c.Slug, got)
+	}
+	if row.LinkCount != 0 || row.TotalClicks != 0 {
+		t.Errorf("empty campaign counts = link_count=%d total_clicks=%d, want 0/0", row.LinkCount, row.TotalClicks)
+	}
+}
+
+// TestListCampaignsForUser_BotOnlyCampaignStillAppearsWithZeroTotalClicks is
+// the #0101/#0102 LEFT JOIN...ON-vs-WHERE trap, generalized to the campaign
+// list: a campaign whose every click is bot-flagged must still appear (with
+// total_clicks = 0), not vanish because a filtering join collapsed its
+// GROUP BY. campaignCountColumns uses correlated subqueries specifically to
+// avoid that trap; this test would fail against a naive
+// "JOIN clicks ... WHERE is_bot = FALSE" implementation the same way
+// #0101's own link-list test caught the equivalent bug for links.
+func TestListCampaignsForUser_BotOnlyCampaignStillAppearsWithZeroTotalClicks(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: alice, Name: "Bot Only"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	link := seedLink(t, pool, alice, "botonly1", "https://example.com", &c.ID)
+	seedClick(t, pool, link, &c.ID, true)
+	seedClick(t, pool, link, &c.ID, true)
+
+	got, err := store.ListCampaignsForUser(context.Background(), alice)
+	if err != nil {
+		t.Fatalf("ListCampaignsForUser: %v", err)
+	}
+	row := findCampaignWithCounts(got, c.Slug)
+	if row == nil {
+		t.Fatalf("bot-only campaign %q vanished from the list: %+v", c.Slug, got)
+	}
+	if row.LinkCount != 1 {
+		t.Errorf("link_count = %d, want 1", row.LinkCount)
+	}
+	if row.TotalClicks != 0 {
+		t.Errorf("total_clicks = %d, want 0 (all clicks are bot-flagged)", row.TotalClicks)
+	}
+}
+
+// TestListCampaignsForUser_SinceUnassignedLinkClicksStillCountTowardTotalClicks
+// asserts total_clicks is driven by clicks.campaign_id (#0100's
+// denormalization), not links.campaign_id: a click recorded while its link
+// belonged to the campaign keeps counting toward the campaign's
+// total_clicks even after the link is later reassigned/unassigned.
+func TestListCampaignsForUser_SinceUnassignedLinkClicksStillCountTowardTotalClicks(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: alice, Name: "Reassign"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	link := seedLink(t, pool, alice, "reassign1", "https://example.com", &c.ID)
+	seedClick(t, pool, link, &c.ID, false)
+	seedClick(t, pool, link, &c.ID, false)
+
+	// Unassign the link from the campaign directly (mirrors what
+	// UnassignLinkFromCampaign does to links.campaign_id).
+	if _, err := pool.Exec(context.Background(), `UPDATE links SET campaign_id = NULL WHERE id = $1`, link); err != nil {
+		t.Fatalf("unassign link: %v", err)
+	}
+
+	got, err := store.ListCampaignsForUser(context.Background(), alice)
+	if err != nil {
+		t.Fatalf("ListCampaignsForUser: %v", err)
+	}
+	row := findCampaignWithCounts(got, c.Slug)
+	if row == nil {
+		t.Fatalf("campaign %q missing from list: %+v", c.Slug, got)
+	}
+	if row.LinkCount != 0 {
+		t.Errorf("link_count = %d, want 0 (the link is no longer assigned)", row.LinkCount)
+	}
+	if row.TotalClicks != 2 {
+		t.Errorf("total_clicks = %d, want 2 (historical clicks stay attributed via clicks.campaign_id)", row.TotalClicks)
+	}
+}
+
+// TestGetCampaignBySlugWithCounts_ReturnsCounts asserts the detail-page
+// lookup returns the same aggregate values ListCampaignsForUser computes.
+func TestGetCampaignBySlugWithCounts_ReturnsCounts(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: alice, Name: "Detail"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	link := seedLink(t, pool, alice, "detail01", "https://example.com", &c.ID)
+	seedClick(t, pool, link, &c.ID, false)
+
+	got, err := store.GetCampaignBySlugWithCounts(context.Background(), alice, c.Slug)
+	if err != nil {
+		t.Fatalf("GetCampaignBySlugWithCounts: %v", err)
+	}
+	if got.LinkCount != 1 || got.TotalClicks != 1 {
+		t.Errorf("counts = link_count=%d total_clicks=%d, want 1/1", got.LinkCount, got.TotalClicks)
+	}
+}
+
+// TestGetCampaignBySlugWithCounts_OwnershipEnforced asserts user B cannot
+// read user A's campaign counts by slug: ErrCampaignNotFound,
+// indistinguishable from a nonexistent slug.
+func TestGetCampaignBySlugWithCounts_OwnershipEnforced(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: alice, Name: "Alice Only"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	_, err = store.GetCampaignBySlugWithCounts(context.Background(), bob, c.Slug)
+	if !errors.Is(err, ErrCampaignNotFound) {
+		t.Errorf("bob GetCampaignBySlugWithCounts(alice's slug) err = %v, want ErrCampaignNotFound", err)
 	}
 }
 

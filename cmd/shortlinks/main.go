@@ -175,8 +175,15 @@ func servePostgres(cfg *config.Config) error {
 
 	// Campaign CRUD + link-membership API (#0098, #0099). Link membership
 	// (assign/unassign/list) needs the links store to resolve/list the links
-	// it operates on, scoped to the caller.
-	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger)
+	// it operates on, scoped to the caller. The stats store (constructed
+	// above for linksH's utm_stats field) doubles as the campaign-scoped
+	// rollup provider (#0102): *clicks.StatsStore satisfies
+	// campaignStatsProvider via CampaignSummary and CampaignRollup — the two
+	// COMPOSITE methods, each of which reads its whole payload from a single
+	// REPEATABLE READ snapshot. The interface is deliberately narrowed to
+	// those two rather than the four per-fragment methods, so a handler
+	// cannot assemble one response from reads taken at different instants.
+	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger, statsStore)
 
 	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
 	// read straight off the RequireSession-attached context, so the Svelte SPA
@@ -274,7 +281,7 @@ func serveDevMode(cfg *config.Config) error {
 	// text/html — a real 404-on-unmounted-route problem the review caught,
 	// since #0103's UI work runs against ./scripts/dev.sh (STORAGE=json) and
 	// needs genuine JSON responses to build against.
-	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil)
+	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil, ds)
 
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
@@ -386,16 +393,19 @@ func mountAndServe(
 	mux.Handle("PATCH /api/links/{key}", requireSession(http.HandlerFunc(linksH.Patch)))
 	mux.Handle("DELETE /api/links/{key}", requireSession(http.HandlerFunc(linksH.Delete)))
 
-	// Campaign CRUD API (#0098) — all behind RequireSession and scoped to the
-	// authenticated user in the store. No link membership, click attribution, or
-	// stats yet (#0099, #0100, #0102). Not mounted when campaignsH is nil (dev
-	// mode has no dev-store backing for campaigns).
+	// Campaign CRUD + link-membership + stats API (#0098, #0099, #0102) — all
+	// behind RequireSession and scoped to the authenticated user in the
+	// store. Not mounted when campaignsH is nil (dev mode has no dev-store
+	// backing for campaigns).
 	if campaignsH != nil {
 		mux.Handle("GET /api/campaigns", requireSession(http.HandlerFunc(campaignsH.List)))
 		mux.Handle("POST /api/campaigns", requireSession(http.HandlerFunc(campaignsH.Create)))
 		mux.Handle("GET /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Get)))
 		mux.Handle("PATCH /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Patch)))
 		mux.Handle("DELETE /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Delete)))
+		// Campaign rollups (#0102): total/over-time/per-link/channel stats,
+		// optionally windowed via ?from=/?to=.
+		mux.Handle("GET /api/campaigns/{slug}/stats", requireSession(http.HandlerFunc(campaignsH.Stats)))
 		// Link membership (#0099): list, assign, and unassign the links that
 		// belong to a campaign.
 		mux.Handle("GET /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(campaignsH.ListLinks)))

@@ -8,23 +8,25 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/campaigns"
+	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
 
 // campaignsMux builds the real route table for the campaign CRUD +
-// link-membership endpoints, guarded by RequireSession backed by the real
-// *auth.Store and serving the real *campaigns.Store/*links.Store, mirroring
-// linksMux.
+// link-membership + stats endpoints, guarded by RequireSession backed by the
+// real *auth.Store and serving the real *campaigns.Store/*links.Store/
+// *clicks.StatsStore, mirroring linksMux.
 func campaignsMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), nil)
+	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), nil, clicks.NewStatsStore(pool))
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/campaigns", requireSession(http.HandlerFunc(h.List)))
@@ -32,6 +34,7 @@ func campaignsMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	mux.Handle("GET /api/campaigns/{slug}", requireSession(http.HandlerFunc(h.Get)))
 	mux.Handle("PATCH /api/campaigns/{slug}", requireSession(http.HandlerFunc(h.Patch)))
 	mux.Handle("DELETE /api/campaigns/{slug}", requireSession(http.HandlerFunc(h.Delete)))
+	mux.Handle("GET /api/campaigns/{slug}/stats", requireSession(http.HandlerFunc(h.Stats)))
 	mux.Handle("GET /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(h.ListLinks)))
 	mux.Handle("POST /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(h.AssignLinks)))
 	mux.Handle("DELETE /api/campaigns/{slug}/links/{key}", requireSession(http.HandlerFunc(h.UnassignLink)))
@@ -201,16 +204,17 @@ func TestCampaignsPatch_EndsBeforeExistingStartsRejected(t *testing.T) {
 	}
 }
 
-// TestCampaignsList_ReturnsZeroLinkCountAndClicks asserts the list response
-// carries link_count and total_clicks as PRESENT and 0 — the issue's
-// deliberate scope boundary (#0102 populates real values later). This
-// decodes into map[string]any rather than listCampaignsResponse: decoding
-// into the typed struct cannot distinguish an absent JSON key from a present
-// key with value 0 (both decode to the zero value), so a regression that adds
-// `,omitempty` to the struct tags — dropping the keys from the wire entirely
-// — would pass a struct-typed assertion. #0103's contract is that these keys
-// are always present, so presence is checked explicitly here.
-func TestCampaignsList_ReturnsZeroLinkCountAndClicks(t *testing.T) {
+// TestCampaignsList_EmptyCampaignHasZeroLinkCountAndClicks asserts the list
+// response carries link_count and total_clicks as PRESENT and 0 for a
+// campaign with no links/clicks — now REAL aggregates (#0102), not the
+// hardcoded-0 stub #0098 shipped. This decodes into map[string]any rather
+// than listCampaignsResponse: decoding into the typed struct cannot
+// distinguish an absent JSON key from a present key with value 0 (both
+// decode to the zero value), so a regression that adds `,omitempty` to the
+// struct tags — dropping the keys from the wire entirely — would pass a
+// struct-typed assertion. See TestCampaignsList_LinkCountAndTotalClicksAggregate
+// below for the non-zero case.
+func TestCampaignsList_EmptyCampaignHasZeroLinkCountAndClicks(t *testing.T) {
 	pool := credsTestPool(t)
 	srv := httptest.NewServer(campaignsMux(t, pool))
 	defer srv.Close()
@@ -289,6 +293,131 @@ func TestCampaignsList_OwnershipScoped(t *testing.T) {
 	}
 }
 
+// seedClickForHandler inserts a click row directly (raw SQL — this test file
+// has no recorder wired into campaignsMux), backing the #0102 handler-level
+// aggregation/ownership/stats tests below. clicked_at is set to YESTERDAY,
+// not now(): the default stats window's upper bound is today's UTC
+// midnight, EXCLUSIVE (matching ClicksOverTime's existing, documented
+// convention — see clicks.TestClicksOverTime_ZeroDefaults), so a click
+// timestamped "now" during today falls outside every zero-from/to default
+// window and would make these tests flaky depending on wall-clock time.
+func seedClickForHandler(t *testing.T, pool *pgxpool.Pool, linkID, campaignID int64, isBot bool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO clicks (link_id, campaign_id, is_bot, clicked_at) VALUES ($1, $2, $3, now() - interval '1 day')`,
+		linkID, campaignID, isBot,
+	); err != nil {
+		t.Fatalf("seed click: %v", err)
+	}
+}
+
+// TestCampaignsList_LinkCountAndTotalClicksAggregate asserts GET
+// /api/campaigns now returns REAL link_count/total_clicks (#0102) —
+// cross-checked against a second endpoint (GET /api/campaigns/{slug}/links)
+// rather than only asserting an absolute number, per #0101's downstream
+// constraint 3.
+func TestCampaignsList_LinkCountAndTotalClicksAggregate(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Aggregate"}`)
+	campID := campaignRowID(t, pool, c.Slug)
+
+	link1 := seedLinkWithCampaign(t, pool, alice, "agg0001", "https://example.com/1", &campID)
+	link2 := seedLinkWithCampaign(t, pool, alice, "agg0002", "https://example.com/2", &campID)
+	seedClickForHandler(t, pool, link1, campID, false)
+	seedClickForHandler(t, pool, link1, campID, false)
+	seedClickForHandler(t, pool, link2, campID, false)
+	seedClickForHandler(t, pool, link2, campID, true) // bot, excluded
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	var body listCampaignsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Campaigns) != 1 {
+		t.Fatalf("campaigns = %+v, want exactly 1", body.Campaigns)
+	}
+	got := body.Campaigns[0]
+	if got.LinkCount != 2 {
+		t.Errorf("link_count = %d, want 2", got.LinkCount)
+	}
+	if got.TotalClicks != 3 {
+		t.Errorf("total_clicks = %d, want 3 (bot click excluded)", got.TotalClicks)
+	}
+
+	// Cross-check link_count AND total_clicks against the dedicated
+	// links-in-campaign endpoint — linkView already carries each link's own
+	// (independently-queried) click_count, so summing it here proves
+	// campaigns.total_clicks agrees with links.Store's own numbers rather
+	// than merely matching whatever absolute number this test expects.
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/links", nil)
+	resp2, err := srv.Client().Do(withCookie(req2, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp2.Body.Close()
+	var linksBody campaignLinksResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&linksBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if int64(len(linksBody.Links)) != got.LinkCount {
+		t.Errorf("GET .../links returned %d links, want link_count (%d) to match", len(linksBody.Links), got.LinkCount)
+	}
+	var linksClickTotal int64
+	for _, l := range linksBody.Links {
+		linksClickTotal += l.ClickCount
+	}
+	if linksClickTotal != got.TotalClicks {
+		t.Errorf("sum of linkView.click_count over GET .../links = %d, want total_clicks (%d) to match", linksClickTotal, got.TotalClicks)
+	}
+}
+
+// TestCampaignsList_BotOnlyCampaignStillAppears is the #0101 LEFT JOIN...ON-
+// vs-WHERE trap, asserted directly at the endpoint: a campaign whose every
+// click is bot-flagged must still appear in the list, with total_clicks = 0.
+func TestCampaignsList_BotOnlyCampaignStillAppears(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Bot Only"}`)
+	campID := campaignRowID(t, pool, c.Slug)
+	link := seedLinkWithCampaign(t, pool, alice, "botonly1", "https://example.com", &campID)
+	seedClickForHandler(t, pool, link, campID, true)
+	seedClickForHandler(t, pool, link, campID, true)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	var body listCampaignsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Campaigns) != 1 {
+		t.Fatalf("bot-only campaign vanished from the list: %+v", body.Campaigns)
+	}
+	if body.Campaigns[0].TotalClicks != 0 {
+		t.Errorf("total_clicks = %d, want 0", body.Campaigns[0].TotalClicks)
+	}
+	if body.Campaigns[0].LinkCount != 1 {
+		t.Errorf("link_count = %d, want 1", body.Campaigns[0].LinkCount)
+	}
+}
+
 // TestCampaignsGet_OwnershipEnforced asserts user A cannot read user B's
 // campaign by slug: GET returns 404, indistinguishable from a nonexistent
 // slug.
@@ -323,6 +452,368 @@ func TestCampaignsGet_OwnershipEnforced(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("alice GET own campaign status = %d, want 200", resp2.StatusCode)
+	}
+}
+
+// TestCampaignsGet_ReturnsLinksAndStats asserts GET /api/campaigns/{slug}
+// (#0102) additively extends the plain metadata response with link_count/
+// total_clicks, the campaign's member links, and — since a stats provider is
+// wired in campaignsMux — a stats object and a timeseries object, mirroring
+// GET /api/links/{key}'s detail+utm_stats+timeseries shape.
+func TestCampaignsGet_ReturnsLinksAndStats(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Detail"}`)
+	campID := campaignRowID(t, pool, c.Slug)
+	link := seedLinkWithCampaign(t, pool, alice, "detail01", "https://example.com", &campID)
+	seedClickForHandler(t, pool, link, campID, false)
+	seedClickForHandler(t, pool, link, campID, false)
+	seedClickForHandler(t, pool, link, campID, true) // bot, excluded
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug, nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if lc, _ := body["link_count"].(float64); lc != 1 {
+		t.Errorf("link_count = %v, want 1", body["link_count"])
+	}
+	if tc, _ := body["total_clicks"].(float64); tc != 2 {
+		t.Errorf("total_clicks = %v, want 2 (bot click excluded)", body["total_clicks"])
+	}
+	links, ok := body["links"].([]any)
+	if !ok || len(links) != 1 {
+		t.Fatalf("links = %#v, want a 1-element array", body["links"])
+	}
+	linkObj, ok := links[0].(map[string]any)
+	if !ok || linkObj["key"] != "detail01" {
+		t.Errorf("links[0] = %#v, want key=detail01", links[0])
+	}
+
+	statsObj, ok := body["stats"].(map[string]any)
+	if !ok {
+		t.Fatalf("stats field missing or not an object: %#v", body["stats"])
+	}
+	if cc, _ := statsObj["click_count"].(float64); cc != 2 {
+		t.Errorf("stats.click_count = %v, want 2", statsObj["click_count"])
+	}
+	if _, ok := body["timeseries"]; !ok {
+		t.Error("timeseries field missing from GET /api/campaigns/{slug} response")
+	}
+}
+
+// TestCampaignsGet_TotalClicksIsAllTimeStatsClickCountIsWindowed pins the
+// split campaignDetailView's doc comment documents: total_clicks (from
+// campaigns.Store, #0102) is ALL-TIME, while stats.click_count (from
+// clicks.StatsStore, windowed via CampaignSummary) is NOT — so the two can
+// legitimately disagree in the SAME response. Reproduces the review's exact
+// scenario: a campaign with 5 clicks from 60 days ago and no starts_at/
+// ends_at set (so the default window is the last 30 days) shows
+// total_clicks=5 beside stats.click_count=0 and timeseries.days=[]. #0103/
+// #0104 must not assume these two numbers are interchangeable; this test
+// exists so a future change that makes them silently agree (e.g. by
+// windowing total_clicks, or by widening the default window) is a
+// deliberate, reviewed decision rather than an accidental behavior change.
+func TestCampaignsGet_TotalClicksIsAllTimeStatsClickCountIsWindowed(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Old Clicks"}`)
+	campID := campaignRowID(t, pool, c.Slug)
+	link := seedLinkWithCampaign(t, pool, alice, "old00001", "https://example.com", &campID)
+
+	// 5 clicks, 60 days ago — well outside the default 30-day window, but
+	// still real, all-time history.
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO clicks (link_id, campaign_id, is_bot, clicked_at)
+		 SELECT $1, $2, FALSE, now() - interval '60 days' FROM generate_series(1, 5)`,
+		link, campID,
+	); err != nil {
+		t.Fatalf("seed old clicks: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug, nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if tc, _ := body["total_clicks"].(float64); tc != 5 {
+		t.Errorf("total_clicks = %v, want 5 (all-time)", body["total_clicks"])
+	}
+	statsObj, ok := body["stats"].(map[string]any)
+	if !ok {
+		t.Fatalf("stats field missing or not an object: %#v", body["stats"])
+	}
+	if cc, _ := statsObj["click_count"].(float64); cc != 0 {
+		t.Errorf("stats.click_count = %v, want 0 (windowed to the last 30 days; the clicks are 60 days old)", statsObj["click_count"])
+	}
+	ts, ok := body["timeseries"].(map[string]any)
+	if !ok {
+		t.Fatalf("timeseries field missing or not an object: %#v", body["timeseries"])
+	}
+	days, ok := ts["days"].([]any)
+	if !ok || len(days) != 0 {
+		t.Errorf("timeseries.days = %#v, want empty (the clicks fall outside the windowed default)", ts["days"])
+	}
+}
+
+// TestCampaignsGet_EmptyCampaignReturnsEmptyLinksNotNull asserts a campaign
+// with no links yields "links": [] rather than null, matching this file's
+// non-nil-empty-slice convention throughout.
+func TestCampaignsGet_EmptyCampaignReturnsEmptyLinksNotNull(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Empty"}`)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug, nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	links, present := body["links"]
+	if !present {
+		t.Fatal("\"links\" key missing")
+	}
+	arr, ok := links.([]any)
+	if !ok {
+		t.Fatalf("links = %#v (%T), want a JSON array, not null", links, links)
+	}
+	if len(arr) != 0 {
+		t.Errorf("links = %#v, want empty", arr)
+	}
+}
+
+// TestCampaignsStats_ReturnsRollup asserts GET /api/campaigns/{slug}/stats
+// (#0102) returns the combined rollup: totals/breakdowns (embedded from
+// CampaignStats), timeseries, by_link, and series_by_link.
+func TestCampaignsStats_ReturnsRollup(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Stats"}`)
+	campID := campaignRowID(t, pool, c.Slug)
+	link := seedLinkWithCampaign(t, pool, alice, "stats001", "https://example.com", &campID)
+	seedClickForHandler(t, pool, link, campID, false)
+	seedClickForHandler(t, pool, link, campID, false)
+	seedClickForHandler(t, pool, link, campID, true)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/stats", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if cc, _ := body["click_count"].(float64); cc != 2 {
+		t.Errorf("click_count = %v, want 2 (bot click excluded)", body["click_count"])
+	}
+	if ebc, _ := body["excluded_bot_count"].(float64); ebc != 1 {
+		t.Errorf("excluded_bot_count = %v, want 1", body["excluded_bot_count"])
+	}
+	for _, key := range []string{"by_source", "by_medium", "by_content", "by_referer", "timeseries", "by_link", "series_by_link"} {
+		if _, present := body[key]; !present {
+			t.Errorf("%q key missing from stats response", key)
+		}
+	}
+	byLink, ok := body["by_link"].([]any)
+	if !ok || len(byLink) != 1 {
+		t.Fatalf("by_link = %#v, want a 1-element array", body["by_link"])
+	}
+}
+
+// TestCampaignsStats_OwnershipEnforced asserts user A cannot read stats for
+// user B's campaign: 404, indistinguishable from a nonexistent slug.
+func TestCampaignsStats_OwnershipEnforced(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	seedSession(t, pool, bob, "bob-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Alice Stats"}`)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/stats", nil)
+	resp, err := srv.Client().Do(withCookie(req, "bob-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("bob GET alice's campaign stats status = %d, want 404", resp.StatusCode)
+	}
+
+	// Confirm alice herself can still read it.
+	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/stats", nil)
+	resp2, err := srv.Client().Do(withCookie(req2, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("alice GET own campaign stats status = %d, want 200", resp2.StatusCode)
+	}
+}
+
+// TestCampaignsStats_InvalidFromDateRejected asserts an unparseable ?from=
+// value is a 400, not silently ignored.
+func TestCampaignsStats_InvalidFromDateRejected(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Bad Date"}`)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/stats?from=not-a-date", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestCampaignsStats_InvalidToDateRejected mirrors
+// TestCampaignsStats_InvalidFromDateRejected for ?to=, which had no test of
+// its own before this (review item 4).
+func TestCampaignsStats_InvalidToDateRejected(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Bad To Date"}`)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/stats?to=not-a-date", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+// TestCampaignsStats_ToBeforeFromRejected asserts a ?to= earlier than ?from=
+// (both present) is a 400, not silently accepted as an always-empty window.
+func TestCampaignsStats_ToBeforeFromRejected(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Inverted Window"}`)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/stats?from=2026-06-10&to=2026-06-01", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (to before from)", resp.StatusCode)
+	}
+}
+
+// TestCampaignsStats_ExplicitWindowReachesStore is review item 4's guard:
+// ?from=/?to= were being parsed and forwarded to the store already, but no
+// test asserted the parsed values actually reached CampaignRollup rather
+// than being silently discarded in favor of the default window — a mutation
+// that discards them left every other handler test green. The campaign has
+// no starts_at/ends_at (default window = last 30 days), and the seeded
+// click is 45 days old — OUTSIDE that default. An explicit ?from=/?to=
+// window wide enough to include it (60 days back through today) must
+// return click_count=1; if the handler silently used the default instead,
+// this would report 0.
+func TestCampaignsStats_ExplicitWindowReachesStore(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Explicit Window"}`)
+	campID := campaignRowID(t, pool, c.Slug)
+	link := seedLinkWithCampaign(t, pool, alice, "explw001", "https://example.com", &campID)
+
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO clicks (link_id, campaign_id, is_bot, clicked_at)
+		 VALUES ($1, $2, FALSE, now() - interval '45 days')`,
+		link, campID,
+	); err != nil {
+		t.Fatalf("seed old click: %v", err)
+	}
+
+	from := time.Now().AddDate(0, 0, -60).Format("2006-01-02")
+	to := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/stats?from="+from+"&to="+to, nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cc, _ := body["click_count"].(float64); cc != 1 {
+		t.Errorf("click_count = %v, want 1 — the explicit ?from=/?to= window (which includes the 45-day-old click) did not reach the store; "+
+			"the default 30-day window would report 0", body["click_count"])
 	}
 }
 

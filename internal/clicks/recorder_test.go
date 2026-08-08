@@ -48,6 +48,16 @@ func truncate(t *testing.T, pool *pgxpool.Pool) {
 		`TRUNCATE clicks, links, campaigns, users RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
+	// Repair a burst that was hard-killed. The concurrency tests disable
+	// autovacuum on clicks for the duration of a write burst and RESET it in
+	// their cleanup, but SIGKILL / a -timeout panic runs no deferred code, so
+	// the table can be left carrying {autovacuum_enabled=false}. That is a
+	// pg_dump-visible reloption — i.e. the #0110 drift — and it persists until
+	// something clears it. Doing it here means ANY subsequent run of the
+	// package repairs it, not only one that reaches the concurrency tests.
+	if _, err := pool.Exec(ctx, `ALTER TABLE clicks RESET (autovacuum_enabled)`); err != nil {
+		t.Fatalf("truncate: reset autovacuum reloption on clicks: %v", err)
+	}
 }
 
 // seedUser inserts an active account and returns its id.

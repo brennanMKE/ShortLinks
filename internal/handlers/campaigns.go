@@ -12,6 +12,7 @@ import (
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/campaigns"
+	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
@@ -32,10 +33,45 @@ type campaignStore interface {
 	CreateCampaign(ctx context.Context, in campaigns.NewCampaign, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
 	UpdateCampaign(ctx context.Context, userID int64, slug string, upd campaigns.CampaignUpdate, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
 	DeleteCampaign(ctx context.Context, userID int64, slug string, auditor *audit.Logger, entry audit.Entry) error
-	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.Campaign, error)
+	// ListCampaignsForUser/GetCampaignBySlugWithCounts (#0102) return each
+	// campaign paired with its link_count/total_clicks summary — the fields
+	// #0098 stubbed as 0. GetCampaignBySlug (bare) is kept for the internal
+	// callers (Patch/Delete/AssignLinks/UnassignLink) that only need
+	// metadata and would otherwise pay for the two extra correlated
+	// subqueries on every mutation.
+	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.CampaignWithCounts, error)
 	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
+	GetCampaignBySlugWithCounts(ctx context.Context, userID int64, slug string) (campaigns.CampaignWithCounts, error)
 	AssignLinkToCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
 	UnassignLinkFromCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
+}
+
+// campaignStatsProvider is the slice of the click-analytics store the
+// campaigns handler needs (#0102): the campaign-scoped rollups backing GET
+// /api/campaigns/{slug}/stats and the stats/timeseries fields folded
+// additively into GET /api/campaigns/{slug}. *clicks.StatsStore satisfies
+// this. It is optional — a nil provider (no stats store wired) omits the
+// stats/timeseries/by_link/series_by_link fields from campaign detail and
+// causes GET /api/campaigns/{slug}/stats to report 500, mirroring
+// statsProvider's nil-degradation contract in links.go.
+//
+// Deliberately CampaignSummary/CampaignRollup, not the four individual
+// clicks.StatsStore methods (CampaignStats/CampaignClicksOverTime/
+// CampaignClicksByLink/CampaignSeriesByLink) those two are built from. A
+// prior version of this handler called the four methods directly, once
+// each, and combined their results into one response — which meant each
+// piece was read against its own snapshot (its own transaction or none at
+// all). Under concurrent recording that let `timeseries.days` sum to a
+// different number than `stats.click_count` in the SAME JSON body: #0101's
+// "Total clicks: 5" over "No click data yet" defect, reproduced one level
+// up, on exactly the pair #0104 renders side by side. Depending on
+// CampaignSummary/CampaignRollup instead makes that structurally
+// impossible from the handler's side: the whole payload comes back from
+// one call that already read everything from one transaction (see
+// clicks.CampaignRollup's doc comment).
+type campaignStatsProvider interface {
+	CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignSummary, error)
+	CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignRollup, error)
 }
 
 // campaignLinksProvider is the slice of the links data layer the campaigns
@@ -91,14 +127,21 @@ type CampaignsHandler struct {
 	// (audit.Logger.WriteTx, called from inside the store's transaction). May
 	// be nil in unit tests that do not assert audit rows.
 	auditor *audit.Logger
+	// stats provides the campaign-scoped click rollups (#0102) enriching GET
+	// /api/campaigns/{slug} and backing GET /api/campaigns/{slug}/stats. May
+	// be nil (no stats store wired), in which case the detail response omits
+	// those fields and the dedicated stats endpoint reports 500 — mirroring
+	// LinksHandler's nil-provider degradation.
+	stats campaignStatsProvider
 }
 
 // NewCampaignsHandler constructs a CampaignsHandler over the data layer, the
-// links lookup for the membership endpoints (#0099), and the audit logger.
-// Pass a nil auditor to disable audit writes (e.g. in unit tests that do not
-// exercise that path).
-func NewCampaignsHandler(store campaignStore, linkLookup campaignLinksProvider, auditor *audit.Logger) *CampaignsHandler {
-	return &CampaignsHandler{store: store, links: linkLookup, auditor: auditor}
+// links lookup for the membership endpoints (#0099), the audit logger, and
+// the campaign-scoped stats provider (#0102). Pass a nil auditor to disable
+// audit writes and a nil statsProvider to omit the stats/timeseries fields
+// (e.g. in unit tests that do not exercise those paths).
+func NewCampaignsHandler(store campaignStore, linkLookup campaignLinksProvider, auditor *audit.Logger, statsProvider campaignStatsProvider) *CampaignsHandler {
+	return &CampaignsHandler{store: store, links: linkLookup, auditor: auditor, stats: statsProvider}
 }
 
 // campaignView is the JSON shape for a single campaign, shared by every
@@ -141,14 +184,22 @@ func toCampaignView(c campaigns.Campaign) campaignView {
 }
 
 // campaignListItemView is the shape of each entry in GET /api/campaigns.
-// link_count and total_clicks are DELIBERATELY always 0 in this issue — #0099
-// adds link membership and #0102 adds the rollup queries that would populate
-// them. This is not a stub to be quietly filled in; it is the issue's
-// explicit scope boundary.
+// link_count/total_clicks (#0102) are real aggregates now — #0098 stubbed
+// them as 0 pending link membership (#0099) and the rollup queries
+// (#0102) this issue adds.
 type campaignListItemView struct {
 	campaignView
 	LinkCount   int64 `json:"link_count"`
 	TotalClicks int64 `json:"total_clicks"`
+}
+
+// toCampaignListItemView maps a domain CampaignWithCounts to its JSON shape.
+func toCampaignListItemView(c campaigns.CampaignWithCounts) campaignListItemView {
+	return campaignListItemView{
+		campaignView: toCampaignView(c.Campaign),
+		LinkCount:    c.LinkCount,
+		TotalClicks:  c.TotalClicks,
+	}
 }
 
 // listCampaignsResponse is the GET /api/campaigns body. campaigns is always a
@@ -158,7 +209,11 @@ type listCampaignsResponse struct {
 }
 
 // List handles GET /api/campaigns. It returns the caller's campaigns, most
-// recently created first, scoped to the caller in the store.
+// recently created first, scoped to the caller in the store, each carrying
+// its real link_count/total_clicks (#0102). A campaign with no links, or
+// whose every click is bot-flagged, still appears with 0/0 — the store's
+// correlated-subquery counts have no JOIN/GROUP BY to collapse a row out of
+// (see campaigns.Store's campaignCountColumns doc comment).
 func (h *CampaignsHandler) List(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -174,11 +229,7 @@ func (h *CampaignsHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]campaignListItemView, 0, len(rows))
 	for _, c := range rows {
-		views = append(views, campaignListItemView{
-			campaignView: toCampaignView(c),
-			LinkCount:    0,
-			TotalClicks:  0,
-		})
+		views = append(views, toCampaignListItemView(c))
 	}
 	writeJSON(w, http.StatusOK, listCampaignsResponse{Campaigns: views})
 }
@@ -266,11 +317,184 @@ func (h *CampaignsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, toCampaignView(created))
 }
 
+// campaignDetailView is the GET /api/campaigns/{slug} body: campaign
+// metadata, its link_count/total_clicks (#0102), every link currently
+// assigned to it, and (when a stats provider is wired) its stats +
+// clicks-over-time series — additively extending campaignView (#0098's
+// downstream constraint 8: "GET /api/campaigns/{slug} should extend with a
+// campaignDetailView wrapper mirroring linkDetailView, which is purely
+// additive") rather than changing campaignView itself, and mirroring how GET
+// /api/links/{key} already combines utm_stats + timeseries via
+// linkDetailView. Links is always a non-nil array so it encodes as []
+// rather than null; Stats/Timeseries are omitted (nil, via omitempty) only
+// when no stats provider is wired, matching statsProvider's nil-degradation
+// contract in links.go — this is safe specifically because Stats/Timeseries
+// are POINTERS, so omitempty only triggers on nil, never on an empty-but-set
+// struct (unlike a slice, where omitempty would also hide a genuine empty
+// result).
+//
+// LINK_COUNT/TOTAL_CLICKS ARE ALL-TIME; STATS.CLICK_COUNT IS WINDOWED — this
+// is deliberate, not an oversight, but it means the two can legitimately
+// disagree in the same response (e.g. a campaign with 5 clicks from 60 days
+// ago and no starts_at/ends_at set: total_clicks=5, stats.click_count=0,
+// timeseries.days=[], because the default window only looks back 30 days).
+// total_clicks stays all-time because that is the right number for a list/
+// summary figure — the same reason campaignListItemView (GET
+// /api/campaigns) reports it all-time with no window at all, and the two
+// endpoints would disagree with EACH OTHER if this one windowed it instead.
+// stats.click_count stays windowed because it is the number the chart next
+// to it was computed from, and the two must never drift apart from each
+// other (see CampaignRollup's doc comment) even though they are allowed to
+// drift from total_clicks. #0103/#0104 must not assume total_clicks and
+// stats.click_count are interchangeable; see
+// TestCampaignsGet_TotalClicksIsAllTimeStatsClickCountIsWindowed, which pins
+// exactly the scenario above.
+type campaignDetailView struct {
+	campaignView
+	LinkCount   int64                    `json:"link_count"`
+	TotalClicks int64                    `json:"total_clicks"`
+	Links       []linkView               `json:"links"`
+	Stats       *clicks.CampaignStats    `json:"stats,omitempty"`
+	Timeseries  *clicks.TimeseriesResult `json:"timeseries,omitempty"`
+}
+
 // Get handles GET /api/campaigns/{slug}. It returns the caller's campaign
-// metadata. A slug that does not exist OR belongs to another user yields 404
-// — the same response in both cases so the endpoint never reveals another
-// user's campaign.
+// metadata, its real (all-time) link_count/total_clicks (#0102), every link
+// currently assigned to it, and — when a stats provider is wired — its
+// CampaignStats and clicks-over-time series over the DEFAULT window
+// (campaignWindow in clicks/stats.go: the campaign's own starts_at/ends_at
+// when both are set, otherwise 30 days) — see campaignDetailView's doc
+// comment for why that windowed click_count can legitimately differ from
+// the all-time total_clicks above it. Use GET /api/campaigns/{slug}/stats
+// directly for an explicit ?from=/?to= window. A slug that does not exist OR
+// belongs to another user yields 404 — the same response in both cases so
+// the endpoint never reveals another user's campaign.
 func (h *CampaignsHandler) Get(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	slug := r.PathValue("slug")
+	if slug == "" {
+		writeError(w, http.StatusBadRequest, "slug is required")
+		return
+	}
+
+	c, err := h.store.GetCampaignBySlugWithCounts(r.Context(), u.ID, slug)
+	switch {
+	case err == nil:
+		// fall through to build the detail view.
+	case errors.Is(err, campaigns.ErrCampaignNotFound):
+		writeError(w, http.StatusNotFound, "campaign not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	linkRows, err := h.links.ListLinksForCampaign(r.Context(), u.ID, c.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	linkViews := make([]linkView, 0, len(linkRows))
+	for _, l := range linkRows {
+		linkViews = append(linkViews, toLinkView(l))
+	}
+
+	detail := campaignDetailView{
+		campaignView: toCampaignView(c.Campaign),
+		LinkCount:    c.LinkCount,
+		TotalClicks:  c.TotalClicks,
+		Links:        linkViews,
+	}
+
+	// #0102: enrich with campaign stats and the clicks-over-time series when
+	// a stats store is wired. c.ID was resolved scoped to the caller above,
+	// so passing it here cannot leak another user's data. CampaignSummary
+	// reads both from ONE transaction (see its doc comment) so click_count
+	// and the timeseries it sits beside can never disagree with EACH OTHER
+	// (they may still legitimately disagree with the all-time total_clicks
+	// above — see campaignDetailView's doc comment). Stats failures are
+	// fatal to the detail response so the client never sees a partial or
+	// inconsistent analytics payload (mirrors LinksHandler.Get).
+	if h.stats != nil {
+		summary, err := h.stats.CampaignSummary(r.Context(), c.ID, zeroTime, zeroTime)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		detail.Stats = &summary.Stats
+		detail.Timeseries = &summary.Timeseries
+	}
+
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// campaignStatsResponse is the GET /api/campaigns/{slug}/stats body:
+// CampaignStats's totals + the four channel breakdowns (embedded, so
+// click_count/excluded_bot_count/by_source/by_medium/by_content/by_referer
+// sit at the top level), plus the clicks-over-time series, the per-link
+// breakdown, and the capped-plus-"Other" per-link series — the plan
+// document's three questions (how many/over time, which channel, which
+// link) answered in one request, ALL read from the same
+// clicks.CampaignRollup call and therefore the same transaction/snapshot —
+// see CampaignRollup's doc comment for why that matters.
+type campaignStatsResponse struct {
+	clicks.CampaignStats
+	Timeseries   clicks.TimeseriesResult `json:"timeseries"`
+	ByLink       []clicks.LinkBucket     `json:"by_link"`
+	SeriesByLink []clicks.LinkSeries     `json:"series_by_link"`
+}
+
+// parseStatsWindow parses the optional ?from=/?to= query parameters GET
+// /api/campaigns/{slug}/stats accepts, each a "YYYY-MM-DD" date matching
+// stats.go's DayBucket date format, interpreted as UTC midnight. Either or
+// both may be absent (zero time.Time), letting the store apply its own
+// default window (clicks.campaignWindow's doc comment: the campaign's own
+// starts_at/ends_at when both are set, otherwise 30 days). An unparseable
+// value, or a `to` before `from` (both present), writes a 400 directly and
+// returns ok=false, so the caller can just check ok and return.
+func parseStatsWindow(w http.ResponseWriter, r *http.Request) (from, to time.Time, ok bool) {
+	q := r.URL.Query()
+	if v := q.Get("from"); v != "" {
+		t, err := time.Parse("2006-01-02", v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid from date, want YYYY-MM-DD")
+			return time.Time{}, time.Time{}, false
+		}
+		from = t
+	}
+	if v := q.Get("to"); v != "" {
+		t, err := time.Parse("2006-01-02", v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid to date, want YYYY-MM-DD")
+			return time.Time{}, time.Time{}, false
+		}
+		to = t
+	}
+	if !from.IsZero() && !to.IsZero() && to.Before(from) {
+		writeError(w, http.StatusBadRequest, "to must not be before from")
+		return time.Time{}, time.Time{}, false
+	}
+	return from, to, true
+}
+
+// Stats handles GET /api/campaigns/{slug}/stats. It returns the caller's
+// campaign's full rollup — CampaignStats, the clicks-over-time series, the
+// per-link breakdown, and the capped-plus-"Other" per-link series — over an
+// optional ?from=/?to= window (each "YYYY-MM-DD"; see parseStatsWindow).
+// Omitting both applies the default window. The parsed from/to are passed
+// straight through to CampaignRollup, which resolves the effective window
+// and reads every quarter of the payload from ONE transaction (see its doc
+// comment) — TestCampaignsStats_ExplicitWindowReachesStore pins that the
+// parsed values actually reach the store rather than being silently
+// discarded in favor of the default. A slug that does not exist OR belongs
+// to another user yields 404, matching every other campaign endpoint's
+// indistinguishable-404 contract. Returns 500 if no stats provider is wired
+// (this endpoint has no meaningful degraded response).
+func (h *CampaignsHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthenticated")
@@ -285,12 +509,37 @@ func (h *CampaignsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	c, err := h.store.GetCampaignBySlug(r.Context(), u.ID, slug)
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, toCampaignView(c))
+		// fall through.
 	case errors.Is(err, campaigns.ErrCampaignNotFound):
 		writeError(w, http.StatusNotFound, "campaign not found")
+		return
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
+
+	if h.stats == nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	from, to, ok := parseStatsWindow(w, r)
+	if !ok {
+		return // parseStatsWindow already wrote the 400.
+	}
+
+	rollup, err := h.stats.CampaignRollup(r.Context(), c.ID, from, to)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, campaignStatsResponse{
+		CampaignStats: rollup.Stats,
+		Timeseries:    rollup.Timeseries,
+		ByLink:        rollup.ByLink,
+		SeriesByLink:  rollup.SeriesByLink,
+	})
 }
 
 // patchCampaignRequest is the PATCH /api/campaigns/{slug} body. Every field
