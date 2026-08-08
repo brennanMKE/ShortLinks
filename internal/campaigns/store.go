@@ -20,6 +20,16 @@ import (
 // mirrors links.ErrLinkNotFound.
 var ErrCampaignNotFound = errors.New("campaigns: campaign not found")
 
+// ErrLinkNotFound is returned by AssignLinkToCampaign/UnassignLinkFromCampaign
+// when the target link row does not match the WHERE clause's ownership (and,
+// for unassign, current-campaign) scoping. In normal operation the handler
+// has already verified both the campaign and the link belong to the caller
+// (via GetCampaignBySlug and links.Store.GetLink) before calling either
+// method, so this is a defense-in-depth backstop against a race (the link
+// deleted/reassigned between the handler's check and this UPDATE) rather
+// than the primary ownership gate.
+var ErrLinkNotFound = errors.New("campaigns: link not found")
+
 // pgUniqueViolation is the PostgreSQL SQLSTATE for a unique_violation.
 const pgUniqueViolation = "23505"
 
@@ -261,6 +271,136 @@ func getBySlug(ctx context.Context, q querier, userID int64, slug string) (Campa
 	return c, nil
 }
 
+// GetCampaignByID returns a single campaign by id, scoped to userID.
+// ErrCampaignNotFound is returned when the id does not exist OR belongs to
+// another user — mirroring GetCampaignBySlug's indistinguishable-404
+// contract. This backs POST /api/links' optional campaign_id field: the
+// handler must verify a client-supplied id actually belongs to the caller
+// before using it, exactly as it already does for campaign_slug via
+// GetCampaignBySlug.
+func (s *Store) GetCampaignByID(ctx context.Context, userID, id int64) (Campaign, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, user_id, name, slug, description, starts_at, ends_at, archived,
+		        default_utm_source, default_utm_medium, default_utm_campaign,
+		        default_utm_term, default_utm_content, created_at, updated_at
+		   FROM campaigns
+		  WHERE user_id = $1 AND id = $2`,
+		userID, id,
+	)
+	c, err := scanCampaign(row)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Campaign{}, ErrCampaignNotFound
+	case err != nil:
+		return Campaign{}, err
+	}
+	return c, nil
+}
+
+// AssignLinkToCampaign moves the caller's own link (by id) into the caller's
+// own campaign (by id), overwriting any prior campaign assignment. A link
+// belongs to at most one campaign — enforced by the links.campaign_id
+// column, not a join table — so assigning an already-assigned link MOVES it
+// rather than being rejected (decided; see the #0099 issue notes and
+// TestAssignLinkToCampaign_MovesAlreadyAssignedLink). Both the campaign and
+// the link are expected to already be verified as owned by userID by the
+// caller (via GetCampaignBySlug and links.Store.GetLink); the UPDATE's
+// WHERE user_id = $3 re-asserts that ownership in SQL as defense in depth,
+// mirroring every other ownership-scoped mutation in this codebase.
+//
+// The update and, when auditor is non-nil, the campaign.link_assigned audit
+// write happen inside one transaction — the same WriteTx-in-band convention
+// CreateCampaign/UpdateCampaign/DeleteCampaign already use, chosen
+// deliberately here (see actions.go) rather than switching to links'
+// fire-and-forget Record, so every mutation campaigns.Store performs is
+// audited the same way.
+func (s *Store) AssignLinkToCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("campaigns: begin assign tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// The WHERE clause scopes BOTH sides symmetrically: the link by
+	// id+user_id (as before), and campaignID by an EXISTS check that it too
+	// belongs to userID — review item 7. Previously only the link side was
+	// re-verified in SQL; campaignID was taken on trust from the caller
+	// (normally safe, since the handler resolves it via the already-scoped
+	// GetCampaignBySlug/GetCampaignByID first), but a defense-in-depth
+	// ownership check should not have an asymmetric gap between its two
+	// foreign ids when the cost is one EXISTS subquery on an already
+	// user_id-indexed table.
+	tag, err := tx.Exec(ctx,
+		`UPDATE links SET campaign_id = $1
+		  WHERE id = $2 AND user_id = $3
+		    AND EXISTS (SELECT 1 FROM campaigns WHERE campaigns.id = $1 AND campaigns.user_id = $3)`,
+		campaignID, linkID, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("campaigns: assigning link to campaign: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLinkNotFound
+	}
+
+	if auditor != nil {
+		e := entry
+		id := linkID
+		e.TargetID = &id
+		if err := auditor.WriteTx(ctx, tx, e); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("campaigns: commit assign tx: %w", err)
+	}
+	return nil
+}
+
+// UnassignLinkFromCampaign clears the caller's own link's campaign_id, but
+// ONLY if it currently points at campaignID — a link not currently assigned
+// to this campaign (already unassigned, or assigned elsewhere) reports
+// ErrLinkNotFound rather than silently no-op'ing, so DELETE
+// /api/campaigns/{slug}/links/{key} can map it to a clean 404. Ownership is
+// re-asserted via WHERE user_id = $2, mirroring AssignLinkToCampaign.
+//
+// The update and, when auditor is non-nil, the campaign.link_unassigned
+// audit write happen inside one transaction, following the same convention
+// as AssignLinkToCampaign above.
+func (s *Store) UnassignLinkFromCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("campaigns: begin unassign tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE links SET campaign_id = NULL WHERE id = $1 AND user_id = $2 AND campaign_id = $3`,
+		linkID, userID, campaignID,
+	)
+	if err != nil {
+		return fmt.Errorf("campaigns: unassigning link from campaign: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrLinkNotFound
+	}
+
+	if auditor != nil {
+		e := entry
+		id := linkID
+		e.TargetID = &id
+		if err := auditor.WriteTx(ctx, tx, e); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("campaigns: commit unassign tx: %w", err)
+	}
+	return nil
+}
+
 // CampaignUpdate carries the optional fields a PATCH may change. A nil
 // pointer means "leave unchanged". Description and the default_utm_* fields
 // follow links.LinkUpdate.Title's convention: a non-nil pointer to "" clears
@@ -424,16 +564,40 @@ func (s *Store) ArchiveCampaign(ctx context.Context, userID int64, slug string, 
 
 // DeleteCampaign permanently removes the user's own campaign (by slug).
 // Unlike ArchiveCampaign, this is not reversible. It does not cascade to
-// anything in this issue's scope — link membership (#0099) does not exist
-// yet, so there is nothing to unassign. Scoped to userID, so another user's
-// campaign does not match (ErrCampaignNotFound). The delete and, when
-// auditor is non-nil, the audit write happen inside one transaction.
+// LINKS ROWS (migration 000011's links.campaign_id has ON DELETE SET NULL —
+// the campaign's links are unassigned, not deleted, entirely by the FK; this
+// method issues no UPDATE against links itself). Scoped to userID, so
+// another user's campaign does not match (ErrCampaignNotFound). The delete
+// and, when auditor is non-nil, the audit write happen inside one
+// transaction.
+//
+// DECISION (#0099, per #0098's downstream constraint 3): because the
+// unassignment is performed by the FK rather than application code, the
+// number of affected links is not implicit anywhere in the DELETE's result.
+// Rather than accept that gap, this method counts the campaign's links
+// (inside the same transaction, so the count is consistent with what the FK
+// is about to unassign) BEFORE deleting, and stamps
+// entry.Metadata["unassigned_links_count"] with it — merged with, not
+// replacing, any metadata the caller already set, mirroring
+// ArchiveCampaign's "archived" stamp below. The extra SELECT is one indexed
+// query (idx_links_campaign_id) inside a transaction that is about to do a
+// single-row DELETE regardless, so the cost is negligible against the audit
+// value of a self-describing campaign.deleted row.
 func (s *Store) DeleteCampaign(ctx context.Context, userID int64, slug string, auditor *audit.Logger, entry audit.Entry) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("campaigns: begin delete tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	var unassignCount int64
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM links l JOIN campaigns c ON c.id = l.campaign_id
+		  WHERE c.user_id = $1 AND c.slug = $2`,
+		userID, slug,
+	).Scan(&unassignCount); err != nil {
+		return fmt.Errorf("campaigns: counting links to be unassigned: %w", err)
+	}
 
 	var id int64
 	err = tx.QueryRow(ctx,
@@ -450,6 +614,14 @@ func (s *Store) DeleteCampaign(ctx context.Context, userID int64, slug string, a
 	if auditor != nil {
 		e := entry
 		e.TargetID = &id
+		meta := make(map[string]any)
+		if existing, ok := e.Metadata.(map[string]any); ok {
+			for k, v := range existing {
+				meta[k] = v
+			}
+		}
+		meta["unassigned_links_count"] = unassignCount
+		e.Metadata = meta
 		if err := auditor.WriteTx(ctx, tx, e); err != nil {
 			return err
 		}

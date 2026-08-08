@@ -26,6 +26,20 @@ export interface Link {
   click_count: number;
   /** Only present on the POST /api/links create response. */
   duplicate?: boolean;
+  /**
+   * Discrete campaign/UTM columns (#0099) — additive alongside
+   * destination_url, which keeps carrying the composed (baked) URL.
+   * campaign_id is null when the link is not assigned to a campaign; the
+   * five UTM fields and placement are "" when never set (including every
+   * link created before this migration).
+   */
+  campaign_id: number | null;
+  utm_source: string;
+  utm_medium: string;
+  utm_campaign: string;
+  utm_term: string;
+  utm_content: string;
+  placement: string;
 }
 
 /** GET /api/links — paginated list envelope. */
@@ -75,6 +89,36 @@ export interface TimeseriesResult {
 export interface LinkDetail extends Link {
   utm_stats?: ClickStats;
   timeseries?: TimeseriesResult;
+  /**
+   * Present only when the link is currently assigned to a campaign (#0099).
+   * "" otherwise, matching campaign_id being null.
+   */
+  campaign_name?: string;
+  campaign_slug?: string;
+}
+
+/**
+ * A campaign (GET /api/campaigns item, GET /api/campaigns/{slug}). Matches
+ * internal/handlers/campaigns.go `campaignView` (#0098). The default_utm_*
+ * fields are what selecting this campaign prefills onto the UTM builder —
+ * every prefilled value stays editable, the campaign never locks a field
+ * (#0099).
+ */
+export interface Campaign {
+  id: number;
+  name: string;
+  slug: string;
+  description: string;
+  starts_at: string | null;
+  ends_at: string | null;
+  archived: boolean;
+  default_utm_source: string;
+  default_utm_medium: string;
+  default_utm_campaign: string;
+  default_utm_term: string;
+  default_utm_content: string;
+  created_at: string;
+  updated_at: string;
 }
 
 /**

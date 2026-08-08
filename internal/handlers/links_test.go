@@ -3,14 +3,19 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
+	"github.com/brennanMKE/ShortLinks/internal/campaigns"
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
@@ -23,7 +28,7 @@ import (
 func linksMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewLinksHandler(links.NewStore(pool), nil, nil, nil, nil, clicks.NewStatsStore(pool))
+	h := NewLinksHandler(links.NewStore(pool), nil, nil, nil, nil, clicks.NewStatsStore(pool), campaigns.NewStore(pool))
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(h.Create)))
@@ -628,5 +633,424 @@ func TestLinks_Unauthenticated(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s %s status = %d, want 401", c.method, c.path, resp.StatusCode)
 		}
+	}
+}
+
+// ── #0099: discrete UTM columns, campaign resolution ────────────────────────
+
+// seedCampaign creates a campaign directly via the store (bypassing HTTP) so
+// link tests can set up a campaign fixture without standing up campaignsMux.
+func seedCampaign(t *testing.T, pool *pgxpool.Pool, userID int64, name string) campaigns.Campaign {
+	t.Helper()
+	c, err := campaigns.NewStore(pool).CreateCampaign(context.Background(), campaigns.NewCampaign{UserID: userID, Name: name}, nil, audit.Entry{})
+	if err != nil {
+		t.Fatalf("seedCampaign: %v", err)
+	}
+	return c
+}
+
+// patchLink PATCHes the given JSON body for the given key and returns the
+// decoded link view plus the HTTP status.
+func patchLink(t *testing.T, srv *httptest.Server, token, key, body string) (linkView, int) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/api/links/"+key, jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(withCookie(req, token))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	var v linkView
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	}
+	return v, resp.StatusCode
+}
+
+// getLinkDetail GETs the given key and returns the decoded detail view plus
+// the HTTP status.
+func getLinkDetail(t *testing.T, srv *httptest.Server, token, key string) (linkDetailView, int) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/links/"+key, nil)
+	resp, err := srv.Client().Do(withCookie(req, token))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	var v linkDetailView
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	}
+	return v, resp.StatusCode
+}
+
+// TestLinksCreate_DiscreteUTMColumnsMatchBakedURL is the acceptance
+// criterion's exact test: mirrors what the frontend's composeUtmUrl bakes
+// into destination_url (see web/src/lib/utm.ts) by sending the SAME five
+// values both baked into the query string AND as discrete fields, then
+// parses the STORED destination_url's query string and compares it
+// field-by-field against both the JSON response and a direct DB read — not
+// just that the fields are non-empty, but that they match what was actually
+// baked.
+func TestLinksCreate_DiscreteUTMColumnsMatchBakedURL(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+
+	body := `{
+		"destination_url":"https://example.com/landing?utm_source=email&utm_medium=newsletter&utm_campaign=summer-fair&utm_term=shoes&utm_content=banner1",
+		"utm_source":"email","utm_medium":"newsletter","utm_campaign":"summer-fair","utm_term":"shoes","utm_content":"banner1",
+		"placement":"18th and Texas board"
+	}`
+	created, status := postLink(t, srv, "alice-token", body)
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", status)
+	}
+
+	parsed, err := url.Parse(created.DestinationURL)
+	if err != nil {
+		t.Fatalf("parsing stored destination_url %q: %v", created.DestinationURL, err)
+	}
+	q := parsed.Query()
+
+	respFields := map[string]string{
+		"utm_source":   created.UTMSource,
+		"utm_medium":   created.UTMMedium,
+		"utm_campaign": created.UTMCampaign,
+		"utm_term":     created.UTMTerm,
+		"utm_content":  created.UTMContent,
+	}
+	for key, got := range respFields {
+		if want := q.Get(key); got != want {
+			t.Errorf("response linkView.%s = %q, want %q (parsed from the stored destination_url)", key, got, want)
+		}
+	}
+	if created.Placement != "18th and Texas board" {
+		t.Errorf("placement = %q, want %q", created.Placement, "18th and Texas board")
+	}
+
+	// Also read the row directly — the response could theoretically echo the
+	// request without ever persisting it.
+	var dbSource, dbMedium, dbCampaign, dbTerm, dbContent, dbPlacement string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COALESCE(utm_source,''), COALESCE(utm_medium,''), COALESCE(utm_campaign,''),
+		        COALESCE(utm_term,''), COALESCE(utm_content,''), COALESCE(placement,'')
+		   FROM links WHERE key = $1`,
+		created.Key,
+	).Scan(&dbSource, &dbMedium, &dbCampaign, &dbTerm, &dbContent, &dbPlacement); err != nil {
+		t.Fatalf("querying link row: %v", err)
+	}
+	if dbSource != q.Get("utm_source") || dbMedium != q.Get("utm_medium") || dbCampaign != q.Get("utm_campaign") ||
+		dbTerm != q.Get("utm_term") || dbContent != q.Get("utm_content") || dbPlacement != "18th and Texas board" {
+		t.Errorf("DB columns (%q,%q,%q,%q,%q,%q) do not match the baked URL's params / request placement",
+			dbSource, dbMedium, dbCampaign, dbTerm, dbContent, dbPlacement)
+	}
+}
+
+// TestLinksCreate_CampaignSlugAssignsLink asserts POST /api/links with
+// campaign_slug resolves it to the caller's own campaign and stores its id.
+func TestLinksCreate_CampaignSlugAssignsLink(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := seedCampaign(t, pool, alice, "Summer Fair")
+
+	created, status := postLink(t, srv, "alice-token",
+		`{"destination_url":"https://example.com","campaign_slug":"`+c.Slug+`"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", status)
+	}
+	if created.CampaignID == nil || *created.CampaignID != c.ID {
+		t.Errorf("campaign_id = %v, want %d", created.CampaignID, c.ID)
+	}
+}
+
+// TestLinksCreate_CampaignIDAssignsLink is the same as above via the
+// campaign_id field instead of campaign_slug.
+func TestLinksCreate_CampaignIDAssignsLink(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := seedCampaign(t, pool, alice, "Summer Fair")
+
+	created, status := postLink(t, srv, "alice-token",
+		fmt.Sprintf(`{"destination_url":"https://example.com","campaign_id":%d}`, c.ID))
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", status)
+	}
+	if created.CampaignID == nil || *created.CampaignID != c.ID {
+		t.Errorf("campaign_id = %v, want %d", created.CampaignID, c.ID)
+	}
+}
+
+// TestLinksCreate_CampaignOwnershipEnforced asserts user A cannot create a
+// link into user B's campaign — neither via campaign_slug nor campaign_id —
+// both report 404, the same indistinguishable response a nonexistent
+// campaign would produce, and no link is created.
+func TestLinksCreate_CampaignOwnershipEnforced(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	seedSession(t, pool, bob, "bob-token")
+	bobCampaign := seedCampaign(t, pool, bob, "Bob Campaign")
+
+	_, status := postLink(t, srv, "alice-token",
+		`{"destination_url":"https://example.com/by-slug","campaign_slug":"`+bobCampaign.Slug+`"}`)
+	if status != http.StatusNotFound {
+		t.Errorf("campaign_slug into bob's campaign: status = %d, want 404", status)
+	}
+
+	_, status = postLink(t, srv, "alice-token",
+		fmt.Sprintf(`{"destination_url":"https://example.com/by-id","campaign_id":%d}`, bobCampaign.ID))
+	if status != http.StatusNotFound {
+		t.Errorf("campaign_id into bob's campaign: status = %d, want 404", status)
+	}
+
+	if n := countUserURLLinks(t, pool, alice, "https://example.com/by-slug"); n != 0 {
+		t.Errorf("links created despite ownership rejection (slug) = %d, want 0", n)
+	}
+	if n := countUserURLLinks(t, pool, alice, "https://example.com/by-id"); n != 0 {
+		t.Errorf("links created despite ownership rejection (id) = %d, want 0", n)
+	}
+}
+
+// TestLinksPatch_UpdatesDiscreteUTMColumns proves editing a link updates the
+// discrete UTM columns in lockstep with a changed destination_url — closing
+// the #0048 edit-repopulation limitation end to end (not just reading old
+// values back, but writing new ones). Verified via a follow-up GET so the
+// assertion is against persisted state, not PATCH's own echoed response.
+func TestLinksPatch_UpdatesDiscreteUTMColumns(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+
+	created, status := postLink(t, srv, "alice-token",
+		`{"destination_url":"https://example.com?utm_source=email","utm_source":"email"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201", status)
+	}
+
+	patched, status := patchLink(t, srv, "alice-token", created.Key,
+		`{"destination_url":"https://example.com?utm_source=twitter&utm_medium=social","utm_source":"twitter","utm_medium":"social"}`)
+	if status != http.StatusOK {
+		t.Fatalf("patch status = %d, want 200", status)
+	}
+	if patched.UTMSource != "twitter" || patched.UTMMedium != "social" {
+		t.Errorf("PATCH response utm_source=%q utm_medium=%q, want twitter/social", patched.UTMSource, patched.UTMMedium)
+	}
+
+	detail, status := getLinkDetail(t, srv, "alice-token", created.Key)
+	if status != http.StatusOK {
+		t.Fatalf("get status = %d, want 200", status)
+	}
+	if detail.UTMSource != "twitter" || detail.UTMMedium != "social" {
+		t.Errorf("GET after PATCH utm_source=%q utm_medium=%q, want twitter/social (not persisted)", detail.UTMSource, detail.UTMMedium)
+	}
+}
+
+// TestLinksGet_PreMigrationLinkHasEmptyUTMFields is the acceptance
+// criterion's other half: "a link created before this migration (all-NULL
+// columns) opens with empty fields rather than erroring". seedLink inserts a
+// row the same way the pre-#0099 schema would have (no campaign_id/utm_*/
+// placement columns populated), so GetLink's LEFT JOIN and NULL-mapping must
+// handle every one of the seven new columns being NULL without a scan error.
+func TestLinksGet_PreMigrationLinkHasEmptyUTMFields(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	seedLink(t, pool, alice, "oldlink", "https://example.com/pre-migration")
+
+	detail, status := getLinkDetail(t, srv, "alice-token", "oldlink")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (must not error scanning NULL UTM/campaign columns)", status)
+	}
+	if detail.UTMSource != "" || detail.UTMMedium != "" || detail.UTMCampaign != "" ||
+		detail.UTMTerm != "" || detail.UTMContent != "" || detail.Placement != "" {
+		t.Errorf("UTM/placement fields = %+v, want all empty for a pre-migration (all-NULL) link", detail.linkView)
+	}
+	if detail.CampaignID != nil {
+		t.Errorf("campaign_id = %v, want nil", detail.CampaignID)
+	}
+	if detail.CampaignName != "" || detail.CampaignSlug != "" {
+		t.Errorf("campaign_name=%q campaign_slug=%q, want both empty", detail.CampaignName, detail.CampaignSlug)
+	}
+}
+
+// TestLinksGet_IncludesCampaignNameAndSlug asserts the link-detail response
+// carries the assigned campaign's name and slug (#0099's extension to the
+// detail response), not just its id.
+func TestLinksGet_IncludesCampaignNameAndSlug(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := seedCampaign(t, pool, alice, "Summer Fair")
+
+	created, status := postLink(t, srv, "alice-token",
+		`{"destination_url":"https://example.com","campaign_id":`+strconv.FormatInt(c.ID, 10)+`}`)
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", status)
+	}
+
+	detail, status := getLinkDetail(t, srv, "alice-token", created.Key)
+	if status != http.StatusOK {
+		t.Fatalf("get status = %d, want 200", status)
+	}
+	if detail.CampaignName != "Summer Fair" || detail.CampaignSlug != c.Slug {
+		t.Errorf("campaign_name=%q campaign_slug=%q, want %q/%q", detail.CampaignName, detail.CampaignSlug, "Summer Fair", c.Slug)
+	}
+}
+
+// TestLinksCreate_DedupForwardMergesCampaignAndUTMOnActiveDuplicate is the
+// #0099 review's item 4 decision, proven at the HTTP layer: a second
+// POST for a URL that already has an ACTIVE link is a no-write dedup match
+// (duplicate:true), but campaign_id/utm_*/placement supplied on THIS request
+// are forward-merged onto the existing row rather than silently discarded —
+// otherwise a user who picks a campaign on the create form and happens to
+// hit an existing URL would see it silently not applied.
+func TestLinksCreate_DedupForwardMergesCampaignAndUTMOnActiveDuplicate(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := seedCampaign(t, pool, alice, "Summer Fair")
+	const dest = "https://example.org/dedup-merge"
+
+	first, status := postLink(t, srv, "alice-token", `{"destination_url":"`+dest+`"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("first POST status = %d, want 201", status)
+	}
+	if first.CampaignID != nil || first.UTMSource != "" {
+		t.Fatalf("precondition: first link already has campaign/UTM set")
+	}
+
+	second, status := postLink(t, srv, "alice-token",
+		fmt.Sprintf(`{"destination_url":"%s","campaign_id":%d,"utm_source":"email","placement":"18th and Texas board"}`, dest, c.ID))
+	if status != http.StatusCreated {
+		t.Fatalf("second (duplicate) POST status = %d, want 201", status)
+	}
+	if second.Duplicate == nil || !*second.Duplicate {
+		t.Errorf("duplicate = %v, want true (still a dedup match, not a second row)", second.Duplicate)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second id=%d, want same row as first id=%d", second.ID, first.ID)
+	}
+	if second.CampaignID == nil || *second.CampaignID != c.ID {
+		t.Errorf("response campaign_id = %v, want %d (forward-merged, not discarded)", second.CampaignID, c.ID)
+	}
+	if second.UTMSource != "email" || second.Placement != "18th and Texas board" {
+		t.Errorf("response utm_source=%q placement=%q, want email / 18th and Texas board", second.UTMSource, second.Placement)
+	}
+
+	// Confirm it is persisted, not just echoed.
+	detail, status := getLinkDetail(t, srv, "alice-token", first.Key)
+	if status != http.StatusOK {
+		t.Fatalf("get status = %d, want 200", status)
+	}
+	if detail.CampaignID == nil || *detail.CampaignID != c.ID || detail.UTMSource != "email" {
+		t.Errorf("persisted campaign_id=%v utm_source=%q, want %d / email", detail.CampaignID, detail.UTMSource, c.ID)
+	}
+	if n := countUserURLLinks(t, pool, alice, dest); n != 1 {
+		t.Errorf("row count = %d, want 1 (still a dedup match, no second row created)", n)
+	}
+}
+
+// TestLinksCreate_DedupDoesNotClearExistingMetadataOnBareResubmit is the
+// other half of the item 4 decision: the merge is FORWARD-ONLY. A bare
+// re-submission (no campaign_id, no UTM fields) of a URL that already has
+// campaign/UTM metadata set must NOT null them out — only a request that
+// actually supplies a value may change one.
+func TestLinksCreate_DedupDoesNotClearExistingMetadataOnBareResubmit(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := seedCampaign(t, pool, alice, "Summer Fair")
+	const dest = "https://example.org/dedup-no-clear"
+
+	first, status := postLink(t, srv, "alice-token",
+		fmt.Sprintf(`{"destination_url":"%s","campaign_id":%d,"utm_source":"email"}`, dest, c.ID))
+	if status != http.StatusCreated {
+		t.Fatalf("first POST status = %d, want 201", status)
+	}
+	if first.CampaignID == nil || first.UTMSource != "email" {
+		t.Fatalf("precondition: first link should already carry campaign/UTM")
+	}
+
+	// Bare re-submission: no campaign_id, no UTM fields at all.
+	second, status := postLink(t, srv, "alice-token", `{"destination_url":"`+dest+`"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("second (bare) POST status = %d, want 201", status)
+	}
+	if second.CampaignID == nil || *second.CampaignID != c.ID {
+		t.Errorf("campaign_id after bare resubmit = %v, want still %d (forward merge must not clear)", second.CampaignID, c.ID)
+	}
+	if second.UTMSource != "email" {
+		t.Errorf("utm_source after bare resubmit = %q, want still %q", second.UTMSource, "email")
+	}
+}
+
+// TestLinksCreate_DedupForwardMergesOnReactivate proves the same forward
+// merge applies on the OutcomeReactivated branch, not just active-duplicate.
+func TestLinksCreate_DedupForwardMergesOnReactivate(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := seedCampaign(t, pool, alice, "Summer Fair")
+	const dest = "https://example.org/dedup-reactivate-merge"
+
+	first, status := postLink(t, srv, "alice-token", `{"destination_url":"`+dest+`"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("first POST status = %d, want 201", status)
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE links SET active = FALSE WHERE id = $1`, first.ID); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+
+	reactivated, status := postLink(t, srv, "alice-token",
+		fmt.Sprintf(`{"destination_url":"%s","campaign_id":%d,"utm_medium":"newsletter"}`, dest, c.ID))
+	if status != http.StatusCreated {
+		t.Fatalf("reactivate POST status = %d, want 201", status)
+	}
+	if !reactivated.Active {
+		t.Fatalf("reactivated link is not active")
+	}
+	if reactivated.CampaignID == nil || *reactivated.CampaignID != c.ID {
+		t.Errorf("campaign_id on reactivate = %v, want %d", reactivated.CampaignID, c.ID)
+	}
+	if reactivated.UTMMedium != "newsletter" {
+		t.Errorf("utm_medium on reactivate = %q, want newsletter", reactivated.UTMMedium)
 	}
 }

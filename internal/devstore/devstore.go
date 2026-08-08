@@ -575,6 +575,21 @@ func (s *Store) GetCampaignBySlug(_ context.Context, userID int64, slug string) 
 	return campaigns.Campaign{}, campaigns.ErrCampaignNotFound
 }
 
+// GetCampaignByID returns a campaign by id, scoped to userID — mirrors
+// campaigns.Store.GetCampaignByID. Backs POST /api/links' optional
+// campaign_id field (#0099) in dev mode the same way GetCampaignBySlug backs
+// campaign_slug.
+func (s *Store) GetCampaignByID(_ context.Context, userID, id int64) (campaigns.Campaign, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.campaigns {
+		if c.UserID == userID && c.ID == id {
+			return cloneCampaign(c), nil
+		}
+	}
+	return campaigns.Campaign{}, campaigns.ErrCampaignNotFound
+}
+
 // UpdateCampaign applies a partial update to userID's own campaign (by slug).
 // Matches campaigns.Store.UpdateCampaign's no-op behavior: an update with no
 // fields set does NOT touch UpdatedAt (see the len(setClauses)==0 early
@@ -642,6 +657,19 @@ func (s *Store) DeleteCampaign(_ context.Context, userID int64, slug string, _ *
 	defer s.mu.Unlock()
 	for i, c := range s.campaigns {
 		if c.UserID == userID && c.Slug == slug {
+			// Mirror migration 000011's ON DELETE SET NULL: every link
+			// currently assigned to this campaign is unassigned, not left
+			// pointing at a now-deleted id. Without this, dev mode drifts
+			// from Postgres (a link would keep a dead campaign_id, and
+			// GetLink's campaign lookup would silently show no name/slug for
+			// an id ListLinksForCampaign still matches on) — exactly the
+			// kind of gap #0098's downstream constraint 2 exists to prevent,
+			// since #0103 builds against ./scripts/dev.sh.
+			for j := range s.links {
+				if s.links[j].CampaignID != nil && *s.links[j].CampaignID == c.ID {
+					s.links[j].CampaignID = nil
+				}
+			}
 			s.campaigns = append(s.campaigns[:i], s.campaigns[i+1:]...)
 			return nil
 		}
@@ -663,6 +691,97 @@ func (s *Store) KeyExists(_ context.Context, key string) (bool, error) {
 	return false, nil
 }
 
+// copyInt64Ptr returns a fresh copy of p (nil in, nil out). Mirrors
+// copyTimePtr's rationale above (campaigns.Campaign's StartsAt/EndsAt),
+// applied here to links.Link.CampaignID (#0099): without this, storing a
+// caller's pointer directly — or returning the store's own pointer directly
+// — would alias mutable state across the store boundary. Applied on every
+// write into s.links AND every read out of it, per the #0098 gotcha ("do not
+// reintroduce the pattern for any new pointer fields").
+func copyInt64Ptr(p *int64) *int64 {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// cloneLink returns a copy of l whose CampaignID points at a freshly
+// allocated int64, sharing no pointer with l, and with CampaignName/
+// CampaignSlug populated from the matching campaign row (mirroring
+// links.Store.GetLink's LEFT JOIN) when it has one. Called on every
+// links.Link that crosses the store boundary in either direction so mutating
+// a pointer on one side can never reach the other. Caller must hold s.mu.
+func (s *Store) cloneLink(l links.Link) links.Link {
+	l.CampaignID = copyInt64Ptr(l.CampaignID)
+	l.CampaignName = ""
+	l.CampaignSlug = ""
+	if l.CampaignID != nil {
+		for _, c := range s.campaigns {
+			if c.ID == *l.CampaignID {
+				l.CampaignName = c.Name
+				l.CampaignSlug = c.Slug
+				break
+			}
+		}
+	}
+	return l
+}
+
+// newLinkFromInput mirrors links.Store's helper of the same name: builds the
+// in-memory Link from a NewLink's fields (everything except the
+// store-generated id/created_at), including the #0099 campaign/UTM/placement
+// columns. CampaignID is deep-copied so the stored link never shares a
+// pointer with the caller's NewLink.
+func newLinkFromInput(in links.NewLink) links.Link {
+	return links.Link{
+		UserID:         in.UserID,
+		Key:            in.Key,
+		DestinationURL: in.DestinationURL,
+		Title:          in.Title,
+		Active:         true,
+		DeniedReason:   0,
+		ExpiresAt:      in.ExpiresAt,
+		CampaignID:     copyInt64Ptr(in.CampaignID),
+		UTMSource:      in.UTMSource,
+		UTMMedium:      in.UTMMedium,
+		UTMCampaign:    in.UTMCampaign,
+		UTMTerm:        in.UTMTerm,
+		UTMContent:     in.UTMContent,
+		Placement:      in.Placement,
+	}
+}
+
+// applyRequestedMetadata mirrors links.Store's applyRequestedMetadataTx
+// (#0099 review item 4): on a CreateOrReactivateLink duplicate/reactivate
+// match, forward-merges campaign_id/utm_*/placement from a NewLink onto the
+// matched *links.Link in place — a field the request actually supplied
+// (non-nil CampaignID, non-blank UTM/placement) is written; a blank field is
+// left untouched, never cleared. Caller must hold s.mu.
+func applyRequestedMetadata(l *links.Link, in links.NewLink) {
+	if in.CampaignID != nil {
+		l.CampaignID = copyInt64Ptr(in.CampaignID)
+	}
+	if in.UTMSource != "" {
+		l.UTMSource = in.UTMSource
+	}
+	if in.UTMMedium != "" {
+		l.UTMMedium = in.UTMMedium
+	}
+	if in.UTMCampaign != "" {
+		l.UTMCampaign = in.UTMCampaign
+	}
+	if in.UTMTerm != "" {
+		l.UTMTerm = in.UTMTerm
+	}
+	if in.UTMContent != "" {
+		l.UTMContent = in.UTMContent
+	}
+	if in.Placement != "" {
+		l.Placement = in.Placement
+	}
+}
+
 // CreateLink inserts a new active link.
 func (s *Store) CreateLink(_ context.Context, in links.NewLink) (links.Link, error) {
 	s.mu.Lock()
@@ -672,21 +791,12 @@ func (s *Store) CreateLink(_ context.Context, in links.NewLink) (links.Link, err
 			return links.Link{}, links.ErrKeyTaken
 		}
 	}
-	now := time.Now()
-	l := links.Link{
-		ID:             s.nextLinkID,
-		UserID:         in.UserID,
-		Key:            in.Key,
-		DestinationURL: in.DestinationURL,
-		Title:          in.Title,
-		Active:         true,
-		DeniedReason:   0,
-		CreatedAt:      now,
-		ExpiresAt:      in.ExpiresAt,
-	}
+	l := newLinkFromInput(in)
+	l.ID = s.nextLinkID
+	l.CreatedAt = time.Now()
 	s.nextLinkID++
 	s.links = append(s.links, l)
-	return l, nil
+	return s.cloneLink(l), nil
 }
 
 // CreateOrReactivateLink implements per-user URL deduplication.
@@ -698,10 +808,12 @@ func (s *Store) CreateOrReactivateLink(_ context.Context, in links.NewLink, genK
 	for i, l := range s.links {
 		if l.UserID == in.UserID && l.DestinationURL == in.DestinationURL && l.DeniedReason == 0 {
 			if l.Active {
-				return l, links.OutcomeActiveDuplicate, nil
+				applyRequestedMetadata(&s.links[i], in)
+				return s.cloneLink(s.links[i]), links.OutcomeActiveDuplicate, nil
 			}
 			s.links[i].Active = true
-			return s.links[i], links.OutcomeReactivated, nil
+			applyRequestedMetadata(&s.links[i], in)
+			return s.cloneLink(s.links[i]), links.OutcomeReactivated, nil
 		}
 	}
 
@@ -718,21 +830,13 @@ func (s *Store) CreateOrReactivateLink(_ context.Context, in links.NewLink, genK
 		return links.Link{}, 0, err
 	}
 
-	now := time.Now()
-	l := links.Link{
-		ID:             s.nextLinkID,
-		UserID:         in.UserID,
-		Key:            key,
-		DestinationURL: in.DestinationURL,
-		Title:          in.Title,
-		Active:         true,
-		DeniedReason:   0,
-		CreatedAt:      now,
-		ExpiresAt:      in.ExpiresAt,
-	}
+	l := newLinkFromInput(in)
+	l.ID = s.nextLinkID
+	l.Key = key
+	l.CreatedAt = time.Now()
 	s.nextLinkID++
 	s.links = append(s.links, l)
-	return l, links.OutcomeInserted, nil
+	return s.cloneLink(l), links.OutcomeInserted, nil
 }
 
 // CreateDeniedLink inserts a denied link row.
@@ -752,21 +856,15 @@ func (s *Store) CreateDeniedLink(_ context.Context, in links.NewLink, reasonCode
 		return links.Link{}, err
 	}
 
-	now := time.Now()
-	l := links.Link{
-		ID:             s.nextLinkID,
-		UserID:         in.UserID,
-		Key:            key,
-		DestinationURL: in.DestinationURL,
-		Title:          in.Title,
-		Active:         false,
-		DeniedReason:   reasonCode,
-		CreatedAt:      now,
-		ExpiresAt:      in.ExpiresAt,
-	}
+	l := newLinkFromInput(in)
+	l.ID = s.nextLinkID
+	l.Key = key
+	l.Active = false
+	l.DeniedReason = reasonCode
+	l.CreatedAt = time.Now()
 	s.nextLinkID++
 	s.links = append(s.links, l)
-	return l, nil
+	return s.cloneLink(l), nil
 }
 
 // ListLinks returns the user's links, most recent first, paginated.
@@ -777,7 +875,7 @@ func (s *Store) ListLinks(_ context.Context, userID int64, limit, offset int) ([
 	var owned []links.Link
 	for i := len(s.links) - 1; i >= 0; i-- {
 		if s.links[i].UserID == userID {
-			owned = append(owned, s.links[i])
+			owned = append(owned, s.cloneLink(s.links[i]))
 		}
 	}
 	if offset >= len(owned) {
@@ -803,16 +901,33 @@ func (s *Store) CountLinks(_ context.Context, userID int64) (int64, error) {
 	return n, nil
 }
 
-// GetLink returns a single link by key scoped to userID.
+// GetLink returns a single link by key scoped to userID, with its campaign
+// name/slug populated (via cloneLink) when it is assigned to one.
 func (s *Store) GetLink(_ context.Context, userID int64, key string) (links.Link, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, l := range s.links {
 		if l.UserID == userID && l.Key == key {
-			return l, nil
+			return s.cloneLink(l), nil
 		}
 	}
 	return links.Link{}, links.ErrLinkNotFound
+}
+
+// ListLinksForCampaign returns every link assigned to campaignID, scoped to
+// userID, most-recently-created first — mirrors
+// links.Store.ListLinksForCampaign.
+func (s *Store) ListLinksForCampaign(_ context.Context, userID, campaignID int64) ([]links.Link, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]links.Link, 0)
+	for i := len(s.links) - 1; i >= 0; i-- {
+		l := s.links[i]
+		if l.UserID == userID && l.CampaignID != nil && *l.CampaignID == campaignID {
+			out = append(out, s.cloneLink(l))
+		}
+	}
+	return out, nil
 }
 
 // UpdateLink applies a partial update to the user's own link.
@@ -832,9 +947,59 @@ func (s *Store) UpdateLink(_ context.Context, userID int64, key string, upd link
 		if upd.ExpiresAt != nil {
 			s.links[i].ExpiresAt = *upd.ExpiresAt
 		}
-		return s.links[i], nil
+		if upd.UTMSource != nil {
+			s.links[i].UTMSource = *upd.UTMSource
+		}
+		if upd.UTMMedium != nil {
+			s.links[i].UTMMedium = *upd.UTMMedium
+		}
+		if upd.UTMCampaign != nil {
+			s.links[i].UTMCampaign = *upd.UTMCampaign
+		}
+		if upd.UTMTerm != nil {
+			s.links[i].UTMTerm = *upd.UTMTerm
+		}
+		if upd.UTMContent != nil {
+			s.links[i].UTMContent = *upd.UTMContent
+		}
+		if upd.Placement != nil {
+			s.links[i].Placement = *upd.Placement
+		}
+		return s.cloneLink(s.links[i]), nil
 	}
 	return links.Link{}, links.ErrLinkNotFound
+}
+
+// AssignLinkToCampaign moves userID's own link (by id) into userID's own
+// campaign (by id), overwriting any prior assignment — mirrors
+// campaigns.Store.AssignLinkToCampaign's "moves it" decision. Returns
+// campaigns.ErrLinkNotFound when no matching, owned link exists.
+func (s *Store) AssignLinkToCampaign(_ context.Context, userID, campaignID, linkID int64, _ *audit.Logger, _ audit.Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, l := range s.links {
+		if l.ID == linkID && l.UserID == userID {
+			id := campaignID
+			s.links[i].CampaignID = &id
+			return nil
+		}
+	}
+	return campaigns.ErrLinkNotFound
+}
+
+// UnassignLinkFromCampaign clears userID's own link's campaign_id, but only
+// if it currently points at campaignID — mirrors
+// campaigns.Store.UnassignLinkFromCampaign.
+func (s *Store) UnassignLinkFromCampaign(_ context.Context, userID, campaignID, linkID int64, _ *audit.Logger, _ audit.Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, l := range s.links {
+		if l.ID == linkID && l.UserID == userID && l.CampaignID != nil && *l.CampaignID == campaignID {
+			s.links[i].CampaignID = nil
+			return nil
+		}
+	}
+	return campaigns.ErrLinkNotFound
 }
 
 // DeactivateLink soft-deletes the user's own link.
@@ -1076,6 +1241,22 @@ var _ interface {
 	DeactivateLink(ctx context.Context, userID int64, key string) error
 } = (*Store)(nil)
 
+// linksHandler's campaignLookup interface (#0099): resolving an optional
+// POST /api/links campaign_id/campaign_slug in dev mode.
+var _ interface {
+	GetCampaignByID(ctx context.Context, userID, id int64) (campaigns.Campaign, error)
+	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
+} = (*Store)(nil)
+
+// campaignLinksProvider (handlers.CampaignsHandler's link-membership
+// endpoints, #0099): GetLink and ListLinksForCampaign are already pinned
+// above/below by other assertions; ListLinksForCampaign is unique to this
+// interface.
+var _ interface {
+	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
+	ListLinksForCampaign(ctx context.Context, userID, campaignID int64) ([]links.Link, error)
+} = (*Store)(nil)
+
 var _ interface {
 	ListSettings(ctx context.Context) ([]auth.Setting, error)
 	UpdateSetting(ctx context.Context, key, value string, now time.Time) (string, error)
@@ -1119,6 +1300,8 @@ var _ interface {
 	DeleteCampaign(ctx context.Context, userID int64, slug string, auditor *audit.Logger, entry audit.Entry) error
 	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.Campaign, error)
 	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
+	AssignLinkToCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
+	UnassignLinkFromCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
 } = (*Store)(nil)
 
 var _ interface {

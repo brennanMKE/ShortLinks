@@ -40,6 +40,16 @@ type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// linkColumns is the SELECT list (in scanLink's expected order) shared by
+// every query that returns a base Link row: the original nine columns plus
+// the #0099 campaign_id/utm_*/placement columns. Click count is appended by
+// each caller separately (a correlated subquery in lockExisting/GetLink, a
+// LEFT JOIN aggregate in ListLinks/ListLinksForCampaign), so it is not part
+// of this shared constant.
+const linkColumns = `l.id, l.user_id, l.key, l.destination_url, l.title,
+	        l.active, l.denied_reason, l.created_at, l.expires_at,
+	        l.campaign_id, l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.utm_content, l.placement`
+
 // Store is the data-access layer for links: create, list, fetch, update, and
 // deactivate. Every method is scoped to an owning user id so a request can only
 // ever touch its own links; ownership is enforced in SQL (the WHERE clause),
@@ -60,6 +70,13 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 // Link is the full domain representation of a links row plus its aggregated
 // click count. It is the shape returned by every store read and is mapped 1:1
 // to the API JSON by the handler.
+//
+// CampaignID/UTM*/Placement are the #0099 discrete columns: additive
+// alongside DestinationURL, which keeps carrying the composed (baked) URL.
+// CampaignName/CampaignSlug are populated ONLY by GetLink's LEFT JOIN onto
+// campaigns (empty "" elsewhere — ListLinks/ListLinksForCampaign/Create* do
+// not join campaigns, since the issue only requires the campaign's name/slug
+// on the single-link detail response).
 type Link struct {
 	ID             int64
 	UserID         int64
@@ -71,6 +88,15 @@ type Link struct {
 	CreatedAt      time.Time
 	ExpiresAt      *time.Time // nil = never expires
 	ClickCount     int64
+	CampaignID     *int64 // nil = not assigned to a campaign
+	UTMSource      string // empty when the column is NULL
+	UTMMedium      string
+	UTMCampaign    string
+	UTMTerm        string
+	UTMContent     string
+	Placement      string
+	CampaignName   string // populated only by GetLink; "" elsewhere
+	CampaignSlug   string // populated only by GetLink; "" elsewhere
 }
 
 // KeyExists reports whether any link already uses the given key. The key column
@@ -95,6 +121,23 @@ type NewLink struct {
 	DestinationURL string
 	Title          string     // "" stored as SQL NULL
 	ExpiresAt      *time.Time // nil = never expires
+	// CampaignID assigns the link to a campaign at create time; nil = no
+	// campaign. The caller (handler) is responsible for having verified the
+	// campaign belongs to UserID before setting this — the store does not
+	// re-check ownership here since the INSERT has no existing row to scope a
+	// WHERE clause against (unlike UPDATE/DELETE elsewhere in this package).
+	CampaignID *int64
+	// UTMSource..UTMContent are the #0099 discrete UTM columns, populated by
+	// the handler from the SAME request fields the composed DestinationURL
+	// was built from — the two are expected to agree (see
+	// TestCreateLink_DiscreteUTMColumnsMatchBakedURL), but the store does not
+	// verify that itself; it stores exactly what it is given.
+	UTMSource   string // "" stored as SQL NULL
+	UTMMedium   string
+	UTMCampaign string
+	UTMTerm     string
+	UTMContent  string
+	Placement   string
 }
 
 // CreateLink inserts a new active, non-denied link and returns the full row
@@ -116,23 +159,19 @@ type NewLink struct {
 //   - #0025 audit (link.created) and #0026 SSE (link.created broadcast) run
 //     AFTER a successful create/reactivate.
 func (s *Store) CreateLink(ctx context.Context, in NewLink) (Link, error) {
-	link := Link{
-		UserID:         in.UserID,
-		Key:            in.Key,
-		DestinationURL: in.DestinationURL,
-		Title:          in.Title,
-		Active:         true,
-		DeniedReason:   0,
-	}
+	link := newLinkFromInput(in)
 	var title *string
 	if in.Title != "" {
 		title = &in.Title
 	}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at)
-		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now())
+		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, in.Key, in.DestinationURL, title, in.ExpiresAt,
+		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement),
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -142,6 +181,38 @@ func (s *Store) CreateLink(ctx context.Context, in NewLink) (Link, error) {
 		return Link{}, fmt.Errorf("links: inserting link: %w", err)
 	}
 	return link, nil
+}
+
+// newLinkFromInput builds the in-memory Link that mirrors a fresh INSERT's
+// column values (everything except the DB-generated id/created_at, and
+// expires_at which the RETURNING clause echoes back identically). Shared by
+// CreateLink, CreateDeniedLink, and CreateOrReactivateLink's insert branch so
+// the three insert paths cannot drift on which NewLink fields get copied.
+func newLinkFromInput(in NewLink) Link {
+	return Link{
+		UserID:         in.UserID,
+		Key:            in.Key,
+		DestinationURL: in.DestinationURL,
+		Title:          in.Title,
+		Active:         true,
+		DeniedReason:   0,
+		CampaignID:     in.CampaignID,
+		UTMSource:      in.UTMSource,
+		UTMMedium:      in.UTMMedium,
+		UTMCampaign:    in.UTMCampaign,
+		UTMTerm:        in.UTMTerm,
+		UTMContent:     in.UTMContent,
+		Placement:      in.Placement,
+	}
+}
+
+// nullIfEmpty maps an empty string to nil so an unset nullable TEXT column
+// stores SQL NULL rather than an empty string.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // CreateDeniedLink inserts a denied link row (active=false, denied_reason=code)
@@ -164,23 +235,22 @@ func (s *Store) CreateDeniedLink(ctx context.Context, in NewLink, reasonCode int
 		return Link{}, err
 	}
 
-	link := Link{
-		UserID:         in.UserID,
-		Key:            key,
-		DestinationURL: in.DestinationURL,
-		Title:          in.Title,
-		Active:         false,
-		DeniedReason:   reasonCode,
-	}
+	link := newLinkFromInput(in)
+	link.Key = key
+	link.Active = false
+	link.DeniedReason = reasonCode
 	var title *string
 	if in.Title != "" {
 		title = &in.Title
 	}
 	err = s.pool.QueryRow(ctx,
-		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at)
-		 VALUES ($1, $2, $3, $4, $5, FALSE, $6, now())
+		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement)
+		 VALUES ($1, $2, $3, $4, $5, FALSE, $6, now(), $7, $8, $9, $10, $11, $12, $13)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, key, in.DestinationURL, title, in.ExpiresAt, reasonCode,
+		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement),
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -222,8 +292,9 @@ const (
 // (userID, destinationURL) — the (user_id, destination_url) WHERE denied_reason=0
 // index backs this:
 //
-//   - active match found  → returned unchanged, OutcomeActiveDuplicate (no write).
-//   - inactive match found → reactivated (active=true), OutcomeReactivated.
+//   - active match found  → OutcomeActiveDuplicate (see #0099 note below).
+//   - inactive match found → reactivated (active=true), OutcomeReactivated
+//     (same #0099 note applies).
 //   - no match            → genKey mints a unique key (collisions checked inside
 //     the tx) and a new active link is inserted, OutcomeInserted.
 //
@@ -232,6 +303,35 @@ const (
 // authoritative row (ClickCount is 0 for a fresh insert; the dedup/reactivate
 // branches re-read the row's click count is left at the persisted aggregate via
 // the RETURNING-then-count path below).
+//
+// #0099 DECISION (review item 4): on a duplicate/reactivate match, this
+// method used to return the existing row completely unchanged — silently
+// discarding any campaign_id/utm_*/placement the CALLER of this specific
+// request supplied. That was a bad experience: a user who picks a campaign
+// on the create form and happens to hit an existing URL would see the
+// campaign silently not applied. Instead, applyRequestedMetadataTx
+// FORWARD-MERGES: a field the request actually supplied (non-nil
+// CampaignID, non-blank UTM/placement) is written onto the matched row; a
+// field the request left blank is NEVER cleared here. This is deliberately
+// NOT a full overwrite — a bare `POST {"destination_url": "..."}`
+// re-submission (no campaign, no UTM) must not wipe out a campaign
+// assignment or UTM values an earlier create already set on that same row.
+// See TestLinksCreate_DedupForwardMergesCampaignAndUTMOnActiveDuplicate,
+// TestLinksCreate_DedupDoesNotClearExistingMetadataOnBareResubmit, and
+// TestLinksCreate_DedupForwardMergesOnReactivate in internal/handlers.
+//
+// CORRECTION (a later review pass caught the original version of this
+// comment overclaiming): forward-merge does NOT close #0105's batch-creation
+// trap. Two batch rows differing only in `placement` still compose to the
+// IDENTICAL destination_url (placement is never baked into the URL), so the
+// dedup lookup above still matches them to the same row — row 2 does not
+// become a second link. What forward-merge changes is what happens to that
+// one row: before, row 2's placement was silently ignored; now, row 2's
+// placement silently OVERWRITES row 1's. That is arguably a worse outcome
+// for a genuine two-row batch, though still the right behavior for a
+// genuine duplicate submission of the same link. #0105 owns the actual fix
+// (giving batch rows distinguishable destination_urls, or a dedup key that
+// is not destination_url alone); this method does not attempt it.
 func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) (Link, CreateOutcome, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -246,8 +346,13 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	existing, err := s.lockExisting(ctx, tx, in.UserID, in.DestinationURL)
 	switch {
 	case err == nil:
-		// A match exists. Active → return as-is; inactive → reactivate.
+		// A match exists. Active → forward-merge requested metadata, return;
+		// inactive → reactivate, then forward-merge.
 		if existing.Active {
+			existing, err = applyRequestedMetadataTx(ctx, tx, existing, in)
+			if err != nil {
+				return Link{}, 0, err
+			}
 			if err := tx.Commit(ctx); err != nil {
 				return Link{}, 0, fmt.Errorf("links: commit dedup tx: %w", err)
 			}
@@ -259,6 +364,10 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 			return Link{}, 0, fmt.Errorf("links: reactivating link: %w", err)
 		}
 		existing.Active = true
+		existing, err = applyRequestedMetadataTx(ctx, tx, existing, in)
+		if err != nil {
+			return Link{}, 0, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return Link{}, 0, fmt.Errorf("links: commit dedup tx: %w", err)
 		}
@@ -284,23 +393,20 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 		return Link{}, 0, err
 	}
 
-	link := Link{
-		UserID:         in.UserID,
-		Key:            key,
-		DestinationURL: in.DestinationURL,
-		Title:          in.Title,
-		Active:         true,
-		DeniedReason:   0,
-	}
+	link := newLinkFromInput(in)
+	link.Key = key
 	var title *string
 	if in.Title != "" {
 		title = &in.Title
 	}
 	err = tx.QueryRow(ctx,
-		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at)
-		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now())
+		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, key, in.DestinationURL, title, in.ExpiresAt,
+		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement),
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -315,14 +421,85 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	return link, OutcomeInserted, nil
 }
 
+// applyRequestedMetadataTx forward-merges in's campaign_id/utm_*/placement
+// onto existing (an already row-locked match from lockExisting), inside the
+// caller's transaction. Only fields the request actually supplied are
+// written: a non-nil in.CampaignID, and each UTM/Placement field that is
+// non-empty after trimming (the handler has already trimmed these before
+// building NewLink). A blank field is left completely alone — this is a
+// forward merge, not an overwrite, so a bare re-submission of an existing
+// URL can never silently clear a campaign assignment or UTM values a
+// previous create already set. See CreateOrReactivateLink's doc comment for
+// the full #0099 review rationale (item 4). Returns existing with its
+// in-memory fields updated to match what was written, or an error if the
+// UPDATE itself fails; when no field qualifies, it is a no-op and existing
+// is returned unchanged.
+//
+// The UPDATE re-asserts `user_id = existing.UserID` in its own WHERE clause,
+// symmetric with every other ownership-scoped write in this package. This id
+// cannot actually be attacker-controlled today (existing came from
+// lockExisting's own user_id-scoped, row-locked lookup earlier in the same
+// transaction, so it is already known to belong to the caller), but a
+// defense-in-depth check should not be the one write in the package missing
+// its own re-assertion (review item 3) — cheap insurance against this
+// function someday being called from a path where that invariant no longer
+// holds by construction.
+func applyRequestedMetadataTx(ctx context.Context, tx pgx.Tx, existing Link, in NewLink) (Link, error) {
+	setClauses := make([]string, 0, 6)
+	// $1 and $2 are reserved for the WHERE clause (id, user_id); SET params
+	// start at $3. existing.UserID is already known-correct: it came from
+	// lockExisting's own user_id-scoped, FOR UPDATE lookup earlier in this
+	// same transaction, so re-asserting it here costs nothing and is not
+	// reachable via any untrusted input — but every other write in this
+	// package re-asserts ownership in its own WHERE clause (see
+	// campaigns.Store.AssignLinkToCampaign's symmetric EXISTS check added in
+	// the same review round), and this was the one exception.
+	args := make([]any, 0, 8)
+	args = append(args, existing.ID, existing.UserID)
+	next := 3
+
+	if in.CampaignID != nil {
+		setClauses = append(setClauses, fmt.Sprintf("campaign_id = $%d", next))
+		args = append(args, *in.CampaignID)
+		existing.CampaignID = in.CampaignID
+		next++
+	}
+	addForward := func(col, value string, dst *string) {
+		if value == "" {
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, next))
+		args = append(args, value)
+		*dst = value
+		next++
+	}
+	addForward("utm_source", in.UTMSource, &existing.UTMSource)
+	addForward("utm_medium", in.UTMMedium, &existing.UTMMedium)
+	addForward("utm_campaign", in.UTMCampaign, &existing.UTMCampaign)
+	addForward("utm_term", in.UTMTerm, &existing.UTMTerm)
+	addForward("utm_content", in.UTMContent, &existing.UTMContent)
+	addForward("placement", in.Placement, &existing.Placement)
+
+	if len(setClauses) == 0 {
+		return existing, nil
+	}
+	setSQL := setClauses[0]
+	for _, c := range setClauses[1:] {
+		setSQL += ", " + c
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`UPDATE links SET %s WHERE id = $1 AND user_id = $2`, setSQL), args...); err != nil {
+		return Link{}, fmt.Errorf("links: forward-merging requested metadata onto matched link: %w", err)
+	}
+	return existing, nil
+}
+
 // lockExisting fetches and row-locks (FOR UPDATE) the user's existing non-denied
 // link for destinationURL, with its aggregated click count. ErrNoRows means no
 // such link exists. It runs inside the dedup transaction so the reactivate or
 // no-op decision is made against a row no concurrent create can change.
 func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, destinationURL string) (Link, error) {
 	row := q.QueryRow(ctx,
-		`SELECT l.id, l.user_id, l.key, l.destination_url, l.title,
-		        l.active, l.denied_reason, l.created_at, l.expires_at,
+		`SELECT `+linkColumns+`,
 		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id) AS click_count
 		   FROM links l
 		  WHERE l.user_id = $1 AND l.destination_url = $2 AND l.denied_reason = 0
@@ -341,8 +518,7 @@ func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, desti
 // COUNT per row.
 func (s *Store) ListLinks(ctx context.Context, userID int64, limit, offset int) ([]Link, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT l.id, l.user_id, l.key, l.destination_url, l.title,
-		        l.active, l.denied_reason, l.created_at, l.expires_at,
+		`SELECT `+linkColumns+`,
 		        COUNT(c.id) AS click_count
 		   FROM links l
 		   LEFT JOIN clicks c ON c.link_id = l.id
@@ -371,6 +547,45 @@ func (s *Store) ListLinks(ctx context.Context, userID int64, limit, offset int) 
 	return out, nil
 }
 
+// ListLinksForCampaign returns every link assigned to campaignID, scoped to
+// userID (so a campaign id belonging to another user — which should never
+// reach here since the handler resolves campaignID via
+// campaigns.Store.GetCampaignBySlug/GetCampaignByID, both already
+// user-scoped — still yields nothing rather than leaking another user's
+// links). Ordered most-recently-created first, mirroring ListLinks. Backs
+// GET /api/campaigns/{slug}/links (#0099); no pagination, matching the
+// issue's scope (campaign link counts are expected to be small — bulk
+// listing is #0105).
+func (s *Store) ListLinksForCampaign(ctx context.Context, userID, campaignID int64) ([]Link, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+linkColumns+`,
+		        COUNT(c.id) AS click_count
+		   FROM links l
+		   LEFT JOIN clicks c ON c.link_id = l.id
+		  WHERE l.user_id = $1 AND l.campaign_id = $2
+		  GROUP BY l.id
+		  ORDER BY l.created_at DESC, l.id DESC`,
+		userID, campaignID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("links: listing campaign links: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]Link, 0)
+	for rows.Next() {
+		link, err := scanLink(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, link)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("links: iterating campaign link rows: %w", err)
+	}
+	return out, nil
+}
+
 // CountLinks returns the total number of links owned by userID. It backs the
 // pagination metadata (total/page count) so the client can render a pager
 // without scanning every page.
@@ -384,20 +599,25 @@ func (s *Store) CountLinks(ctx context.Context, userID int64) (int64, error) {
 	return n, nil
 }
 
-// GetLink returns a single link by key, scoped to userID, with its click count.
-// ErrLinkNotFound is returned when the key does not exist OR belongs to another
-// user — the two are deliberately indistinguishable so the detail endpoint never
-// leaks the existence of another user's link.
+// GetLink returns a single link by key, scoped to userID, with its click
+// count and (#0099) its campaign's name/slug when it is assigned to one — a
+// LEFT JOIN onto campaigns so an unassigned link (campaign_id NULL) still
+// returns the link with CampaignName/CampaignSlug left at their zero value
+// rather than failing the query. ErrLinkNotFound is returned when the key
+// does not exist OR belongs to another user — the two are deliberately
+// indistinguishable so the detail endpoint never leaks the existence of
+// another user's link.
 func (s *Store) GetLink(ctx context.Context, userID int64, key string) (Link, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT l.id, l.user_id, l.key, l.destination_url, l.title,
-		        l.active, l.denied_reason, l.created_at, l.expires_at,
-		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id) AS click_count
+		`SELECT `+linkColumns+`,
+		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id) AS click_count,
+		        camp.name, camp.slug
 		   FROM links l
+		   LEFT JOIN campaigns camp ON camp.id = l.campaign_id
 		  WHERE l.user_id = $1 AND l.key = $2`,
 		userID, key,
 	)
-	link, err := scanLink(row)
+	link, err := scanLinkWithCampaign(row)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Link{}, ErrLinkNotFound
@@ -411,10 +631,28 @@ func (s *Store) GetLink(ctx context.Context, userID int64, key string) (Link, er
 // "leave unchanged"; a non-nil pointer sets the field (Title to "" clears it).
 // The handler builds this from the request body, validating DestinationURL when
 // present before calling the store.
+//
+// UTMSource..Placement (#0099) follow the same nil="unchanged",
+// non-nil-pointing-at-""="clear to NULL" convention as Title, so the edit
+// form can update the discrete columns in lockstep with a changed
+// DestinationURL (the composed URL and the discrete columns must keep
+// agreeing after an edit, not just at create time). Campaign membership is
+// deliberately NOT patchable here — it only changes via the dedicated
+// assign/unassign endpoints (campaigns.Store.AssignLinkToCampaign/
+// UnassignLinkFromCampaign), which is the single sanctioned mutation path
+// and the one that carries the campaign.link_assigned/unassigned audit
+// trail; folding it into this generic PATCH would create a second,
+// unaudited way to change the same column.
 type LinkUpdate struct {
 	Title          *string
 	DestinationURL *string
 	ExpiresAt      **time.Time // nil = unchanged; non-nil = set to *ExpiresAt (which may itself be nil to clear)
+	UTMSource      *string
+	UTMMedium      *string
+	UTMCampaign    *string
+	UTMTerm        *string
+	UTMContent     *string
+	Placement      *string
 }
 
 // UpdateLink applies a partial update to the user's own link and returns the
@@ -450,6 +688,27 @@ func (s *Store) UpdateLink(ctx context.Context, userID int64, key string, upd Li
 		args = append(args, *upd.ExpiresAt) // *upd.ExpiresAt is a *time.Time; nil clears the column
 		next++
 	}
+
+	// addNullableString mirrors Title's convention above: a non-nil pointer to
+	// "" clears the nullable column to SQL NULL.
+	addNullableString := func(col string, v *string) {
+		if v == nil {
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", col, next))
+		if *v == "" {
+			args = append(args, nil)
+		} else {
+			args = append(args, *v)
+		}
+		next++
+	}
+	addNullableString("utm_source", upd.UTMSource)
+	addNullableString("utm_medium", upd.UTMMedium)
+	addNullableString("utm_campaign", upd.UTMCampaign)
+	addNullableString("utm_term", upd.UTMTerm)
+	addNullableString("utm_content", upd.UTMContent)
+	addNullableString("placement", upd.Placement)
 
 	// Nothing to change: behave as a no-op fetch so the caller still gets the
 	// current row (and a proper 404 if it is not theirs).
@@ -500,22 +759,79 @@ func (s *Store) DeactivateLink(ctx context.Context, userID int64, key string) er
 	return nil
 }
 
-// scanLink decodes a links row (joined with its click count) from a pgx.Row or
-// pgx.Rows, mapping NULL title to "" and NULL expires_at to nil. The column
-// order must match the SELECT lists above.
+// scanLink decodes a links row selected via linkColumns, joined with its
+// click count, from a pgx.Row or pgx.Rows, mapping NULL title/utm_*/placement
+// to "" and NULL expires_at/campaign_id to nil. The column order must match
+// linkColumns followed by click_count.
 func scanLink(row pgx.Row) (Link, error) {
 	var l Link
 	var title *string
 	var expiresAt *time.Time
+	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement *string
 	if err := row.Scan(
 		&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
-		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt, &l.ClickCount,
+		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
+		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement,
+		&l.ClickCount,
 	); err != nil {
 		return Link{}, err
 	}
+	applyNullableLinkFields(&l, title, expiresAt, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement)
+	return l, nil
+}
+
+// scanLinkWithCampaign decodes a links row selected via linkColumns joined
+// with click_count AND a LEFT JOIN campaigns' name/slug (GetLink only). NULL
+// campaign name/slug (link unassigned, or campaign_id NULL) map to "".
+func scanLinkWithCampaign(row pgx.Row) (Link, error) {
+	var l Link
+	var title *string
+	var expiresAt *time.Time
+	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement *string
+	var campaignName, campaignSlug *string
+	if err := row.Scan(
+		&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
+		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
+		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement,
+		&l.ClickCount, &campaignName, &campaignSlug,
+	); err != nil {
+		return Link{}, err
+	}
+	applyNullableLinkFields(&l, title, expiresAt, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement)
+	if campaignName != nil {
+		l.CampaignName = *campaignName
+	}
+	if campaignSlug != nil {
+		l.CampaignSlug = *campaignSlug
+	}
+	return l, nil
+}
+
+// applyNullableLinkFields maps the nullable-pointer scan targets shared by
+// scanLink/scanLinkWithCampaign onto l's zero-value-when-NULL string fields
+// (and ExpiresAt, which stays a pointer). Factored out so the two scan
+// functions cannot drift on which columns get this treatment.
+func applyNullableLinkFields(l *Link, title *string, expiresAt *time.Time, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement *string) {
 	if title != nil {
 		l.Title = *title
 	}
 	l.ExpiresAt = expiresAt
-	return l, nil
+	if utmSource != nil {
+		l.UTMSource = *utmSource
+	}
+	if utmMedium != nil {
+		l.UTMMedium = *utmMedium
+	}
+	if utmCampaign != nil {
+		l.UTMCampaign = *utmCampaign
+	}
+	if utmTerm != nil {
+		l.UTMTerm = *utmTerm
+	}
+	if utmContent != nil {
+		l.UTMContent = *utmContent
+	}
+	if placement != nil {
+		l.Placement = *placement
+	}
 }

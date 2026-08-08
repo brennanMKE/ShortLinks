@@ -153,21 +153,30 @@ func servePostgres(cfg *config.Config) error {
 	statsStore := clicks.NewStatsStore(pool)
 	redirectH := handlers.NewRedirectHandler(resolver, handlers.NewClickRecorder(clickRecorder))
 
+	// Campaign store (#0098), constructed before linksH so it can be wired
+	// into both handlers: linksH resolves an optional campaign_id/slug on
+	// POST /api/links (#0099), and campaignsH performs the CRUD +
+	// link-membership mutations. campaign.created/updated/deleted/
+	// link_assigned/link_unassigned audit entries are written by the store
+	// INSIDE the same transaction as the mutation (audit.WriteTx), unlike the
+	// links handler's fire-and-forget Record — see campaigns.Store's doc
+	// comments.
+	campaignStore := campaigns.NewStore(pool)
+
 	// Link CRUD API (#0022). The links store reuses the shared pgx pool. The
 	// redirect cache constructed above is now wired as the cache-evictor so a
 	// PATCH/DELETE drops the key and the next redirect re-reads the DB. The rule
 	// cache is wired so the #0024 URL filter check runs at the top of Create, the
 	// broker so a successful create broadcasts the #0026 link.created SSE event,
-	// and the stats store so GET /api/links/{key} returns the #0030 utm_stats.
-	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore)
+	// the stats store so GET /api/links/{key} returns the #0030 utm_stats, and
+	// the campaign store so POST /api/links can resolve an optional
+	// campaign_id/campaign_slug (#0099).
+	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore, campaignStore)
 
-	// Campaign CRUD API (#0098). The campaigns store reuses the shared pgx pool.
-	// campaign.created/updated/deleted audit entries are written by the store
-	// INSIDE the same transaction as the mutation (audit.WriteTx), unlike the
-	// links handler's fire-and-forget Record — see campaigns.Store's doc
-	// comments. No link membership, click attribution, or stats yet (#0099,
-	// #0100, #0102).
-	campaignsH := handlers.NewCampaignsHandler(campaigns.NewStore(pool), auditLogger)
+	// Campaign CRUD + link-membership API (#0098, #0099). Link membership
+	// (assign/unassign/list) needs the links store to resolve/list the links
+	// it operates on, scoped to the caller.
+	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger)
 
 	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
 	// read straight off the RequireSession-attached context, so the Svelte SPA
@@ -237,8 +246,10 @@ func serveDevMode(cfg *config.Config) error {
 	redirectH := handlers.NewRedirectHandler(ds, handlers.NewClickRecorder(ds))
 
 	// Links handler: dev store satisfies linkStore, cacheEvictor (no-op via
-	// NoCacheEvictor), ruleProvider (ds.Rules), and statsProvider.
-	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds)
+	// NoCacheEvictor), ruleProvider (ds.Rules), statsProvider, and (#0099)
+	// campaignLookup (GetCampaignByID/GetCampaignBySlug) — all on the same
+	// *devstore.Store.
+	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds, ds)
 
 	meH := handlers.NewMeHandler()
 
@@ -254,14 +265,16 @@ func serveDevMode(cfg *config.Config) error {
 	// The hard guardrail (cfg.DevMode() check) is enforced inside DevAutoLogin.
 	devAutoLogin := middleware.DevAutoLogin(ds, cfg.DevMode())
 
-	// Campaign CRUD API (#0098): devstore.Store now implements campaignStore
-	// in-memory (CreateCampaign/UpdateCampaign/DeleteCampaign/
-	// ListCampaignsForUser/GetCampaignBySlug), so dev mode gets working
-	// routes rather than falling through to the SPA catch-all with a
-	// misleading 200 text/html — a real 404-on-unmounted-route problem the
-	// review caught, since #0103's UI work runs against ./scripts/dev.sh
-	// (STORAGE=json) and needs genuine JSON responses to build against.
-	campaignsH := handlers.NewCampaignsHandler(ds, nil)
+	// Campaign CRUD + link-membership API (#0098, #0099): devstore.Store now
+	// implements campaignStore in-memory (CreateCampaign/UpdateCampaign/
+	// DeleteCampaign/ListCampaignsForUser/GetCampaignBySlug/
+	// AssignLinkToCampaign/UnassignLinkFromCampaign) AND campaignLinksProvider
+	// (GetLink/ListLinksForCampaign), so dev mode gets working routes rather
+	// than falling through to the SPA catch-all with a misleading 200
+	// text/html — a real 404-on-unmounted-route problem the review caught,
+	// since #0103's UI work runs against ./scripts/dev.sh (STORAGE=json) and
+	// needs genuine JSON responses to build against.
+	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil)
 
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
@@ -383,6 +396,11 @@ func mountAndServe(
 		mux.Handle("GET /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Get)))
 		mux.Handle("PATCH /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Patch)))
 		mux.Handle("DELETE /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Delete)))
+		// Link membership (#0099): list, assign, and unassign the links that
+		// belong to a campaign.
+		mux.Handle("GET /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(campaignsH.ListLinks)))
+		mux.Handle("POST /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(campaignsH.AssignLinks)))
+		mux.Handle("DELETE /api/campaigns/{slug}/links/{key}", requireSession(http.HandlerFunc(campaignsH.UnassignLink)))
 	}
 
 	// Current user profile (#0027) — behind RequireSession; returns the caller's

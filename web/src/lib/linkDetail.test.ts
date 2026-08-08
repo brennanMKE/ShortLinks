@@ -40,6 +40,13 @@ function link(overrides: Partial<Link> = {}): Link {
     created_at: '2026-05-25T12:00:00Z',
     expires_at: null,
     click_count: 0,
+    campaign_id: null,
+    utm_source: '',
+    utm_medium: '',
+    utm_campaign: '',
+    utm_term: '',
+    utm_content: '',
+    placement: '',
     ...overrides,
   };
 }

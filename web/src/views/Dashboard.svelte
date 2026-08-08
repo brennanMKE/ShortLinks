@@ -37,6 +37,7 @@
     listLinks,
     createLink,
     deactivateLink,
+    listCampaigns,
     logout,
     ApiError,
     type CreateLinkInput,
@@ -52,8 +53,8 @@
     type CreateNotice,
   } from '../lib/links';
   import { subscribeLinks, prependUniqueByKey } from '../lib/events';
-  import type { Link } from '../lib/types';
-  import { emptyUtmParams, composeUtmUrl, isUtmEmpty } from '../lib/utm';
+  import type { Link, Campaign } from '../lib/types';
+  import { emptyUtmParams, composeUtmUrl, isUtmEmpty, fillBlankUtmParams } from '../lib/utm';
   import type { UtmParams } from '../lib/utm';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
@@ -106,11 +107,55 @@
   // ── UTM builder state ───────────────────────────────────────────────────────
   let utmOpen = $state(false);
   let utmParams = $state<UtmParams>(emptyUtmParams());
+  // Placement (#0099): a free-text operational label ("18th & Texas board"),
+  // deliberately separate from utm_content — see docs/utm.md.
+  let placement = $state('');
 
   // Live preview: the destination URL with UTM params baked in. When UTM fields
   // are all empty this equals destinationUrl unchanged (no stray `?` appended).
-  const composedUrl = $derived(composeUtmUrl(destinationUrl, utmParams));
+  // The third argument (previous) is a CONSTANT emptyUtmParams() on create:
+  // the builder starts with nothing, so it can never have "owned" a UTM
+  // param already present in a pasted destinationUrl — composeUtmUrl must
+  // never delete one the builder didn't put there (#0099 review: the
+  // create-path regression from an earlier, unconditional-delete version).
+  const composedUrl = $derived(composeUtmUrl(destinationUrl, utmParams, emptyUtmParams()));
   const hasUtm = $derived(!isUtmEmpty(utmParams));
+
+  // ── Campaign selection (#0099) ──────────────────────────────────────────────
+  // The caller's own campaigns, for the optional "assign to campaign"
+  // dropdown on the create form. Loaded once on mount; a failure here just
+  // means the dropdown stays empty — it must never block link creation.
+  let campaigns = $state<Campaign[]>([]);
+  let selectedCampaignID = $state<number | ''>('');
+
+  async function loadCampaigns() {
+    try {
+      const res = await listCampaigns();
+      campaigns = res.campaigns.filter((c) => !c.archived);
+    } catch {
+      // Non-fatal: the create form works fine with no campaign selectable.
+    }
+  }
+
+  // Selecting a campaign PREFILLS the five UTM builder fields from its
+  // default_utm_* values — a starting point only. fillBlankUtmParams (#0099
+  // review item 6) fills ONLY fields that are currently blank; anything the
+  // author has already typed (by hand, or from a previously selected
+  // campaign they then edited) is left exactly as they wrote it — the naive
+  // "replace utmParams wholesale" would silently wipe that. Every field
+  // stays bound to utmParams via the same bind:value the author already
+  // types into either way, so nothing here locks a field. The dropdown now
+  // lives OUTSIDE the collapsible UTM section (review item 5 — it used to be
+  // reachable only after expanding "Campaign / UTM parameters", so a
+  // campaign could never be picked first), so expanding it here on select is
+  // what actually reveals the fields that were just prefilled.
+  function handleCampaignSelect() {
+    if (selectedCampaignID === '') return;
+    const c = campaigns.find((c) => c.id === selectedCampaignID);
+    if (!c) return;
+    utmParams = fillBlankUtmParams(utmParams, c);
+    utmOpen = true;
+  }
 
   let notice = $state<CreateNotice | null>(null);
   let keyError = $state<string | null>(null);
@@ -157,8 +202,11 @@
   // ── Create submit ─────────────────────────────────────────────────────────
   function buildInput(): CreateLinkInput {
     // Use the composed URL (destination + UTM params baked in) as the stored
-    // destination_url. UTM values are NOT stored as discrete fields — they are
-    // merged into the URL before submission. See lib/utm.ts for rationale.
+    // destination_url — the destination site's own analytics still depends on
+    // it. The same five UTM values ALSO go along as discrete fields (#0099),
+    // plus placement and an optional campaign assignment, so the backend's
+    // stored columns agree with what was baked in. See lib/utm.ts for the
+    // full storage-decision rationale.
     const input: CreateLinkInput = { destination_url: composedUrl || destinationUrl.trim() };
     const t = title.trim();
     if (t !== '') input.title = t;
@@ -169,6 +217,19 @@
       const d = new Date(e);
       if (!Number.isNaN(d.getTime())) input.expires_at = d.toISOString();
     }
+    if (selectedCampaignID !== '') input.campaign_id = selectedCampaignID;
+    const src = utmParams.utm_source.trim();
+    if (src !== '') input.utm_source = src;
+    const med = utmParams.utm_medium.trim();
+    if (med !== '') input.utm_medium = med;
+    const camp = utmParams.utm_campaign.trim();
+    if (camp !== '') input.utm_campaign = camp;
+    const term = utmParams.utm_term.trim();
+    if (term !== '') input.utm_term = term;
+    const content = utmParams.utm_content.trim();
+    if (content !== '') input.utm_content = content;
+    const p = placement.trim();
+    if (p !== '') input.placement = p;
     return input;
   }
 
@@ -188,6 +249,8 @@
       expiresAt = '';
       utmParams = emptyUtmParams();
       utmOpen = false;
+      placement = '';
+      selectedCampaignID = '';
     } catch (err) {
       const n = noticeForError(err);
       notice = n;
@@ -269,6 +332,7 @@
 
   onMount(() => {
     loadPage(1);
+    loadCampaigns();
 
     // #0034 SSE live updates: open the /api/events stream and prepend each
     // link.created event to the shared store.
@@ -401,6 +465,32 @@
         </div>
       </div>
 
+      <!-- Campaign selection (#0099) — deliberately OUTSIDE the collapsible
+           UTM section below (review item 5): it must be reachable without
+           first expanding "Campaign / UTM parameters", so a campaign can be
+           picked before the author ever opens that section. Selecting one
+           prefills the (still-collapsed) UTM fields and expands the section
+           to show them — see handleCampaignSelect. -->
+      {#if campaigns.length > 0}
+        <div class="field">
+          <label for="campaign-select">Assign to campaign <span class="text-faint">(optional)</span></label>
+          <select
+            id="campaign-select"
+            bind:value={selectedCampaignID}
+            onchange={handleCampaignSelect}
+            disabled={submitting}
+          >
+            <option value="">No campaign</option>
+            {#each campaigns as c (c.id)}
+              <option value={c.id}>{c.name}</option>
+            {/each}
+          </select>
+          <p class="text-faint">
+            Prefills the blank fields below from the campaign's defaults — still yours to edit.
+          </p>
+        </div>
+      {/if}
+
       <!-- UTM builder — collapsible section (#0048) -->
       <div class="utm-section">
         <button
@@ -465,6 +555,16 @@
                 type="text"
                 placeholder="e.g. hero-cta, sidebar-link"
                 bind:value={utmParams.utm_content}
+                disabled={submitting}
+              />
+            </div>
+            <div class="field">
+              <label for="placement">Placement <span class="text-faint">(optional)</span></label>
+              <input
+                id="placement"
+                type="text"
+                placeholder={'e.g. "18th & Texas board" — a physical/operational label, not sent to the destination site'}
+                bind:value={placement}
                 disabled={submitting}
               />
             </div>

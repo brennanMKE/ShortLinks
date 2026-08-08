@@ -92,18 +92,111 @@ const composedUrl = $derived(composeUtmUrl(destinationUrl, utmParams));
 The composed URL is rendered in real time under the UTM fields as a "Destination
 preview", so the author can verify the final URL before saving.
 
-### Storage decision — "bake into `destination_url`"
+### Storage decision — "bake into `destination_url`" AND store discretely (#0099)
 
 At submit time `buildInput()` passes `composedUrl || destinationUrl.trim()` as
-`destination_url` to the API. The backend stores only the single composed URL
-string — no separate UTM columns exist in the database or API.
+`destination_url` to the API — **this part is unchanged**. The destination
+site's own analytics depends on those params arriving, so the composed URL is
+still what gets stored and served.
 
-**Consequence for editing:** if a link is later opened in an edit form, the UTM
-builder fields cannot be pre-populated, because only the composed URL was saved.
-The edit form shows the destination URL with UTM params already present in the
-query string. Discrete re-population would require either adding separate DB
-columns or parsing the stored URL's query string back into the five fields (which
-is lossy when non-UTM params overlap). This is tracked as a known limitation.
+As of [#0099](../issues/0099.md), the request ALSO carries the five UTM
+values (plus an optional `placement` label) as discrete fields, and the
+backend stores them in five new nullable `links` columns
+(`utm_source`, `utm_medium`, `utm_campaign`, `utm_term`, `utm_content`) plus
+`placement`, alongside the unchanged `destination_url`. The two are expected
+to agree — whatever `composeUtmUrl` bakes into the URL is exactly what is
+sent as the discrete fields — and an integration test asserts this by parsing
+the stored URL and comparing it field-by-field against the stored columns.
+
+`placement` is deliberately **not** `utm_content`: a physical poster location
+("18th & Texas board") is operational metadata, not something forwarded to
+the destination site's analytics. They frequently differ.
+
+Existing rows created before this migration keep `NULL` in all seven new
+columns — they are **not** backfilled by parsing `destination_url`, since the
+parse is ambiguous wherever a link already carried its own `?utm_source=`
+from an external source.
+
+**Edit re-population (closes the limitation this section used to document):**
+`GET /api/links/{key}` now returns the five UTM fields, `placement`, and
+`campaign_id`/`campaign_name`/`campaign_slug` (when assigned) on every link,
+so the edit form CAN pre-populate the UTM builder — see
+`utmParamsFromLink` in `web/src/lib/utm.ts` and its use in
+`web/src/views/LinkDetail.svelte`'s "Edit" action. A link with all-NULL
+columns (created before #0099, or one that simply never had UTM params) maps
+to `emptyUtmParams()` — the edit form opens with empty fields rather than
+erroring, exactly as it would for a link that legitimately has none. Saving
+an edit PATCHes `destination_url` (the builder's re-composed URL) together
+with the five discrete fields and `placement`.
+
+**Clearing a field on edit deletes it from the composed URL, not just the
+column.** `composeUtmUrl`'s edit-path input is the link's ALREADY-baked
+`destination_url` (e.g. `?utm_source=email&utm_medium=newsletter&...`), so
+"blank" and "absent" are not the same thing there the way they are on a fresh
+create. If the author clears `utm_source` in the builder and
+`composeUtmUrl` merely skipped re-setting it (the original #0048
+behavior — never delete, only add/replace), the recomposed URL would still
+ship the stale `utm_source=email` while the PATCH sends `utm_source: ""`,
+which the store writes as `NULL`. The column and the baked URL would then
+permanently disagree: exactly the "campaign view labels the link by the
+wrong channel" failure this issue exists to remove. `composeUtmUrl` therefore
+RECONCILES all five keys against `params` on every call — set when non-blank,
+**delete when blank** — for both the URL-object path and the
+relative/invalid-URL fallback. This is one function for both create and
+edit; there is no separate "recompose" variant. See the
+"clearing a previously-baked key" tests in `utm.test.ts`.
+
+### Campaign membership (#0098, #0099)
+
+A link may optionally belong to one campaign (`links.campaign_id`, nullable,
+`ON DELETE SET NULL` — deleting a campaign never deletes its links, only
+unassigns them). Selecting a campaign in the create form's new "Assign to
+campaign" dropdown **prefills** the five UTM builder fields from the
+campaign's `default_utm_*` values (`utmParamsFromCampaignDefaults` in
+`web/src/lib/utm.ts`) — every prefilled value stays exactly as editable as if
+the author had typed it themselves; the campaign supplies a starting point,
+never a lock. Membership itself is set via `POST /api/links`'s optional
+`campaign_id`/`campaign_slug` fields, or afterward via the dedicated
+`POST`/`DELETE /api/campaigns/{slug}/links...` endpoints — it is NOT
+patchable through `PATCH /api/links/{key}`, which only ever touches
+title/destination/UTM/placement/expiry. Assigning a link already in another
+campaign **moves** it (a link belongs to at most one campaign, enforced by
+the column). Assigning multiple links in one `POST` is capped at 50 keys per
+request and is **not atomic across keys** — each is resolved and assigned
+independently in the order given, so a key that fails ownership stops the
+request without rolling back keys already assigned earlier in the same call.
+See [#0099](../issues/0099.md) for the full endpoint list.
+
+**Duplicate/reactivate creates forward-merge, never clear.** When a `POST
+/api/links` on the generated-key path matches an existing link
+(`duplicate: true`), any campaign_id/UTM/placement THIS request supplies is
+written onto that existing row rather than discarded — otherwise picking a
+campaign on the create form and happening to hit a URL you already
+shortened would silently not apply it. This is a **forward merge, not an
+overwrite**: a field the request leaves blank is never cleared, so a bare
+`POST {"destination_url": "..."}` re-submission cannot wipe out a campaign
+assignment or UTM values an earlier create already set on that row. See
+`internal/links/store.go`'s `applyRequestedMetadataTx`.
+
+This does **not** solve #0105's batch-creation problem. Two batch rows
+differing only in `placement` still compose to the identical
+`destination_url` (`placement` is never baked into the URL), so the dedup
+lookup still matches them to the same row — row 2 never becomes a second
+link. Forward-merge only changes what happens to that one shared row: before
+this change, row 2's placement was silently ignored; now, row 2's placement
+silently overwrites row 1's. #0105 needs its own fix (distinguishable
+`destination_url`s per batch row, or a dedup key other than
+`destination_url` alone) — not attempted here.
+
+**A `NULL` `default_utm_campaign` prefills empty, never the campaign's
+slug.** The column can be cleared via `PATCH /api/campaigns/{slug}` and is
+never re-derived afterward (`campaigns.CampaignUpdate`'s convention). Once a
+user has deliberately cleared it, silently resurrecting a value from the
+slug would undo that — and the slug is immutable while the campaign's name
+is not, so it can already have drifted from what the campaign is now called.
+`utmParamsFromCampaignDefaults` does not even accept a slug as input, so
+there is no fallback path to reach for. See "a NULL default_utm_campaign
+... does NOT fall back to the campaign slug" in `utm.test.ts`.
 
 ---
 
@@ -265,10 +358,14 @@ optional and are most useful for paid search and A/B creative testing.
 
 | Path | Role |
 |---|---|
-| `web/src/lib/utm.ts` | Pure composition helpers: `composeUtmUrl`, `isUtmEmpty`, `emptyUtmParams`, `UTM_KEYS` |
-| `web/src/lib/utm.test.ts` | 25 unit tests for the composition helpers |
-| `web/src/views/Dashboard.svelte` | Create-form UTM builder UI, live preview, bake-on-submit wiring |
-| `web/src/views/LinkDetail.svelte` | UTM breakdown panel and bar charts |
+| `web/src/lib/utm.ts` | Pure composition helpers: `composeUtmUrl`, `isUtmEmpty`, `emptyUtmParams`, `UTM_KEYS`, and (#0099) `utmParamsFromLink`, `utmParamsFromCampaignDefaults` |
+| `web/src/lib/utm.test.ts` | Unit tests for the composition + (#0099) repopulation/prefill helpers |
+| `web/src/views/Dashboard.svelte` | Create-form UTM builder UI, live preview, bake-on-submit wiring, and (#0099) the campaign-selection dropdown + placement field |
+| `web/src/views/LinkDetail.svelte` | UTM breakdown panel/bar charts, and (#0099) the "Edit" action that repopulates the UTM builder from the stored columns |
 | `web/src/lib/linkDetail.ts` | `utmDimensions`, `sortBuckets`, `isEmptyStats`, `NONE_BUCKET` |
 | `internal/handlers/redirect.go` | `mergeUTM`, `buildClickInfo`, `RedirectHandler.ServeHTTP` |
 | `internal/clicks/stats.go` | `UTMStatsForLink`, `breakdown`, `UTMStats`, `Bucket`, `NoneBucket` |
+| `internal/links/store.go` | (#0099) `Link`/`NewLink`/`LinkUpdate`'s discrete `campaign_id`/`utm_*`/`placement` fields, `GetLink`'s campaign LEFT JOIN, `ListLinksForCampaign` |
+| `internal/campaigns/store.go` | (#0099) `AssignLinkToCampaign`, `UnassignLinkFromCampaign`, `GetCampaignByID` |
+| `internal/handlers/campaigns.go` | (#0099) `GET`/`POST /api/campaigns/{slug}/links`, `DELETE /api/campaigns/{slug}/links/{key}` |
+| `migrations/000011_links_campaign_and_utm.{up,down}.sql` | The seven new `links` columns and `idx_links_campaign_id` |

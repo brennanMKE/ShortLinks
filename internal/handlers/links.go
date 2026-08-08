@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
+	"github.com/brennanMKE/ShortLinks/internal/campaigns"
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/events"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
@@ -87,6 +88,24 @@ type statsProvider interface {
 	ClicksOverTime(ctx context.Context, linkID int64, from, to time.Time) (clicks.TimeseriesResult, error)
 }
 
+// campaignLookup is the slice of the campaigns data layer the links handler
+// needs (#0099): resolving an optional client-supplied campaign_id or
+// campaign_slug on POST /api/links to a campaign the CALLER owns. Both
+// methods are already user-scoped and report campaigns.ErrCampaignNotFound
+// indistinguishably for "does not exist" and "belongs to another user" — the
+// same 404-hiding contract linkStore's GetLink uses — so a request that
+// tries campaign_id/campaign_slug against another user's campaign is
+// rejected exactly like a request for a nonexistent one, which is what makes
+// "assign a link into user B's campaign" impossible from user A's requests.
+// *campaigns.Store satisfies this via GetCampaignByID/GetCampaignBySlug. May
+// be nil (e.g. in unit tests that never send campaign_id/campaign_slug), in
+// which case Create rejects a request that supplies either with a 400 rather
+// than silently ignoring it.
+type campaignLookup interface {
+	GetCampaignByID(ctx context.Context, userID, id int64) (campaigns.Campaign, error)
+	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
+}
+
 // eventPublisher is the slice of the events broker the links handler needs: the
 // ability to broadcast a link.created event to a user's connected SSE clients
 // (#0026). *events.Broker satisfies it via Publish. It is optional — a nil
@@ -129,17 +148,23 @@ type LinksHandler struct {
 	// link-detail response (#0030). May be nil (no stats store wired) in which
 	// case the utm_stats field is omitted.
 	stats statsProvider
+	// campaigns resolves an optional POST /api/links campaign_id/campaign_slug
+	// to an owned campaign (#0099). May be nil, in which case a request that
+	// supplies either field is rejected with a 400.
+	campaigns campaignLookup
 }
 
 // NewLinksHandler constructs a LinksHandler over the data layer, the redirect
-// cache, the URL-filter rule cache, the audit logger, the SSE event broker, and
-// the click-analytics store. Pass a nil redirectCache to disable eviction, a nil
-// ruleProvider to disable URL filtering, a nil auditor to disable audit writes, a
-// nil broker to disable the #0026 SSE broadcast, and a nil stats provider to omit
-// the #0030 utm_stats field (e.g. in unit tests that do not exercise those
-// paths); the handler then skips the respective steps.
-func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger, broker eventPublisher, stats statsProvider) *LinksHandler {
-	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor, broker: broker, stats: stats}
+// cache, the URL-filter rule cache, the audit logger, the SSE event broker, the
+// click-analytics store, and the campaign lookup (#0099). Pass a nil
+// redirectCache to disable eviction, a nil ruleProvider to disable URL
+// filtering, a nil auditor to disable audit writes, a nil broker to disable
+// the #0026 SSE broadcast, a nil stats provider to omit the #0030 utm_stats
+// field, and a nil campaignLookup to reject campaign_id/campaign_slug on
+// create (e.g. in unit tests that do not exercise those paths); the handler
+// then skips the respective steps.
+func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger, broker eventPublisher, stats statsProvider, campLookup campaignLookup) *LinksHandler {
+	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor, broker: broker, stats: stats, campaigns: campLookup}
 }
 
 // linkView is the JSON shape for a single link, shared by every endpoint. The
@@ -157,6 +182,16 @@ type linkView struct {
 	ExpiresAt      *time.Time `json:"expires_at"`
 	ClickCount     int64      `json:"click_count"`
 	Duplicate      *bool      `json:"duplicate,omitempty"`
+	// CampaignID..Placement are the #0099 discrete UTM/campaign fields, present
+	// on every linkView (not just the detail response) since they are already
+	// known synchronously from the domain Link with no extra query.
+	CampaignID  *int64 `json:"campaign_id"`
+	UTMSource   string `json:"utm_source"`
+	UTMMedium   string `json:"utm_medium"`
+	UTMCampaign string `json:"utm_campaign"`
+	UTMTerm     string `json:"utm_term"`
+	UTMContent  string `json:"utm_content"`
+	Placement   string `json:"placement"`
 }
 
 // toLinkView maps a domain Link to its JSON shape without the duplicate field
@@ -172,6 +207,13 @@ func toLinkView(l links.Link) linkView {
 		CreatedAt:      l.CreatedAt,
 		ExpiresAt:      l.ExpiresAt,
 		ClickCount:     l.ClickCount,
+		CampaignID:     l.CampaignID,
+		UTMSource:      l.UTMSource,
+		UTMMedium:      l.UTMMedium,
+		UTMCampaign:    l.UTMCampaign,
+		UTMTerm:        l.UTMTerm,
+		UTMContent:     l.UTMContent,
+		Placement:      l.Placement,
 	}
 }
 
@@ -179,6 +221,16 @@ func toLinkView(l links.Link) linkView {
 // accepted as synonyms for a user-supplied key so the client may send either
 // (the PRD/issue use both "key" and "alias" terminology); key is the canonical
 // field. expires_at is RFC 3339.
+//
+// CampaignID/CampaignSlug (#0099) are an optional way to assign the link to
+// one of the caller's own campaigns at create time — an alternative to the
+// dedicated POST /api/campaigns/{slug}/links endpoint for the common case of
+// "create this link already in campaign X". When both are present CampaignID
+// takes precedence (see Create). UTMSource..Placement are the five discrete
+// UTM columns plus the operational placement label; the handler stores them
+// verbatim alongside whatever the client baked into DestinationURL — see
+// links.NewLink's doc comment for why the store does not itself verify the
+// two agree.
 type createLinkRequest struct {
 	DestinationURL string     `json:"destination_url"`
 	Title          string     `json:"title"`
@@ -186,6 +238,14 @@ type createLinkRequest struct {
 	CustomKey      string     `json:"custom_key"`
 	Alias          string     `json:"alias"`
 	ExpiresAt      *time.Time `json:"expires_at"`
+	CampaignID     *int64     `json:"campaign_id"`
+	CampaignSlug   string     `json:"campaign_slug"`
+	UTMSource      string     `json:"utm_source"`
+	UTMMedium      string     `json:"utm_medium"`
+	UTMCampaign    string     `json:"utm_campaign"`
+	UTMTerm        string     `json:"utm_term"`
+	UTMContent     string     `json:"utm_content"`
+	Placement      string     `json:"placement"`
 }
 
 // customKey returns the user-supplied alias from whichever field carried it, or
@@ -265,11 +325,59 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	customKey := strings.TrimSpace(req.customKey())
 
+	// ───────────────────────────────────────────────────────────────────────
+	// #0099 CAMPAIGN RESOLUTION — an optional campaign_id or campaign_slug is
+	// resolved to a campaign the CALLER owns before anything is inserted.
+	// campaign_id takes precedence when both are present. GetCampaignByID/
+	// GetCampaignBySlug are user-scoped and report campaigns.ErrCampaignNotFound
+	// indistinguishably for "does not exist" and "belongs to another user", so
+	// this is also the ownership gate: user A can never assign a link into
+	// user B's campaign by guessing B's campaign id/slug — it 404s exactly like
+	// a nonexistent one would. A request that supplies either field while no
+	// campaign lookup is wired (h.campaigns == nil) is rejected with 400 rather
+	// than silently creating an unassigned link.
+	// ───────────────────────────────────────────────────────────────────────
+	var campaignID *int64
+	slug := strings.TrimSpace(req.CampaignSlug)
+	if req.CampaignID != nil || slug != "" {
+		if h.campaigns == nil {
+			writeError(w, http.StatusBadRequest, "campaigns are not available")
+			return
+		}
+		var (
+			c   campaigns.Campaign
+			err error
+		)
+		if req.CampaignID != nil {
+			c, err = h.campaigns.GetCampaignByID(r.Context(), u.ID, *req.CampaignID)
+		} else {
+			c, err = h.campaigns.GetCampaignBySlug(r.Context(), u.ID, slug)
+		}
+		switch {
+		case err == nil:
+			id := c.ID
+			campaignID = &id
+		case errors.Is(err, campaigns.ErrCampaignNotFound):
+			writeError(w, http.StatusNotFound, "campaign not found")
+			return
+		default:
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
 	in := links.NewLink{
 		UserID:         u.ID,
 		DestinationURL: dest,
 		Title:          strings.TrimSpace(req.Title),
 		ExpiresAt:      req.ExpiresAt,
+		CampaignID:     campaignID,
+		UTMSource:      strings.TrimSpace(req.UTMSource),
+		UTMMedium:      strings.TrimSpace(req.UTMMedium),
+		UTMCampaign:    strings.TrimSpace(req.UTMCampaign),
+		UTMTerm:        strings.TrimSpace(req.UTMTerm),
+		UTMContent:     strings.TrimSpace(req.UTMContent),
+		Placement:      strings.TrimSpace(req.Placement),
 	}
 
 	// ───────────────────────────────────────────────────────────────────────
@@ -491,8 +599,13 @@ func (h *LinksHandler) List(w http.ResponseWriter, r *http.Request) {
 // utm_stats and timeseries are omitted (nil) when no analytics store is wired.
 type linkDetailView struct {
 	linkView
-	UTMStats   *clicks.UTMStats          `json:"utm_stats,omitempty"`
-	Timeseries *clicks.TimeseriesResult  `json:"timeseries,omitempty"`
+	UTMStats   *clicks.UTMStats         `json:"utm_stats,omitempty"`
+	Timeseries *clicks.TimeseriesResult `json:"timeseries,omitempty"`
+	// CampaignName/CampaignSlug (#0099) are populated only when the link is
+	// currently assigned to a campaign (links.Store.GetLink's LEFT JOIN);
+	// both are "" for an unassigned link, matching CampaignID being nil.
+	CampaignName string `json:"campaign_name,omitempty"`
+	CampaignSlug string `json:"campaign_slug,omitempty"`
 }
 
 // Get handles GET /api/links/{key}. It returns the caller's link detail with its
@@ -526,7 +639,11 @@ func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	detail := linkDetailView{linkView: toLinkView(link)}
+	detail := linkDetailView{
+		linkView:     toLinkView(link),
+		CampaignName: link.CampaignName,
+		CampaignSlug: link.CampaignSlug,
+	}
 
 	// #0030 / #0049: enrich with the UTM breakdown and clicks-over-time series
 	// when an analytics store is wired. The link was resolved scoped to the caller
@@ -561,6 +678,19 @@ type patchLinkRequest struct {
 	Title          *string    `json:"title"`
 	DestinationURL *string    `json:"destination_url"`
 	ExpiresAt      *time.Time `json:"expires_at"`
+	// UTMSource..Placement (#0099) follow Title's convention, not
+	// ExpiresAt's: a present-but-null/empty value clears the column (like
+	// Title), so no *Present tracking is needed — the field being nil in the
+	// decoded struct (absent OR JSON null) means "leave unchanged", matching
+	// how Title already behaves. This lets an edit re-save the UTM builder
+	// (repopulated from GetLink's response) and the discrete columns stay in
+	// lockstep with a changed destination_url.
+	UTMSource   *string `json:"utm_source"`
+	UTMMedium   *string `json:"utm_medium"`
+	UTMCampaign *string `json:"utm_campaign"`
+	UTMTerm     *string `json:"utm_term"`
+	UTMContent  *string `json:"utm_content"`
+	Placement   *string `json:"placement"`
 	// expiresAtPresent records whether the JSON contained the expires_at key at
 	// all, so sending `"expires_at": null` clears it while omitting the field
 	// leaves it unchanged. Populated by UnmarshalJSON.
@@ -587,10 +717,15 @@ func (p *patchLinkRequest) UnmarshalJSON(data []byte) error {
 }
 
 // Patch handles PATCH /api/links/{key}. It updates the provided subset of
-// {title, destination_url, expires_at} on the caller's own link and returns the
-// updated link. destination_url is validated when present. A key not owned by
-// the caller yields 404. On success the redirect cache entry for the key is
-// evicted (if a cache is wired) so the next redirect reflects the change.
+// {title, destination_url, expires_at, utm_source, utm_medium, utm_campaign,
+// utm_term, utm_content, placement} on the caller's own link and returns the
+// updated link — the five UTM fields and placement (#0099) let an edit save
+// the builder (repopulated via utmParamsFromLink) back in lockstep with a
+// changed destination_url; campaign_id is NOT patchable here, only via the
+// dedicated assign/unassign endpoints. destination_url is validated when
+// present. A key not owned by the caller yields 404. On success the redirect
+// cache entry for the key is evicted (if a cache is wired) so the next
+// redirect reflects the change.
 func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -628,6 +763,23 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		exp := req.ExpiresAt
 		upd.ExpiresAt = &exp
 	}
+	// #0099: the five discrete UTM fields plus placement, trimmed like every
+	// other string field this handler accepts. Present-but-empty clears the
+	// column (Title's convention), letting the edit form save a field the
+	// user deliberately blanked out.
+	setUTM := func(dst **string, src *string) {
+		if src == nil {
+			return
+		}
+		v := strings.TrimSpace(*src)
+		*dst = &v
+	}
+	setUTM(&upd.UTMSource, req.UTMSource)
+	setUTM(&upd.UTMMedium, req.UTMMedium)
+	setUTM(&upd.UTMCampaign, req.UTMCampaign)
+	setUTM(&upd.UTMTerm, req.UTMTerm)
+	setUTM(&upd.UTMContent, req.UTMContent)
+	setUTM(&upd.Placement, req.Placement)
 
 	link, err := h.store.UpdateLink(r.Context(), u.ID, key, upd)
 	switch {

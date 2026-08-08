@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/campaigns"
+	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
 
@@ -20,12 +22,31 @@ import (
 // linkStore in links.go. Every method takes the authenticated user id so the
 // store scopes each query to the caller's own rows — the handler never
 // trusts a client-supplied owner.
+//
+// AssignLinkToCampaign/UnassignLinkFromCampaign (#0099) are Campaign-prefixed
+// per #0098's downstream constraint: devstore.Store is a single Go type that
+// must also satisfy filterRuleStore's bare Create/Update/Delete/Get, so a
+// bare AssignLink/UnassignLink here would be structurally impossible for
+// dev mode to implement.
 type campaignStore interface {
 	CreateCampaign(ctx context.Context, in campaigns.NewCampaign, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
 	UpdateCampaign(ctx context.Context, userID int64, slug string, upd campaigns.CampaignUpdate, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
 	DeleteCampaign(ctx context.Context, userID int64, slug string, auditor *audit.Logger, entry audit.Entry) error
 	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.Campaign, error)
 	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
+	AssignLinkToCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
+	UnassignLinkFromCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
+}
+
+// campaignLinksProvider is the slice of the links data layer the campaigns
+// handler needs (#0099) for the three link-membership endpoints: resolving a
+// client-supplied key to a link the CALLER owns (the ownership gate for
+// assign — a key belonging to another user 404s exactly like a nonexistent
+// one) and listing every link currently assigned to a campaign.
+// *links.Store satisfies this via GetLink/ListLinksForCampaign.
+type campaignLinksProvider interface {
+	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
+	ListLinksForCampaign(ctx context.Context, userID, campaignID int64) ([]links.Link, error)
 }
 
 // maxCampaignNameLength bounds the campaign name so it (and the slug derived
@@ -41,32 +62,43 @@ type campaignStore interface {
 // ~1020 bytes (4 bytes/rune), far under the btree limit this bound protects.
 const maxCampaignNameLength = 255
 
-// CampaignsHandler serves the authenticated campaign CRUD API:
+// CampaignsHandler serves the authenticated campaign CRUD + link-membership
+// API:
 //
-//	GET    /api/campaigns        — list the caller's campaigns
-//	POST   /api/campaigns        — create a campaign
-//	GET    /api/campaigns/{slug} — campaign metadata
-//	PATCH  /api/campaigns/{slug} — update name/description/dates/archived/defaults
-//	DELETE /api/campaigns/{slug} — delete a campaign
+//	GET    /api/campaigns              — list the caller's campaigns
+//	POST   /api/campaigns              — create a campaign
+//	GET    /api/campaigns/{slug}       — campaign metadata
+//	PATCH  /api/campaigns/{slug}       — update name/description/dates/archived/defaults
+//	DELETE /api/campaigns/{slug}       — delete a campaign
+//	GET    /api/campaigns/{slug}/links — links in the campaign (#0099)
+//	POST   /api/campaigns/{slug}/links — assign existing links by key (#0099)
+//	DELETE /api/campaigns/{slug}/links/{key} — unassign one link (#0099)
 //
-// All five routes MUST be mounted behind middleware.RequireSession; each
+// All eight routes MUST be mounted behind middleware.RequireSession; each
 // handler reads the authenticated user from the request context and scopes
 // every store call to that user, so a request can only see or mutate its own
-// campaigns. This mirrors LinksHandler.
+// campaigns and links. This mirrors LinksHandler.
 type CampaignsHandler struct {
 	store campaignStore
-	// auditor records the campaign.created/updated/deleted audit entries
-	// in-band with the mutation (audit.Logger.WriteTx, called from inside the
-	// store's transaction). May be nil in unit tests that do not assert audit
-	// rows.
+	// links resolves/lists the links a campaign's membership endpoints
+	// operate on (#0099). May be nil only in tests that never exercise those
+	// three routes — List/AssignLinks/UnassignLink would panic on a nil
+	// dereference otherwise, so every real wiring (main.go, campaignsMux)
+	// must supply a non-nil value.
+	links campaignLinksProvider
+	// auditor records the campaign.created/updated/deleted/link_assigned/
+	// link_unassigned audit entries in-band with the mutation
+	// (audit.Logger.WriteTx, called from inside the store's transaction). May
+	// be nil in unit tests that do not assert audit rows.
 	auditor *audit.Logger
 }
 
-// NewCampaignsHandler constructs a CampaignsHandler over the data layer and
-// the audit logger. Pass a nil auditor to disable audit writes (e.g. in unit
-// tests that do not exercise that path).
-func NewCampaignsHandler(store campaignStore, auditor *audit.Logger) *CampaignsHandler {
-	return &CampaignsHandler{store: store, auditor: auditor}
+// NewCampaignsHandler constructs a CampaignsHandler over the data layer, the
+// links lookup for the membership endpoints (#0099), and the audit logger.
+// Pass a nil auditor to disable audit writes (e.g. in unit tests that do not
+// exercise that path).
+func NewCampaignsHandler(store campaignStore, linkLookup campaignLinksProvider, auditor *audit.Logger) *CampaignsHandler {
+	return &CampaignsHandler{store: store, links: linkLookup, auditor: auditor}
 }
 
 // campaignView is the JSON shape for a single campaign, shared by every
@@ -469,6 +501,268 @@ func (h *CampaignsHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"message": "Campaign deleted"})
 	case errors.Is(err, campaigns.ErrCampaignNotFound):
 		writeError(w, http.StatusNotFound, "campaign not found")
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+	}
+}
+
+// campaignLinksResponse is the GET/POST /api/campaigns/{slug}/links body:
+// links is always a non-nil array so it encodes as [] rather than null when
+// the campaign has no links.
+type campaignLinksResponse struct {
+	Links []linkView `json:"links"`
+}
+
+// ListLinks handles GET /api/campaigns/{slug}/links. It returns every link
+// currently assigned to the caller's own campaign, most-recently-created
+// first. A slug that does not exist OR belongs to another user yields 404 —
+// the same indistinguishable-404 contract every other campaign endpoint uses.
+func (h *CampaignsHandler) ListLinks(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	slug := r.PathValue("slug")
+	if slug == "" {
+		writeError(w, http.StatusBadRequest, "slug is required")
+		return
+	}
+
+	c, err := h.store.GetCampaignBySlug(r.Context(), u.ID, slug)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, campaigns.ErrCampaignNotFound):
+		writeError(w, http.StatusNotFound, "campaign not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	rows, err := h.links.ListLinksForCampaign(r.Context(), u.ID, c.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	views := make([]linkView, 0, len(rows))
+	for _, l := range rows {
+		views = append(views, toLinkView(l))
+	}
+	writeJSON(w, http.StatusOK, campaignLinksResponse{Links: views})
+}
+
+// assignLinksRequest is the POST /api/campaigns/{slug}/links body. keys is
+// the canonical field (plural, since assigning several existing links to a
+// campaign at once is the common "tag my whole promotion" workflow); key is
+// accepted as a convenience singular alias for assigning exactly one.
+type assignLinksRequest struct {
+	Keys []string `json:"keys"`
+	Key  string   `json:"key"`
+}
+
+// maxAssignLinksKeys caps how many keys a single POST
+// /api/campaigns/{slug}/links request may name (review item 8). Each key
+// costs two round trips to the DB (GetLink, then the assign UPDATE/audit
+// insert) plus a re-read, all sequential and non-atomic across keys — see
+// AssignLinks' doc comment. Without a cap, an N-key request is 2N+1 queries
+// with no upper bound, and a client-supplied array size drives it directly.
+// 50 is generous for the "tag a batch of existing links" workflow this
+// endpoint exists for while keeping a single request's cost bounded.
+const maxAssignLinksKeys = 50
+
+// requestedKeys returns the de-duplicated, non-empty set of keys the request
+// named, merging the singular key alias into keys.
+func (r assignLinksRequest) requestedKeys() []string {
+	seen := make(map[string]bool, len(r.Keys)+1)
+	out := make([]string, 0, len(r.Keys)+1)
+	add := func(k string) {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	add(r.Key)
+	for _, k := range r.Keys {
+		add(k)
+	}
+	return out
+}
+
+// AssignLinks handles POST /api/campaigns/{slug}/links: assigns one or more
+// of the caller's OWN existing links (by key) to the caller's own campaign.
+//
+// Ownership is enforced twice, independently, before anything is written:
+// GetCampaignBySlug resolves {slug} only if it belongs to the caller (404
+// otherwise — user A can never assign into user B's campaign), and each key
+// is resolved via links.Store.GetLink, ALSO scoped to the caller (404
+// otherwise — user A can never assign user B's link, even into A's own
+// campaign, by guessing B's key).
+//
+// DECISION (acceptance criterion): assigning an already-assigned link MOVES
+// it rather than being rejected — a link belongs to at most one campaign,
+// enforced by the links.campaign_id column, so "assign" always just
+// overwrites whatever was there. See
+// TestCampaignsAssignLinks_MovesAlreadyAssignedLink.
+//
+// A request naming multiple keys is NOT atomic across keys: each is resolved
+// and assigned independently, in the order given, and the first key that
+// fails ownership (404) stops the request without rolling back any keys
+// already assigned in this same call — the response only ever reports 200 on
+// full success, so a partial failure is visible as a 404 with none of the
+// later keys applied, but earlier ones in the same request remain assigned.
+func (h *CampaignsHandler) AssignLinks(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	slug := r.PathValue("slug")
+	if slug == "" {
+		writeError(w, http.StatusBadRequest, "slug is required")
+		return
+	}
+
+	var req assignLinksRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	keys := req.requestedKeys()
+	if len(keys) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one key is required")
+		return
+	}
+	if len(keys) > maxAssignLinksKeys {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("at most %d keys per request", maxAssignLinksKeys))
+		return
+	}
+
+	c, err := h.store.GetCampaignBySlug(r.Context(), u.ID, slug)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, campaigns.ErrCampaignNotFound):
+		writeError(w, http.StatusNotFound, "campaign not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	assigned := make([]links.Link, 0, len(keys))
+	for _, key := range keys {
+		link, err := h.links.GetLink(r.Context(), u.ID, key)
+		switch {
+		case err == nil:
+			// fall through.
+		case errors.Is(err, links.ErrLinkNotFound):
+			writeError(w, http.StatusNotFound, "link not found: "+key)
+			return
+		default:
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
+		actor := u.ID
+		linkID := link.ID
+		entry := audit.Entry{
+			ActorID:    &actor,
+			UserID:     &actor,
+			Action:     audit.ActionCampaignLinkAssigned,
+			TargetType: audit.TargetLink,
+			TargetID:   &linkID,
+			Metadata:   map[string]any{"key": link.Key, "campaign_slug": c.Slug, "campaign_id": c.ID},
+			IP:         clientIP(r),
+		}
+		if err := h.store.AssignLinkToCampaign(r.Context(), u.ID, c.ID, link.ID, h.auditor, entry); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
+		// Re-read so the response reflects the post-assignment state
+		// (campaign_id/campaign_name/campaign_slug now set).
+		updated, err := h.links.GetLink(r.Context(), u.ID, key)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		assigned = append(assigned, updated)
+	}
+
+	views := make([]linkView, 0, len(assigned))
+	for _, l := range assigned {
+		views = append(views, toLinkView(l))
+	}
+	writeJSON(w, http.StatusOK, campaignLinksResponse{Links: views})
+}
+
+// UnassignLink handles DELETE /api/campaigns/{slug}/links/{key}: clears the
+// caller's own link's campaign_id, but only when the link is currently
+// assigned to THIS campaign. Ownership is enforced the same way as
+// AssignLinks (both the campaign and the link must belong to the caller); a
+// link that exists, belongs to the caller, but is assigned to a DIFFERENT
+// campaign (or none) also 404s via UnassignLinkFromCampaign's ErrLinkNotFound
+// — "unassign from a campaign you're not even in" is not a meaningful
+// success.
+func (h *CampaignsHandler) UnassignLink(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	slug := r.PathValue("slug")
+	key := r.PathValue("key")
+	if slug == "" || key == "" {
+		writeError(w, http.StatusBadRequest, "slug and key are required")
+		return
+	}
+
+	c, err := h.store.GetCampaignBySlug(r.Context(), u.ID, slug)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, campaigns.ErrCampaignNotFound):
+		writeError(w, http.StatusNotFound, "campaign not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	link, err := h.links.GetLink(r.Context(), u.ID, key)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, links.ErrLinkNotFound):
+		writeError(w, http.StatusNotFound, "link not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	actor := u.ID
+	linkID := link.ID
+	entry := audit.Entry{
+		ActorID:    &actor,
+		UserID:     &actor,
+		Action:     audit.ActionCampaignLinkUnassigned,
+		TargetType: audit.TargetLink,
+		TargetID:   &linkID,
+		Metadata:   map[string]any{"key": link.Key, "campaign_slug": c.Slug, "campaign_id": c.ID},
+		IP:         clientIP(r),
+	}
+
+	err = h.store.UnassignLinkFromCampaign(r.Context(), u.ID, c.ID, link.ID, h.auditor, entry)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]string{"message": "Link unassigned"})
+	case errors.Is(err, campaigns.ErrLinkNotFound):
+		writeError(w, http.StatusNotFound, "link is not assigned to this campaign")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}

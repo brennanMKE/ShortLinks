@@ -47,9 +47,39 @@ func truncate(t *testing.T, pool *pgxpool.Pool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := pool.Exec(ctx,
-		`TRUNCATE campaigns, audit_log, users RESTART IDENTITY CASCADE`); err != nil {
+		`TRUNCATE links, campaigns, audit_log, users RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
+}
+
+// seedLink inserts an active, non-denied link for userID, optionally
+// assigned to a campaign (pass nil for none), and returns its id. Raw SQL
+// (mirroring handlers/links_test.go's seedLink) since this package does not
+// import internal/links.
+func seedLink(t *testing.T, pool *pgxpool.Pool, userID int64, key, dest string, campaignID *int64) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO links (user_id, key, destination_url, active, denied_reason, created_at, campaign_id)
+		 VALUES ($1, $2, $3, TRUE, 0, now(), $4) RETURNING id`,
+		userID, key, dest, campaignID,
+	).Scan(&id); err != nil {
+		t.Fatalf("seed link %q: %v", key, err)
+	}
+	return id
+}
+
+// linkCampaignID reads a link's current campaign_id (nil if NULL), for
+// assertions that a mutation actually reached the links table.
+func linkCampaignID(t *testing.T, pool *pgxpool.Pool, linkID int64) *int64 {
+	t.Helper()
+	var id *int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT campaign_id FROM links WHERE id = $1`, linkID,
+	).Scan(&id); err != nil {
+		t.Fatalf("reading link campaign_id: %v", err)
+	}
+	return id
 }
 
 func seedUser(t *testing.T, pool *pgxpool.Pool, email string) int64 {
@@ -660,5 +690,335 @@ func TestSchema_InvertedWindowRejectedByCheckConstraint(t *testing.T) {
 	}
 	if n := countCampaigns(t, pool); n != 0 {
 		t.Errorf("campaigns after rejected insert = %d, want 0", n)
+	}
+}
+
+// ── #0099: link membership ──────────────────────────────────────────────────
+
+// TestGetCampaignByID_OwnershipScoped asserts GetCampaignByID mirrors
+// GetCampaignBySlug's ownership contract: another user's lookup by id returns
+// ErrCampaignNotFound, indistinguishable from a nonexistent id.
+func TestGetCampaignByID_OwnershipScoped(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: alice, Name: "Summer Fair"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	if _, err := store.GetCampaignByID(context.Background(), bob, c.ID); !errors.Is(err, ErrCampaignNotFound) {
+		t.Errorf("bob GetCampaignByID(%d) err = %v, want ErrCampaignNotFound", c.ID, err)
+	}
+	got, err := store.GetCampaignByID(context.Background(), alice, c.ID)
+	if err != nil {
+		t.Fatalf("alice GetCampaignByID: %v", err)
+	}
+	if got.Slug != c.Slug {
+		t.Errorf("got slug %q, want %q", got.Slug, c.Slug)
+	}
+}
+
+// TestAssignLinkToCampaign_SetsColumnAndAudits proves AssignLinkToCampaign
+// actually writes links.campaign_id (queried directly, not just via the
+// return value) and writes a campaign.link_assigned audit row inside the
+// same transaction.
+func TestAssignLinkToCampaign_SetsColumnAndAudits(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	uid := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Summer Fair"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	linkID := seedLink(t, pool, uid, "abc123", "https://example.com", nil)
+
+	entry := createEntry(uid, audit.ActionCampaignLinkAssigned)
+	entry.TargetType = audit.TargetLink
+	if err := store.AssignLinkToCampaign(context.Background(), uid, c.ID, linkID, auditor, entry); err != nil {
+		t.Fatalf("AssignLinkToCampaign: %v", err)
+	}
+
+	got := linkCampaignID(t, pool, linkID)
+	if got == nil || *got != c.ID {
+		t.Errorf("links.campaign_id = %v, want %d", got, c.ID)
+	}
+	if n := countAuditRows(t, pool, audit.ActionCampaignLinkAssigned); n != 1 {
+		t.Errorf("campaign.link_assigned audit rows = %d, want 1", n)
+	}
+}
+
+// TestAssignLinkToCampaign_MovesAlreadyAssignedLink proves the DECIDED
+// behavior for the acceptance criterion "assigning an already-assigned link
+// moves it (or is rejected)": assigning a link that already belongs to
+// campaign A into campaign B succeeds and leaves it in B, not A. A rejecting
+// implementation would return an error here instead of nil.
+func TestAssignLinkToCampaign_MovesAlreadyAssignedLink(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	uid := seedUser(t, pool, "alice@example.com")
+
+	a, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Campaign A"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign A: %v", err)
+	}
+	b, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Campaign B"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	linkID := seedLink(t, pool, uid, "abc123", "https://example.com", &a.ID)
+
+	entry := createEntry(uid, audit.ActionCampaignLinkAssigned)
+	entry.TargetType = audit.TargetLink
+	if err := store.AssignLinkToCampaign(context.Background(), uid, b.ID, linkID, auditor, entry); err != nil {
+		t.Fatalf("AssignLinkToCampaign (move to B) returned an error, want success (moves, does not reject): %v", err)
+	}
+
+	got := linkCampaignID(t, pool, linkID)
+	if got == nil || *got != b.ID {
+		t.Errorf("links.campaign_id = %v, want %d (moved to B, not left in A)", got, b.ID)
+	}
+}
+
+// TestAssignLinkToCampaign_LinkOwnershipEnforced asserts assigning a link
+// that belongs to a DIFFERENT user fails (ErrLinkNotFound) and leaves the
+// link's campaign_id untouched — the WHERE user_id = $3 defense-in-depth
+// backstop on the UPDATE itself, independent of whatever ownership check the
+// handler already performed.
+func TestAssignLinkToCampaign_LinkOwnershipEnforced(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: alice, Name: "Alice Campaign"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	bobLinkID := seedLink(t, pool, bob, "bobs-link", "https://example.com", nil)
+
+	entry := createEntry(alice, audit.ActionCampaignLinkAssigned)
+	entry.TargetType = audit.TargetLink
+	err = store.AssignLinkToCampaign(context.Background(), alice, c.ID, bobLinkID, auditor, entry)
+	if !errors.Is(err, ErrLinkNotFound) {
+		t.Errorf("alice AssignLinkToCampaign(bob's link) err = %v, want ErrLinkNotFound", err)
+	}
+	if got := linkCampaignID(t, pool, bobLinkID); got != nil {
+		t.Errorf("bob's link campaign_id = %v, want still NULL (unaffected by alice's failed assign)", *got)
+	}
+}
+
+// TestAssignLinkToCampaign_CampaignOwnershipEnforced is the symmetric
+// counterpart to TestAssignLinkToCampaign_LinkOwnershipEnforced (#0099
+// review item 7): AssignLinkToCampaign's UPDATE re-verifies that campaignID
+// itself belongs to userID, not just that linkID does. Calls the store
+// directly with alice's OWN link but BOB's campaign id — a combination the
+// handler can never actually produce (it resolves campaignID via the
+// already-scoped GetCampaignBySlug/GetCampaignByID first), but this proves
+// the store's own defense-in-depth does not have an asymmetric gap between
+// its two foreign ids.
+func TestAssignLinkToCampaign_CampaignOwnershipEnforced(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+
+	bobCampaign, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: bob, Name: "Bob Campaign"}, auditor, createEntry(bob, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	aliceLinkID := seedLink(t, pool, alice, "alices-link", "https://example.com", nil)
+
+	entry := createEntry(alice, audit.ActionCampaignLinkAssigned)
+	entry.TargetType = audit.TargetLink
+	err = store.AssignLinkToCampaign(context.Background(), alice, bobCampaign.ID, aliceLinkID, auditor, entry)
+	if !errors.Is(err, ErrLinkNotFound) {
+		t.Errorf("alice AssignLinkToCampaign(her own link, bob's campaign) err = %v, want ErrLinkNotFound", err)
+	}
+	if got := linkCampaignID(t, pool, aliceLinkID); got != nil {
+		t.Errorf("alice's link campaign_id = %v, want still NULL (never assigned into bob's campaign)", *got)
+	}
+}
+
+// TestUnassignLinkFromCampaign_ClearsColumn proves UnassignLinkFromCampaign
+// writes campaign_id = NULL (queried directly) and audits
+// campaign.link_unassigned.
+func TestUnassignLinkFromCampaign_ClearsColumn(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	uid := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Summer Fair"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	linkID := seedLink(t, pool, uid, "abc123", "https://example.com", &c.ID)
+
+	entry := createEntry(uid, audit.ActionCampaignLinkUnassigned)
+	entry.TargetType = audit.TargetLink
+	if err := store.UnassignLinkFromCampaign(context.Background(), uid, c.ID, linkID, auditor, entry); err != nil {
+		t.Fatalf("UnassignLinkFromCampaign: %v", err)
+	}
+
+	if got := linkCampaignID(t, pool, linkID); got != nil {
+		t.Errorf("links.campaign_id = %v, want NULL", *got)
+	}
+	if n := countAuditRows(t, pool, audit.ActionCampaignLinkUnassigned); n != 1 {
+		t.Errorf("campaign.link_unassigned audit rows = %d, want 1", n)
+	}
+}
+
+// TestUnassignLinkFromCampaign_WrongCampaignReturnsNotFound asserts
+// unassigning a link that is currently assigned to a DIFFERENT campaign (not
+// campaignID) reports ErrLinkNotFound and leaves the link's actual
+// assignment untouched, rather than silently clearing it.
+func TestUnassignLinkFromCampaign_WrongCampaignReturnsNotFound(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	uid := seedUser(t, pool, "alice@example.com")
+
+	a, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Campaign A"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign A: %v", err)
+	}
+	b, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Campaign B"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	linkID := seedLink(t, pool, uid, "abc123", "https://example.com", &a.ID)
+
+	entry := createEntry(uid, audit.ActionCampaignLinkUnassigned)
+	entry.TargetType = audit.TargetLink
+	err = store.UnassignLinkFromCampaign(context.Background(), uid, b.ID, linkID, auditor, entry)
+	if !errors.Is(err, ErrLinkNotFound) {
+		t.Errorf("UnassignLinkFromCampaign(wrong campaign B) err = %v, want ErrLinkNotFound", err)
+	}
+	got := linkCampaignID(t, pool, linkID)
+	if got == nil || *got != a.ID {
+		t.Errorf("links.campaign_id = %v, want still %d (unaffected by the failed unassign)", got, a.ID)
+	}
+}
+
+// TestDeleteCampaign_SetsLinksCampaignIDNullAndKeepsLinks is the mutation-
+// critical proof that migration 000011's ON DELETE SET NULL actually does
+// what the issue requires: deleting a campaign with links succeeds, nulls
+// their campaign_id (queried directly), and deletes NO link row. Without the
+// FK's ON DELETE SET NULL, this DELETE would instead fail with a foreign-key
+// violation surfaced as a 500 — this test would then fail at the
+// `store.DeleteCampaign` call itself.
+func TestDeleteCampaign_SetsLinksCampaignIDNullAndKeepsLinks(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	uid := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Summer Fair"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	link1 := seedLink(t, pool, uid, "link1", "https://example.com/1", &c.ID)
+	link2 := seedLink(t, pool, uid, "link2", "https://example.com/2", &c.ID)
+
+	if err := store.DeleteCampaign(context.Background(), uid, c.Slug, auditor, createEntry(uid, audit.ActionCampaignDeleted)); err != nil {
+		t.Fatalf("DeleteCampaign with links assigned: %v", err)
+	}
+
+	var linkCount int64
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM links WHERE id IN ($1, $2)`, link1, link2).Scan(&linkCount); err != nil {
+		t.Fatalf("counting links: %v", err)
+	}
+	if linkCount != 2 {
+		t.Errorf("links remaining = %d, want 2 (delete must not cascade to links)", linkCount)
+	}
+	if got := linkCampaignID(t, pool, link1); got != nil {
+		t.Errorf("link1 campaign_id = %v, want NULL", *got)
+	}
+	if got := linkCampaignID(t, pool, link2); got != nil {
+		t.Errorf("link2 campaign_id = %v, want NULL", *got)
+	}
+}
+
+// TestDeleteCampaign_AuditRecordsUnassignedLinksCount asserts the DECIDED
+// behavior for #0098's downstream constraint 3: rather than accept that the
+// campaign.deleted audit row cannot describe how many links were unassigned
+// (since the FK does the unassignment, not application code), DeleteCampaign
+// counts them beforehand and stamps the count into the audit metadata.
+func TestDeleteCampaign_AuditRecordsUnassignedLinksCount(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	uid := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Summer Fair"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	seedLink(t, pool, uid, "link1", "https://example.com/1", &c.ID)
+	seedLink(t, pool, uid, "link2", "https://example.com/2", &c.ID)
+	seedLink(t, pool, uid, "link3", "https://example.com/3", &c.ID)
+
+	if err := store.DeleteCampaign(context.Background(), uid, c.Slug, auditor, createEntry(uid, audit.ActionCampaignDeleted)); err != nil {
+		t.Fatalf("DeleteCampaign: %v", err)
+	}
+
+	var metaRaw []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT metadata FROM audit_log WHERE action = $1 ORDER BY id DESC LIMIT 1`, audit.ActionCampaignDeleted,
+	).Scan(&metaRaw); err != nil {
+		t.Fatalf("querying audit metadata: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		t.Fatalf("unmarshalling audit metadata: %v", err)
+	}
+	count, ok := meta["unassigned_links_count"]
+	if !ok {
+		t.Fatal("audit metadata[\"unassigned_links_count\"] is missing")
+	}
+	if count != float64(3) {
+		t.Errorf("unassigned_links_count = %v, want 3", count)
+	}
+}
+
+// TestDeleteCampaign_AuditRecordsZeroWhenNoLinks asserts the count is 0 (not
+// absent) for a campaign with no links, so the metadata key is always
+// present and reliably parseable.
+func TestDeleteCampaign_AuditRecordsZeroWhenNoLinks(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	uid := seedUser(t, pool, "alice@example.com")
+
+	c, err := store.CreateCampaign(context.Background(), NewCampaign{UserID: uid, Name: "Summer Fair"}, auditor, createEntry(uid, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	if err := store.DeleteCampaign(context.Background(), uid, c.Slug, auditor, createEntry(uid, audit.ActionCampaignDeleted)); err != nil {
+		t.Fatalf("DeleteCampaign: %v", err)
+	}
+
+	var metaRaw []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT metadata FROM audit_log WHERE action = $1 ORDER BY id DESC LIMIT 1`, audit.ActionCampaignDeleted,
+	).Scan(&metaRaw); err != nil {
+		t.Fatalf("querying audit metadata: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		t.Fatalf("unmarshalling audit metadata: %v", err)
+	}
+	if count, ok := meta["unassigned_links_count"]; !ok || count != float64(0) {
+		t.Errorf("unassigned_links_count = %v (present=%v), want 0", count, ok)
 	}
 }

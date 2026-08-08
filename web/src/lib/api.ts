@@ -13,6 +13,7 @@ import type {
   FilterRule,
   AdminUser,
   Setting,
+  Campaign,
 } from './types';
 import type {
   ServerCredentialAssertion,
@@ -121,12 +122,28 @@ export function getLink(key: string): Promise<LinkDetail> {
   return apiGet<LinkDetail>(`/api/links/${encodeURIComponent(key)}`);
 }
 
-/** Body accepted by POST /api/links. */
+/**
+ * Body accepted by POST /api/links. campaign_id/campaign_slug (#0099) are an
+ * optional, mutually-alternative way to assign the link to one of the
+ * caller's own campaigns at create time (campaign_id wins if both are sent).
+ * The five utm_* fields and placement are the discrete columns; they are
+ * expected to describe the SAME values already baked into destination_url
+ * (see composeUtmUrl in lib/utm.ts) — the backend stores exactly what it is
+ * given rather than re-deriving one from the other.
+ */
 export interface CreateLinkInput {
   destination_url: string;
   title?: string;
   key?: string;
   expires_at?: string | null;
+  campaign_id?: number;
+  campaign_slug?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  placement?: string;
 }
 
 /** POST /api/links — create (or dedup-reactivate) a short link. */
@@ -134,14 +151,26 @@ export function createLink(input: CreateLinkInput): Promise<Link> {
   return apiPost<Link>('/api/links', input);
 }
 
-/** Fields PATCH /api/links/{key} can update. */
+/**
+ * Fields PATCH /api/links/{key} can update. The five utm_* fields and
+ * placement (#0099) let the edit form save a builder repopulated via
+ * utmParamsFromLink (lib/utm.ts) back in lockstep with a changed
+ * destination_url. Campaign membership is NOT patchable here — it only
+ * changes via the dedicated assign/unassign campaign-links endpoints below.
+ */
 export interface UpdateLinkInput {
   title?: string;
   destination_url?: string;
   expires_at?: string | null;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  placement?: string;
 }
 
-/** PATCH /api/links/{key} — update title, destination, or expiry. */
+/** PATCH /api/links/{key} — update title, destination, expiry, or UTM/placement. */
 export function updateLink(key: string, input: UpdateLinkInput): Promise<Link> {
   return apiPatch<Link>(`/api/links/${encodeURIComponent(key)}`, input);
 }
@@ -149,6 +178,16 @@ export function updateLink(key: string, input: UpdateLinkInput): Promise<Link> {
 /** DELETE /api/links/{key} — deactivate (soft delete) a link. */
 export function deactivateLink(key: string): Promise<{ message: string }> {
   return apiDelete<{ message: string }>(`/api/links/${encodeURIComponent(key)}`);
+}
+
+// ── Campaigns (#0098, #0099) ─────────────────────────────────────────────────
+// Full campaign CRUD + stats surface is #0102/#0103's frontend; this list
+// call is the minimal slice #0099 needs to populate the create form's
+// campaign-selection dropdown.
+
+/** GET /api/campaigns — the caller's campaigns (archived included). */
+export function listCampaigns(): Promise<{ campaigns: (Campaign & { link_count: number; total_clicks: number })[] }> {
+  return apiGet('/api/campaigns');
 }
 
 /** POST /auth/logout — invalidate the current session. */

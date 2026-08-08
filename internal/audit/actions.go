@@ -43,11 +43,18 @@ const (
 	// Settings.
 	ActionSettingsUpdated = "settings.updated"
 
-	// Campaign lifecycle (#0098). campaign.link_assigned / .link_unassigned
-	// belong to #0099 (link membership) and have no call site yet.
+	// Campaign lifecycle (#0098).
 	ActionCampaignCreated = "campaign.created"
 	ActionCampaignUpdated = "campaign.updated"
 	ActionCampaignDeleted = "campaign.deleted"
+
+	// Campaign link membership (#0099). Written by campaigns.Store's
+	// AssignLinkToCampaign/UnassignLinkFromCampaign, in the same
+	// WriteTx-in-transaction convention as the other campaign.* actions above
+	// — see the doc comment on those methods for why assign/unassign follow
+	// campaigns' convention rather than links' fire-and-forget Record.
+	ActionCampaignLinkAssigned   = "campaign.link_assigned"
+	ActionCampaignLinkUnassigned = "campaign.link_unassigned"
 )
 
 // Target-type constants are the canonical values written to

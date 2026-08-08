@@ -254,6 +254,264 @@ func TestDeleteCampaign_RemovesRow(t *testing.T) {
 	}
 }
 
+// TestDeleteCampaign_SetsLinksCampaignIDNullAndKeepsLinks mirrors
+// campaigns.Store's TestDeleteCampaign_SetsLinksCampaignIDNullAndKeepsLinks:
+// dev mode must reproduce migration 000011's ON DELETE SET NULL by hand,
+// since there is no real FK backing it in memory. Deleting a campaign with
+// assigned links must succeed, null every one of their CampaignID fields
+// (read back via a fresh GetLink, not the pre-delete value), and delete no
+// link row.
+func TestDeleteCampaign_SetsLinksCampaignIDNullAndKeepsLinks(t *testing.T) {
+	s := devstore.New("admin@test.local")
+	ctx := context.Background()
+	const userID = int64(1) // seeded admin, owns "wiki" and "gh"
+
+	c, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: userID, Name: "Summer Fair"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	wiki, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink wiki: %v", err)
+	}
+	gh, err := s.GetLink(ctx, userID, "gh")
+	if err != nil {
+		t.Fatalf("GetLink gh: %v", err)
+	}
+	if err := s.AssignLinkToCampaign(ctx, userID, c.ID, wiki.ID, nil, audit.Entry{}); err != nil {
+		t.Fatalf("assign wiki: %v", err)
+	}
+	if err := s.AssignLinkToCampaign(ctx, userID, c.ID, gh.ID, nil, audit.Entry{}); err != nil {
+		t.Fatalf("assign gh: %v", err)
+	}
+
+	if err := s.DeleteCampaign(ctx, userID, c.Slug, nil, audit0Entry()); err != nil {
+		t.Fatalf("DeleteCampaign with links assigned: %v", err)
+	}
+
+	gotWiki, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink wiki after delete: %v", err)
+	}
+	if gotWiki.CampaignID != nil {
+		t.Errorf("wiki campaign_id = %v, want nil (not a dangling deleted-campaign id)", *gotWiki.CampaignID)
+	}
+	if gotWiki.CampaignName != "" || gotWiki.CampaignSlug != "" {
+		t.Errorf("wiki campaign_name=%q campaign_slug=%q, want both empty", gotWiki.CampaignName, gotWiki.CampaignSlug)
+	}
+	gotGH, err := s.GetLink(ctx, userID, "gh")
+	if err != nil {
+		t.Fatalf("GetLink gh after delete: %v", err)
+	}
+	if gotGH.CampaignID != nil {
+		t.Errorf("gh campaign_id = %v, want nil", *gotGH.CampaignID)
+	}
+
+	// ListLinksForCampaign against the now-deleted id must not still surface
+	// either link — the exact regression a copy-paste "just delete the
+	// campaign row" implementation produces.
+	stillIn, err := s.ListLinksForCampaign(ctx, userID, c.ID)
+	if err != nil {
+		t.Fatalf("ListLinksForCampaign: %v", err)
+	}
+	if len(stillIn) != 0 {
+		t.Errorf("ListLinksForCampaign(deleted id %d) = %+v, want empty", c.ID, stillIn)
+	}
+}
+
+// ── #0099: link membership ──────────────────────────────────────────────────
+
+// TestGetCampaignByID_RoundTrip asserts GetCampaignByID finds a created
+// campaign by id and reports ErrCampaignNotFound for another user.
+func TestGetCampaignByID_RoundTrip(t *testing.T) {
+	s := devstore.New("")
+	ctx := context.Background()
+	const alice, bob = int64(1), int64(2)
+
+	created, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: alice, Name: "Summer Fair"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	got, err := s.GetCampaignByID(ctx, alice, created.ID)
+	if err != nil {
+		t.Fatalf("GetCampaignByID: %v", err)
+	}
+	if got.Slug != created.Slug {
+		t.Errorf("slug = %q, want %q", got.Slug, created.Slug)
+	}
+
+	if _, err := s.GetCampaignByID(ctx, bob, created.ID); !errors.Is(err, campaigns.ErrCampaignNotFound) {
+		t.Errorf("bob GetCampaignByID err = %v, want ErrCampaignNotFound", err)
+	}
+}
+
+// TestAssignUnassignLinkToCampaign_RoundTrip exercises the full
+// assign/unassign cycle against the seeded admin link "wiki" and asserts
+// GetLink reflects campaign_id, campaign_name, and campaign_slug throughout
+// — the same fields links.Store.GetLink's LEFT JOIN populates in production.
+func TestAssignUnassignLinkToCampaign_RoundTrip(t *testing.T) {
+	s := devstore.New("admin@test.local")
+	ctx := context.Background()
+	const userID = int64(1) // seeded admin, owns the "wiki" link
+
+	c, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: userID, Name: "Summer Fair"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	before, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink before assign: %v", err)
+	}
+	if before.CampaignID != nil {
+		t.Fatalf("precondition: wiki already has a campaign_id")
+	}
+
+	if err := s.AssignLinkToCampaign(ctx, userID, c.ID, before.ID, nil, audit.Entry{}); err != nil {
+		t.Fatalf("AssignLinkToCampaign: %v", err)
+	}
+	assigned, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink after assign: %v", err)
+	}
+	if assigned.CampaignID == nil || *assigned.CampaignID != c.ID {
+		t.Errorf("campaign_id = %v, want %d", assigned.CampaignID, c.ID)
+	}
+	if assigned.CampaignName != "Summer Fair" || assigned.CampaignSlug != c.Slug {
+		t.Errorf("campaign_name=%q campaign_slug=%q, want %q/%q", assigned.CampaignName, assigned.CampaignSlug, "Summer Fair", c.Slug)
+	}
+
+	// ListLinksForCampaign should now include it.
+	inCampaign, err := s.ListLinksForCampaign(ctx, userID, c.ID)
+	if err != nil {
+		t.Fatalf("ListLinksForCampaign: %v", err)
+	}
+	if len(inCampaign) != 1 || inCampaign[0].Key != "wiki" {
+		t.Errorf("ListLinksForCampaign = %+v, want exactly [wiki]", inCampaign)
+	}
+
+	if err := s.UnassignLinkFromCampaign(ctx, userID, c.ID, before.ID, nil, audit.Entry{}); err != nil {
+		t.Fatalf("UnassignLinkFromCampaign: %v", err)
+	}
+	unassigned, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink after unassign: %v", err)
+	}
+	if unassigned.CampaignID != nil {
+		t.Errorf("campaign_id after unassign = %v, want nil", unassigned.CampaignID)
+	}
+	if unassigned.CampaignName != "" || unassigned.CampaignSlug != "" {
+		t.Errorf("campaign_name=%q campaign_slug=%q after unassign, want both empty", unassigned.CampaignName, unassigned.CampaignSlug)
+	}
+}
+
+// TestAssignLinkToCampaign_MovesAlreadyAssignedLink matches
+// campaigns.Store's decided behavior in dev mode too: assigning an
+// already-assigned link into a different campaign moves it.
+func TestAssignLinkToCampaign_MovesAlreadyAssignedLink(t *testing.T) {
+	s := devstore.New("")
+	ctx := context.Background()
+	const userID = int64(1)
+
+	a, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: userID, Name: "Campaign A"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign A: %v", err)
+	}
+	b, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: userID, Name: "Campaign B"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign B: %v", err)
+	}
+	link, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink: %v", err)
+	}
+
+	if err := s.AssignLinkToCampaign(ctx, userID, a.ID, link.ID, nil, audit.Entry{}); err != nil {
+		t.Fatalf("assign to A: %v", err)
+	}
+	if err := s.AssignLinkToCampaign(ctx, userID, b.ID, link.ID, nil, audit.Entry{}); err != nil {
+		t.Fatalf("assign to B (already in A) returned an error, want success: %v", err)
+	}
+	got, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink: %v", err)
+	}
+	if got.CampaignID == nil || *got.CampaignID != b.ID {
+		t.Errorf("campaign_id = %v, want %d (moved to B)", got.CampaignID, b.ID)
+	}
+}
+
+// TestAssignLinkToCampaign_OwnershipEnforced asserts assigning a link
+// belonging to a DIFFERENT user returns campaigns.ErrLinkNotFound.
+func TestAssignLinkToCampaign_OwnershipEnforced(t *testing.T) {
+	s := devstore.New("")
+	ctx := context.Background()
+	const alice, bob = int64(1), int64(2)
+
+	c, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: bob, Name: "Bob Campaign"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	aliceLink, err := s.GetLink(ctx, alice, "wiki") // seeded admin (id=1=alice here) owns "wiki"
+	if err != nil {
+		t.Fatalf("GetLink: %v", err)
+	}
+
+	// bob tries to assign alice's link into his own campaign.
+	err = s.AssignLinkToCampaign(ctx, bob, c.ID, aliceLink.ID, nil, audit.Entry{})
+	if !errors.Is(err, campaigns.ErrLinkNotFound) {
+		t.Errorf("bob AssignLinkToCampaign(alice's link) err = %v, want ErrLinkNotFound", err)
+	}
+	got, err := s.GetLink(ctx, alice, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink: %v", err)
+	}
+	if got.CampaignID != nil {
+		t.Errorf("alice's link campaign_id = %v, want still nil", got.CampaignID)
+	}
+}
+
+// TestLink_CampaignIDNotAliased is the pointer-aliasing regression probe for
+// links.Link.CampaignID, mirroring TestCampaign_StartsAtEndsAtNotAliased:
+// mutating a *int64 the caller passed into AssignLinkToCampaign, or a
+// pointer on a value GetLink returned, must never reach the store's own
+// state.
+func TestLink_CampaignIDNotAliased(t *testing.T) {
+	s := devstore.New("")
+	ctx := context.Background()
+	const userID = int64(1)
+
+	c, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: userID, Name: "Summer Fair"}, nil, audit0Entry())
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	link, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink: %v", err)
+	}
+	if err := s.AssignLinkToCampaign(ctx, userID, c.ID, link.ID, nil, audit.Entry{}); err != nil {
+		t.Fatalf("AssignLinkToCampaign: %v", err)
+	}
+
+	got, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink: %v", err)
+	}
+	if got.CampaignID == nil {
+		t.Fatal("precondition: campaign_id is nil")
+	}
+	// Mutate the pointer on the returned value.
+	*got.CampaignID = 999999
+
+	got2, err := s.GetLink(ctx, userID, "wiki")
+	if err != nil {
+		t.Fatalf("GetLink (second read): %v", err)
+	}
+	if got2.CampaignID == nil || *got2.CampaignID != c.ID {
+		t.Errorf("campaign_id after mutating a previously-returned pointer = %v, want unaffected %d", got2.CampaignID, c.ID)
+	}
+}
+
 // audit0Entry returns a minimal audit.Entry for tests that don't care about
 // audit content — devstore's campaign methods accept but ignore it (dev mode
 // wires a nil auditor; see the campaignStore section of devstore.go).
