@@ -22,6 +22,9 @@ function bucket(value: string, count: number): UTMBucket {
 function stats(overrides: Partial<ClickStats> = {}): ClickStats {
   return {
     click_count: 0,
+    // #0101: the API always emits this (no omitempty on the Go side), so the
+    // type is required rather than optional and the factory must supply it.
+    excluded_bot_count: 0,
     by_source: [],
     by_medium: [],
     by_campaign: [],

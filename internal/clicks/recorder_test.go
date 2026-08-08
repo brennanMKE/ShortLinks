@@ -237,6 +237,7 @@ func TestRecorder_EmptyUTMStoredAsNull(t *testing.T) {
 type clickRow struct {
 	Source, Medium, Campaign, Term, Content string
 	CampaignID                              *int64
+	IsBot                                   bool
 }
 
 // readClick reads back the single clicks row recorded for the link identified
@@ -257,14 +258,15 @@ func readClick(t *testing.T, pool *pgxpool.Pool, key string) clickRow {
 
 	var src, med, camp, term, cont *string
 	var campID *int64
+	var isBot bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT c.utm_source, c.utm_medium, c.utm_campaign, c.utm_term, c.utm_content, c.campaign_id
+		`SELECT c.utm_source, c.utm_medium, c.utm_campaign, c.utm_term, c.utm_content, c.campaign_id, c.is_bot
 		   FROM clicks c JOIN links l ON l.id = c.link_id
 		  WHERE l.key = $1`, key,
-	).Scan(&src, &med, &camp, &term, &cont, &campID); err != nil {
+	).Scan(&src, &med, &camp, &term, &cont, &campID, &isBot); err != nil {
 		t.Fatalf("read back click for key %q: %v", key, err)
 	}
-	row := clickRow{CampaignID: campID}
+	row := clickRow{CampaignID: campID, IsBot: isBot}
 	if src != nil {
 		row.Source = *src
 	}
@@ -493,6 +495,76 @@ func TestRecorder_DeletingCampaignNullsClickCampaignIDWithoutDeletingRow(t *test
 	got := readClick(t, pool, "cd0001") // readClick itself asserts exactly one row still exists
 	if got.CampaignID != nil {
 		t.Errorf("campaign_id after campaign deletion = %v, want nil (SET NULL)", *got.CampaignID)
+	}
+}
+
+// TestRecorder_ClassifiesBotUserAgentAndStillRecordsRow is the #0101
+// end-to-end assertion at the recorder layer: a click whose User-Agent
+// matches BotUserAgentSubstrings is written with is_bot = TRUE, and — the
+// issue's explicit requirement — the row is still written at all. A bug that
+// dropped bot clicks instead of flagging them would pass a naive "is_bot is
+// true" check vacuously (no row to read), so this also asserts exactly one
+// row exists via readClick's built-in count check.
+func TestRecorder_ClassifiesBotUserAgentAndStillRecordsRow(t *testing.T) {
+	pool := testPool(t)
+	rec := NewRecorder(pool, nil)
+
+	uid := seedUser(t, pool, "bot-record@example.com")
+	seedLink(t, pool, uid, "bot0001", "https://example.com")
+
+	c := Click{Key: "bot0001", UserAgent: "Twitterbot/1.0"}
+	if err := rec.Record(context.Background(), c); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got := readClick(t, pool, "bot0001") // asserts exactly one row exists
+	if !got.IsBot {
+		t.Error("is_bot = false, want true for a Twitterbot User-Agent")
+	}
+}
+
+// TestRecorder_RealBrowserUserAgentNotFlagged is the mirror of the bot test
+// above: a normal browser click must record is_bot = FALSE, so classification
+// isn't a bug that flags everything (which would make the bot test above
+// pass vacuously alongside a broken, always-true classifier).
+func TestRecorder_RealBrowserUserAgentNotFlagged(t *testing.T) {
+	pool := testPool(t)
+	rec := NewRecorder(pool, nil)
+
+	uid := seedUser(t, pool, "human-record@example.com")
+	seedLink(t, pool, uid, "hum0001", "https://example.com")
+
+	c := Click{
+		Key:       "hum0001",
+		UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+	}
+	if err := rec.Record(context.Background(), c); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got := readClick(t, pool, "hum0001")
+	if got.IsBot {
+		t.Error("is_bot = true, want false for a real Chrome-on-macOS User-Agent")
+	}
+}
+
+// TestRecorder_EmptyUserAgentNotFlaggedAsBot asserts the record path applies
+// the same deliberate empty-UA policy as IsBot itself: a click with no
+// User-Agent at all is recorded as is_bot = FALSE, not TRUE.
+func TestRecorder_EmptyUserAgentNotFlaggedAsBot(t *testing.T) {
+	pool := testPool(t)
+	rec := NewRecorder(pool, nil)
+
+	uid := seedUser(t, pool, "empty-ua-record@example.com")
+	seedLink(t, pool, uid, "eua0001", "https://example.com")
+
+	if err := rec.Record(context.Background(), Click{Key: "eua0001"}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	got := readClick(t, pool, "eua0001")
+	if got.IsBot {
+		t.Error("is_bot = true, want false for an absent User-Agent")
 	}
 }
 

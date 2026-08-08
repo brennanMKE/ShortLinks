@@ -93,6 +93,13 @@ func NewRecorder(pool *pgxpool.Pool, log *slog.Logger) *Recorder {
 // Non-UTM metadata (ip_address/user_agent/referer) has no fallback and keeps
 // the pre-#0100 empty-string-to-NULL behavior via nullStr/nullableIP below.
 //
+// is_bot (#0101) is classified here, in Go, from c.UserAgent via IsBot before
+// the INSERT ever runs — not in SQL — so the substring list stays a plain,
+// unit-testable Go value (botdetect.go) with no SQL round-trip required to
+// exercise it. A click is ALWAYS written regardless of the classification: a
+// bot click is flagged (is_bot = TRUE), never dropped, so the raw data stays
+// inspectable even though stats queries exclude it by default.
+//
 // It returns an error for callers (and tests) that want to assert the write;
 // the fire-and-forget redirect path should use RecordClick instead.
 func (r *Recorder) Record(ctx context.Context, c Click) error {
@@ -105,14 +112,14 @@ func (r *Recorder) Record(ctx context.Context, c Click) error {
 		`INSERT INTO clicks
 		     (link_id, clicked_at, ip_address, user_agent, referer,
 		      utm_source, utm_medium, utm_campaign, utm_term, utm_content,
-		      campaign_id)
+		      campaign_id, is_bot)
 		 SELECT l.id, $2, $3, $4, $5,
 		        COALESCE(NULLIF($6, ''), l.utm_source),
 		        COALESCE(NULLIF($7, ''), l.utm_medium),
 		        COALESCE(NULLIF($8, ''), l.utm_campaign),
 		        COALESCE(NULLIF($9, ''), l.utm_term),
 		        COALESCE(NULLIF($10, ''), l.utm_content),
-		        l.campaign_id
+		        l.campaign_id, $11
 		   FROM links l
 		  WHERE l.key = $1`,
 		c.Key,
@@ -125,6 +132,7 @@ func (r *Recorder) Record(ctx context.Context, c Click) error {
 		c.UTMCampaign,
 		c.UTMTerm,
 		c.UTMContent,
+		IsBot(c.UserAgent),
 	)
 	return err
 }

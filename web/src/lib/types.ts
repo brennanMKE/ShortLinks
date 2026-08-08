@@ -59,9 +59,18 @@ export interface UTMBucket {
 /**
  * Per-link click analytics (internal/clicks/stats.go `UTMStats`). Surfaced on
  * the link-detail response as `utm_stats`.
+ *
+ * click_count and every by_* breakdown already exclude bot/crawler clicks
+ * (#0101 — is_bot = TRUE). excluded_bot_count is that same exclusion made
+ * visible rather than silent: the number of bot-flagged clicks left out of
+ * click_count, so a UI can show it alongside the total instead of the total
+ * just quietly being smaller than raw activity with no explanation. #0103
+ * owns actually surfacing it in the UI; this type just tracks the payload
+ * the backend already sends.
  */
 export interface ClickStats {
   click_count: number;
+  excluded_bot_count: number;
   by_source: UTMBucket[];
   by_medium: UTMBucket[];
   by_campaign: UTMBucket[];

@@ -580,6 +580,58 @@ func TestCampaignsListLinks_ReturnsAssignedLinksOnly(t *testing.T) {
 	}
 }
 
+// TestCampaignsListLinks_ClickCountExcludesBotsAndBotOnlyLinkStillAppears
+// mirrors TestLinksList_ClickCountExcludesBotsAndBotOnlyLinkStillAppears for
+// ListLinksForCampaign (#0101 review): it shares the exact same LEFT JOIN
+// shape as ListLinks, so it is exposed to the exact same ON-vs-WHERE trap —
+// a link assigned to the campaign whose only clicks are bot clicks must
+// still appear in the campaign's link list, with click_count = 0.
+func TestCampaignsListLinks_ClickCountExcludesBotsAndBotOnlyLinkStillAppears(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Bot Trap"}`)
+	campaignID := campaignRowID(t, pool, c.Slug)
+
+	botOnly := seedLinkWithCampaign(t, pool, alice, "cbotonly", "https://example.com/bot", &campaignID)
+	seedBotClick(t, pool, botOnly)
+	seedBotClick(t, pool, botOnly)
+
+	mixed := seedLinkWithCampaign(t, pool, alice, "cmixed", "https://example.com/mixed", &campaignID)
+	seedClick(t, pool, mixed)
+	seedBotClick(t, pool, mixed)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/links", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body campaignLinksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Links) != 2 {
+		t.Fatalf("links = %+v, want 2 (bot-only link must not be dropped from its campaign's list)", body.Links)
+	}
+	byKey := map[string]int64{}
+	for _, l := range body.Links {
+		byKey[l.Key] = l.ClickCount
+	}
+	if count, ok := byKey["cbotonly"]; !ok || count != 0 {
+		t.Errorf("cbotonly click_count = %d (present=%v), want 0", count, ok)
+	}
+	if count, ok := byKey["cmixed"]; !ok || count != 1 {
+		t.Errorf("cmixed click_count = %d (present=%v), want 1", count, ok)
+	}
+}
+
 // TestCampaignsListLinks_OwnershipEnforced asserts user A cannot list user
 // B's campaign's links: 404, indistinguishable from a nonexistent slug.
 func TestCampaignsListLinks_OwnershipEnforced(t *testing.T) {

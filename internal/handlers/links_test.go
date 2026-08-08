@@ -54,15 +54,29 @@ func seedLink(t *testing.T, pool *pgxpool.Pool, userID int64, key, dest string) 
 	return id
 }
 
-// seedClick inserts one clicks row for a link so click_count assertions have
-// real data to aggregate.
+// seedClick inserts one non-bot clicks row for a link so click_count
+// assertions have real data to aggregate.
 func seedClick(t *testing.T, pool *pgxpool.Pool, linkID int64) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO clicks (link_id, clicked_at) VALUES ($1, now())`, linkID,
+		`INSERT INTO clicks (link_id, clicked_at, is_bot) VALUES ($1, now(), FALSE)`, linkID,
 	); err != nil {
 		t.Fatalf("seed click: %v", err)
+	}
+}
+
+// seedBotClick inserts one is_bot = TRUE clicks row for a link (#0101), so
+// tests can assert click_count excludes it — and, for the LEFT JOIN sites
+// (ListLinks/ListLinksForCampaign), that a link whose ONLY clicks are bot
+// clicks still appears in the list rather than being silently dropped.
+func seedBotClick(t *testing.T, pool *pgxpool.Pool, linkID int64) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO clicks (link_id, clicked_at, is_bot) VALUES ($1, now(), TRUE)`, linkID,
+	); err != nil {
+		t.Fatalf("seed bot click: %v", err)
 	}
 }
 
@@ -202,6 +216,17 @@ func TestLinksCreate_DedupActiveDuplicate(t *testing.T) {
 		t.Fatalf("after first POST, row count = %d, want 1", n)
 	}
 
+	// Seed one human and two bot clicks on the freshly created link before
+	// the dedup POST below. lockExisting (#0101 review) is the one
+	// click_count call site the rest of #0101's coverage doesn't reach: it
+	// backs this exact dedup response (POST /api/links returning
+	// duplicate=true), which is reachable independently of GET
+	// /api/links/{key} — a bug here would let the two disagree for the same
+	// link, the same defect class the click_count fix was about.
+	seedClick(t, pool, first.ID)
+	seedBotClick(t, pool, first.ID)
+	seedBotClick(t, pool, first.ID)
+
 	// Second POST of the SAME URL by the SAME user → active duplicate.
 	second, status := postLink(t, srv, "alice-token", `{"destination_url":"`+dest+`","title":"Second"}`)
 	if status != http.StatusCreated {
@@ -216,6 +241,11 @@ func TestLinksCreate_DedupActiveDuplicate(t *testing.T) {
 	}
 	if n := countUserURLLinks(t, pool, alice, dest); n != 1 {
 		t.Fatalf("after second POST, row count = %d, want 1 (no new row)", n)
+	}
+	// The dedup response's click_count must exclude the two bot clicks
+	// (lockExisting's own COUNT, not UTMStatsForLink's) — 1, not 3.
+	if second.ClickCount != 1 {
+		t.Errorf("dedup response click_count = %d, want 1 (2 bot clicks excluded by lockExisting)", second.ClickCount)
 	}
 
 	// Deactivate the link, then POST the same URL again → reactivation.
@@ -450,8 +480,74 @@ func TestLinksList_ScopedAndPaginated(t *testing.T) {
 	}
 }
 
+// TestLinksList_ClickCountExcludesBotsAndBotOnlyLinkStillAppears is the
+// #0101 review's ON-clause trap, made concrete: ListLinks joins clicks onto
+// links with a LEFT JOIN so every link appears even with zero clicks. The
+// is_bot = FALSE exclusion MUST live in that JOIN's ON clause rather than a
+// WHERE clause — a WHERE clause runs after the join and would filter out
+// the joined row entirely for a link whose only clicks are bot clicks,
+// making GROUP BY collapse to nothing and the link silently vanish from its
+// own owner's list. This test seeds a link with ONLY bot clicks (no human
+// clicks at all) and asserts it still appears, with click_count = 0 — plus
+// a normal link with a mix of human and bot clicks, asserting only the
+// human clicks count.
+func TestLinksList_ClickCountExcludesBotsAndBotOnlyLinkStillAppears(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(linksMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+
+	botOnly := seedLink(t, pool, alice, "botonly", "https://botonly.example.com")
+	seedBotClick(t, pool, botOnly)
+	seedBotClick(t, pool, botOnly)
+
+	mixed := seedLink(t, pool, alice, "mixed", "https://mixed.example.com")
+	seedClick(t, pool, mixed)
+	seedClick(t, pool, mixed)
+	seedBotClick(t, pool, mixed)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/links?page=1&per_page=10", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var body listLinksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Total != 2 {
+		t.Fatalf("total = %d, want 2 — the bot-only link must not be dropped from its owner's list", body.Total)
+	}
+	byKey := map[string]int64{}
+	for _, l := range body.Links {
+		byKey[l.Key] = l.ClickCount
+	}
+	count, ok := byKey["botonly"]
+	if !ok {
+		t.Fatal("botonly link is missing from the list entirely — the LEFT JOIN's is_bot filter must be in the ON clause, not WHERE")
+	}
+	if count != 0 {
+		t.Errorf("botonly click_count = %d, want 0", count)
+	}
+	if count, ok := byKey["mixed"]; !ok || count != 2 {
+		t.Errorf("mixed click_count = %d (present=%v), want 2", count, ok)
+	}
+}
+
 // TestLinksGet_DetailWithClickCount asserts detail returns the correct click
 // count, and another user's key 404s.
+//
+// It also seeds two bot clicks (#0101) alongside the three human ones and
+// asserts click_count stays 3, not 5 — links.Store.GetLink's click_count
+// must exclude is_bot = TRUE the same way clicks.UTMStatsForLink's
+// utm_stats.click_count does, so a single GET /api/links/{key} response
+// never carries two disagreeing totals for the same link.
 func TestLinksGet_DetailWithClickCount(t *testing.T) {
 	pool := credsTestPool(t)
 	srv := httptest.NewServer(linksMux(t, pool))
@@ -465,6 +561,8 @@ func TestLinksGet_DetailWithClickCount(t *testing.T) {
 	seedClick(t, pool, aliceLink)
 	seedClick(t, pool, aliceLink)
 	seedClick(t, pool, aliceLink)
+	seedBotClick(t, pool, aliceLink)
+	seedBotClick(t, pool, aliceLink)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/links/alc", nil)
 	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
@@ -475,12 +573,25 @@ func TestLinksGet_DetailWithClickCount(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	var body linkView
+	var body linkDetailView
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if body.ClickCount != 3 {
-		t.Errorf("click_count = %d, want 3", body.ClickCount)
+		t.Errorf("click_count = %d, want 3 (2 bot clicks must be excluded)", body.ClickCount)
+	}
+	// The headline click_count and the utm_stats breakdown's total must agree
+	// — this is exactly the "two contradictory totals in one payload" defect
+	// #0101's review caught: click_count used to be a raw COUNT(*) while
+	// utm_stats.click_count already excluded bots.
+	if body.UTMStats == nil {
+		t.Fatal("utm_stats missing from detail response")
+	}
+	if body.UTMStats.ClickCount != body.ClickCount {
+		t.Errorf("utm_stats.click_count = %d, click_count = %d — must agree", body.UTMStats.ClickCount, body.ClickCount)
+	}
+	if body.UTMStats.ExcludedBotCount != 2 {
+		t.Errorf("utm_stats.excluded_bot_count = %d, want 2", body.UTMStats.ExcludedBotCount)
 	}
 
 	// Foreign key → 404.

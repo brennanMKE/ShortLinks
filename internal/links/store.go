@@ -497,10 +497,14 @@ func applyRequestedMetadataTx(ctx context.Context, tx pgx.Tx, existing Link, in 
 // link for destinationURL, with its aggregated click count. ErrNoRows means no
 // such link exists. It runs inside the dedup transaction so the reactivate or
 // no-op decision is made against a row no concurrent create can change.
+//
+// click_count excludes is_bot = TRUE clicks (#0101), matching
+// clicks.UTMStatsForLink's ClickCount so a link never carries two
+// contradictory totals across the API surface.
 func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, destinationURL string) (Link, error) {
 	row := q.QueryRow(ctx,
 		`SELECT `+linkColumns+`,
-		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id) AS click_count
+		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id AND c.is_bot = FALSE) AS click_count
 		   FROM links l
 		  WHERE l.user_id = $1 AND l.destination_url = $2 AND l.denied_reason = 0
 		  LIMIT 1
@@ -516,12 +520,24 @@ func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, desti
 // pagination; the handler derives them from ?page=/?per_page=. A LEFT JOIN
 // aggregate yields click_count in the same query so the list does not issue one
 // COUNT per row.
+//
+// click_count excludes is_bot = TRUE clicks (#0101), matching
+// clicks.UTMStatsForLink's ClickCount. The is_bot = FALSE predicate lives in
+// the JOIN's ON clause, not a WHERE clause: WHERE would run AFTER the LEFT
+// JOIN and drop the link's row entirely whenever every one of its clicks is
+// bot traffic (the join would produce only bot rows, WHERE would filter all
+// of them out, and GROUP BY l.id would have nothing left to group — the link
+// silently vanishes from its own owner's list). Filtering in ON instead
+// keeps the LEFT JOIN's guarantee that every link appears at least once (as
+// a row with c.id = NULL when no clicks pass the predicate), so COUNT(c.id)
+// correctly yields 0 for a link whose only clicks are bot clicks, rather
+// than the link disappearing.
 func (s *Store) ListLinks(ctx context.Context, userID int64, limit, offset int) ([]Link, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+linkColumns+`,
 		        COUNT(c.id) AS click_count
 		   FROM links l
-		   LEFT JOIN clicks c ON c.link_id = l.id
+		   LEFT JOIN clicks c ON c.link_id = l.id AND c.is_bot = FALSE
 		  WHERE l.user_id = $1
 		  GROUP BY l.id
 		  ORDER BY l.created_at DESC, l.id DESC
@@ -556,12 +572,16 @@ func (s *Store) ListLinks(ctx context.Context, userID int64, limit, offset int) 
 // GET /api/campaigns/{slug}/links (#0099); no pagination, matching the
 // issue's scope (campaign link counts are expected to be small — bulk
 // listing is #0105).
+// click_count excludes is_bot = TRUE clicks (#0101); see ListLinks for why
+// the exclusion is in the ON clause rather than WHERE (a WHERE-clause
+// predicate would silently drop a link from the campaign's own list whenever
+// every one of its clicks is bot traffic).
 func (s *Store) ListLinksForCampaign(ctx context.Context, userID, campaignID int64) ([]Link, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+linkColumns+`,
 		        COUNT(c.id) AS click_count
 		   FROM links l
-		   LEFT JOIN clicks c ON c.link_id = l.id
+		   LEFT JOIN clicks c ON c.link_id = l.id AND c.is_bot = FALSE
 		  WHERE l.user_id = $1 AND l.campaign_id = $2
 		  GROUP BY l.id
 		  ORDER BY l.created_at DESC, l.id DESC`,
@@ -607,10 +627,13 @@ func (s *Store) CountLinks(ctx context.Context, userID int64) (int64, error) {
 // does not exist OR belongs to another user — the two are deliberately
 // indistinguishable so the detail endpoint never leaks the existence of
 // another user's link.
+// click_count excludes is_bot = TRUE clicks (#0101), matching the same
+// link's utm_stats.click_count and timeseries in the same API response —
+// prior to this, the two disagreed whenever a link had any bot traffic.
 func (s *Store) GetLink(ctx context.Context, userID int64, key string) (Link, error) {
 	row := s.pool.QueryRow(ctx,
 		`SELECT `+linkColumns+`,
-		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id) AS click_count,
+		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id AND c.is_bot = FALSE) AS click_count,
 		        camp.name, camp.slug
 		   FROM links l
 		   LEFT JOIN campaigns camp ON camp.id = l.campaign_id
