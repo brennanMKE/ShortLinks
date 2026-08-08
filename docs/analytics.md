@@ -20,7 +20,8 @@ stuck database cannot leak goroutines indefinitely.
 ### What is captured
 
 Each click maps to one row in the `clicks` table (migration
-`migrations/000003_create_clicks.up.sql`):
+`migrations/000003_create_clicks.up.sql`, extended by
+`migrations/000012_clicks_campaign_and_bot.up.sql` — #0100):
 
 | Column | Type | Notes |
 |---|---|---|
@@ -30,32 +31,108 @@ Each click maps to one row in the `clicks` table (migration
 | `ip_address` | `INET` | Extracted from `X-Forwarded-For` / `RemoteAddr`; unparseable values are dropped (stored as NULL) |
 | `user_agent` | `TEXT` | NULL when empty |
 | `referer` | `TEXT` | NULL when empty |
-| `utm_source` | `TEXT` | NULL when the parameter was absent |
-| `utm_medium` | `TEXT` | NULL when the parameter was absent |
-| `utm_campaign` | `TEXT` | NULL when the parameter was absent |
-| `utm_term` | `TEXT` | NULL when the parameter was absent |
-| `utm_content` | `TEXT` | NULL when the parameter was absent |
+| `utm_source` | `TEXT` | Inbound short-URL value if present, else the link's own stored `utm_source` (#0099), else NULL — see "UTM fallback precedence" below |
+| `utm_medium` | `TEXT` | Same precedence as `utm_source` |
+| `utm_campaign` | `TEXT` | Same precedence as `utm_source` |
+| `utm_term` | `TEXT` | Same precedence as `utm_source` |
+| `utm_content` | `TEXT` | Same precedence as `utm_source` |
+| `campaign_id` | `BIGINT` | The link's `campaign_id` **at the moment of the click** (#0100), `NULL` if the link had no campaign. `REFERENCES campaigns(id) ON DELETE SET NULL`. See "Campaign attribution" below |
+| `is_bot` | `BOOLEAN` | Added by #0100, always `FALSE` today — nothing populates it yet. Bot classification is [#0101](../issues/0101.md) |
 
-The recorder stores empty strings as SQL NULL (via `nullStr` in
-`internal/clicks/recorder.go`). This means the analytics `(none)` bucket always
-represents genuine absence of a UTM parameter, never an empty string that
-happened to be forwarded.
+`user_agent`/`referer`/`ip_address` have no fallback: the recorder stores an
+empty string as SQL NULL for these three (via `nullStr`/`nullableIP` in
+`internal/clicks/recorder.go`), so an absent value is always genuine absence,
+never an empty string that happened to be forwarded. The five `utm_*` columns
+are different — `nullStr` does not touch them at all; their empty-vs-absent
+handling and `(none)`-bucket behavior are governed by the fallback precedence
+below instead.
 
-Two indexes support analytics queries:
+Four indexes support analytics queries:
 
 - `idx_clicks_link_id` on `(link_id)` — aggregate counts per link.
 - `idx_clicks_clicked_at` on `(clicked_at)` — time-range queries.
+- `idx_clicks_campaign_id` on `(campaign_id) WHERE campaign_id IS NOT NULL` — aggregate counts per campaign.
+- `idx_clicks_campaign_time` on `(campaign_id, clicked_at) WHERE campaign_id IS NOT NULL` — campaign-scoped time-range queries (backs [#0102](../issues/0102.md)'s campaign timeseries).
+
+### UTM fallback precedence (#0100)
+
+`internal/clicks/recorder.go`'s `Record` resolves each of the five `utm_*`
+columns independently, in this exact precedence:
+
+1. **The inbound short-URL query parameter**, if present and non-empty
+   (`?utm_source=...` on the `/u/{key}` request).
+2. Otherwise, **the link's own stored discrete UTM value** (#0099's
+   `links.utm_source` etc.) — what was baked into the link at create/edit time.
+3. Otherwise, `NULL` (the analytics `(none)` bucket).
+
+This resolution happens **per key**, not all-or-nothing: a short URL followed
+with only `?utm_source=twitter` appended records `utm_source = "twitter"`
+(inbound wins) while `utm_medium`/`utm_campaign`/etc. still fall back to
+whatever the link has stored, if anything. An inbound empty string
+(`?utm_source=`) is treated as absent and falls back — never stored as a
+literal empty override. The SQL expression is
+`COALESCE(NULLIF($n, ''), l.utm_source)` per column, executed inside the same
+INSERT that resolves `link_id` (see "Statement shape" below).
+
+**This is a behavior change to existing per-link analytics, and it is not
+retroactive.** Before #0100, a link with `utm_source=newsletter` baked into its
+`destination_url` but shared as a bare short URL (no query params on the short
+link) recorded `(none)` for every dimension — every breakdown was a single
+`(none)` bar. After #0100, the same bare short URL records `utm_source =
+"newsletter"` because it now falls back to the link's stored value. Existing
+click rows are **not backfilled** with fallback values (see "Campaign
+attribution" below for the same non-backfill decision on `campaign_id`), so a
+`ClicksOverTime`/UTM-breakdown chart whose date range spans the deploy date
+will show a discontinuity — a jump from mostly-`(none)` to mostly-attributed —
+at the deploy boundary. That jump is an artifact of when the fallback started
+applying, not a real change in traffic or campaign behavior; do not read it as
+a trend.
+
+### Campaign attribution (#0100)
+
+`campaign_id` is **denormalized** onto the click row: it is resolved from the
+link's `campaign_id` inside the same INSERT that records the click, not joined
+from `links`/`campaigns` at query time. This is deliberate — a link can be
+reassigned to a different campaign, or unassigned, after clicks have already
+been recorded against it. A click resolved via a query-time join would
+silently follow the link's *current* campaign, rewriting history every time
+the link moves. Because `campaign_id` is captured once, at record time, a
+click recorded while a link belonged to Campaign A keeps reporting Campaign A
+forever, even after the link is later reassigned to Campaign B or unassigned
+entirely.
+
+`campaign_id`'s FK is `ON DELETE SET NULL`, mirroring `links.campaign_id`
+(migration 000011) and `clicks.link_id`'s non-cascading FK (migration 000003):
+deleting a campaign unassigns its historical clicks' `campaign_id` but never
+deletes a click row — click history is designed to outlive the entities it
+references.
+
+Existing click rows keep `campaign_id = NULL` after the #0100 migration — they
+predate campaigns entirely and are **not backfilled** by guessing from
+`utm_campaign` strings (a wrong guess is worse than a known gap, matching
+migration 000011's UTM-column decision).
+
+### Statement shape
+
+Both the UTM fallback and the campaign resolution fit inside the **same
+single INSERT...SELECT** the recorder already used to resolve `link_id` — the
+redirect path gains no additional query. The `WHERE l.key = $1` scalar lookup
+that resolves `link_id` also supplies `l.campaign_id`, `l.utm_source`, etc. for
+the `SELECT` list in one round trip.
 
 ### Go types
 
 ```go
 // internal/clicks/recorder.go
 type Click struct {
-    Key         string    // short-link key; resolved to link_id in SQL
+    Key         string    // short-link key; resolved to link_id (and campaign_id) in SQL
     ClickedAt   time.Time // zero → use now()
     IPAddress   string
     UserAgent   string
     Referer     string
+    // UTMSource..UTMContent are the INBOUND values only (see "UTM fallback
+    // precedence" above) — Record resolves the stored value itself when one
+    // of these is "".
     UTMSource   string
     UTMMedium   string
     UTMCampaign string
@@ -63,6 +140,10 @@ type Click struct {
     UTMContent  string
 }
 ```
+
+`Click` has no `CampaignID` field — it is never supplied by the caller and is
+always resolved from the link inside `Record`'s SQL, so it cannot drift from
+whatever campaign the link actually belonged to at record time.
 
 `Recorder` is safe for concurrent use; the underlying `pgxpool.Pool` handles
 connection multiplexing. `RecordClick(c Click)` is the fire-and-forget entry
@@ -325,8 +406,9 @@ When `buckets` is empty or null, the component renders "No data." in faint text.
 
 | Path | Role |
 |---|---|
-| `migrations/000003_create_clicks.up.sql` | Schema for the `clicks` table and its indexes |
-| `internal/clicks/recorder.go` | `Click` type, `Recorder`, `RecordClick` (fire-and-forget), `Record` |
+| `migrations/000003_create_clicks.up.sql` | Original schema for the `clicks` table and its first two indexes |
+| `migrations/000012_clicks_campaign_and_bot.{up,down}.sql` | Adds `campaign_id`/`is_bot` and `idx_clicks_campaign_id`/`idx_clicks_campaign_time` (#0100) |
+| `internal/clicks/recorder.go` | `Click` type, `Recorder`, `RecordClick` (fire-and-forget), `Record` (the #0100 UTM fallback + campaign_id resolution) |
 | `internal/clicks/stats.go` | `StatsStore`, `UTMStatsForLink`, `ClicksOverTime`, `Bucket`, `UTMStats`, `DayBucket`, `TimeseriesResult` |
 | `internal/clicks/stats_test.go` | DB integration tests for `ClicksOverTime` (BasicBuckets, NoClicks, ZeroDefaults) |
 | `internal/handlers/links.go` | Link-detail handler; owns the `statsProvider` interface and populates `linkDetailView.Timeseries` |

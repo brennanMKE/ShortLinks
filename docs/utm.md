@@ -248,14 +248,55 @@ the short URL, the inbound value **wins** — `mergeUTM` calls `q.Set` which
 overwrites. This lets a single short link be reused across campaigns by
 overriding parameters at click time.
 
-### What values are recorded
+This is the same "inbound wins" rule the #0100 click-recording fallback below
+uses, but the two are separate mechanisms operating on separate data: this
+section is about what URL the *visitor's browser* is redirected to
+(`mergeUTM` over the composed `destination_url`); the next section is about
+what gets written to the `clicks` table (`Record`'s fallback over the link's
+discrete `utm_*` columns). #0099 keeps the composed URL and the discrete
+columns in agreement, so in practice the two rarely disagree — but they are
+computed independently, by different code, against different inputs.
 
-The click record always captures the UTM values from the *short URL's* query
-string (the inbound request), not from the stored `destination_url`. This is
-consistent: a link author who baked `utm_source=email` into the destination URL
-but shared the short link without appending UTM params will see `(none)` in
-the source breakdown. To record attribution, UTM params must be present on the
-*short URL* at click time.
+### What values are recorded (#0100 fallback precedence)
+
+Each of the five `utm_*` columns on the click row resolves independently, in
+this exact precedence:
+
+1. **The inbound short URL's query string** (the values shown in Step 5
+   above) — if present and non-empty, this wins.
+2. **Otherwise, the link's own stored discrete UTM column** (#0099's
+   `links.utm_source`/`utm_medium`/`utm_campaign`/`utm_term`/`utm_content` —
+   whatever the UTM builder baked in at create/edit time).
+3. **Otherwise, `(none)`** in analytics (`NULL` in the column).
+
+Resolution happens per key, not all-or-nothing: a short URL followed with only
+`?utm_source=twitter` records `utm_source = "twitter"` (inbound wins) while
+`utm_medium`, `utm_campaign`, `utm_term`, and `utm_content` still fall back to
+whatever the link has stored for each, independently. This is implemented in
+`internal/clicks/recorder.go`'s `Record` as
+`COALESCE(NULLIF($n, ''), l.utm_source)` per column, inside the same INSERT
+that resolves `link_id` — see `docs/analytics.md`'s "UTM fallback precedence"
+section for the full detail, including the `campaign_id` denormalization that
+shipped alongside it.
+
+**Before #0100**, a link author who baked `utm_source=email` into the
+destination URL but shared the short link without appending UTM params to the
+*short* URL saw `(none)` in the source breakdown for every one of that link's
+clicks — attribution required UTM params on the short URL itself at click
+time, and the link's own stored value was never consulted. **As of #0100**,
+that same bare short URL now records `utm_source = "email"`, because the
+recorder falls back to the link's stored value when the inbound query omits
+it.
+
+**This is a behavior change to existing analytics, and it is NOT
+retroactive.** Historical click rows recorded before the #0100 migration keep
+whatever `(none)`/inbound-only values they already had — they are not
+rewritten with fallback values. A per-link UTM breakdown or clicks-over-time
+chart whose date range spans the deploy date will show a discontinuity right
+at the boundary (a jump from mostly-`(none)` to mostly-attributed for a link
+that was always shared the same way). That jump is an artifact of when the
+fallback started applying, not a real change in traffic or campaign
+performance — do not read it as a trend.
 
 ---
 
@@ -364,8 +405,10 @@ optional and are most useful for paid search and A/B creative testing.
 | `web/src/views/LinkDetail.svelte` | UTM breakdown panel/bar charts, and (#0099) the "Edit" action that repopulates the UTM builder from the stored columns |
 | `web/src/lib/linkDetail.ts` | `utmDimensions`, `sortBuckets`, `isEmptyStats`, `NONE_BUCKET` |
 | `internal/handlers/redirect.go` | `mergeUTM`, `buildClickInfo`, `RedirectHandler.ServeHTTP` |
+| `internal/clicks/recorder.go` | (#0100) `Record`'s per-key UTM fallback (`COALESCE(NULLIF($n, ''), l.utm_source)`) and `campaign_id` denormalization, both inside the single click INSERT |
 | `internal/clicks/stats.go` | `UTMStatsForLink`, `breakdown`, `UTMStats`, `Bucket`, `NoneBucket` |
 | `internal/links/store.go` | (#0099) `Link`/`NewLink`/`LinkUpdate`'s discrete `campaign_id`/`utm_*`/`placement` fields, `GetLink`'s campaign LEFT JOIN, `ListLinksForCampaign` |
 | `internal/campaigns/store.go` | (#0099) `AssignLinkToCampaign`, `UnassignLinkFromCampaign`, `GetCampaignByID` |
 | `internal/handlers/campaigns.go` | (#0099) `GET`/`POST /api/campaigns/{slug}/links`, `DELETE /api/campaigns/{slug}/links/{key}` |
 | `migrations/000011_links_campaign_and_utm.{up,down}.sql` | The seven new `links` columns and `idx_links_campaign_id` |
+| `migrations/000012_clicks_campaign_and_bot.{up,down}.sql` | (#0100) `clicks.campaign_id`/`is_bot` and `idx_clicks_campaign_id`/`idx_clicks_campaign_time` |

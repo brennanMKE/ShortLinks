@@ -33,6 +33,14 @@ type Click struct {
 	UserAgent string
 	Referer   string
 
+	// UTMSource..UTMContent are the INBOUND (short-URL query string) UTM
+	// values. As of #0100 each is only the request's contribution to the
+	// stored value, not the final value: Record falls back, per key, to the
+	// resolved link's own stored discrete UTM column (#0099) whenever the
+	// inbound value here is "" (absent). campaign_id is NOT a field on Click
+	// at all — it is resolved from the link inside Record's SQL, never
+	// supplied by the caller, since it must reflect the link's campaign at
+	// record time regardless of what the request carried.
 	UTMSource   string
 	UTMMedium   string
 	UTMCampaign string
@@ -59,11 +67,34 @@ func NewRecorder(pool *pgxpool.Pool, log *slog.Logger) *Recorder {
 }
 
 // Record inserts one click row for the link identified by c.Key. It resolves the
-// key to link_id in the INSERT itself (a scalar subquery), so an unknown/deleted
-// key inserts zero rows rather than erroring. Empty string metadata is stored as
-// SQL NULL (so the analytics "(none)" bucket is driven by genuine absence, not
-// empty strings). It returns an error for callers (and tests) that want to assert
-// the write; the fire-and-forget redirect path should use RecordClick instead.
+// key to link_id (and, #0100, campaign_id) in the INSERT itself (a scalar
+// subquery), so an unknown/deleted key inserts zero rows rather than erroring.
+//
+// campaign_id is denormalized onto the click row from the link's CURRENT
+// campaign_id at record time, not joined at read time. This is deliberate: a
+// link can be reassigned to a different campaign or unassigned later, and a
+// historical click must stay attributed to whatever campaign was running when
+// it happened. Resolving it here means a later reassignment can never rewrite
+// that history.
+//
+// Each utm_* value resolves independently, per key, with the inbound value
+// (c.UTM*) always winning when present:
+//
+//	COALESCE(NULLIF($n, ''), l.utm_source)
+//
+// NULLIF folds an inbound empty string to SQL NULL first (so an empty string is
+// treated as ABSENT, never as an override with ""), then COALESCE falls back to
+// the link's own stored discrete UTM column (#0099) when the inbound value is
+// absent. This is a per-key fallback, not all-or-nothing: a request can supply
+// utm_source while leaving utm_medium blank, and each resolves on its own —
+// utm_source takes the inbound value, utm_medium falls back to the link's
+// stored value (or NULL if the link has none either).
+//
+// Non-UTM metadata (ip_address/user_agent/referer) has no fallback and keeps
+// the pre-#0100 empty-string-to-NULL behavior via nullStr/nullableIP below.
+//
+// It returns an error for callers (and tests) that want to assert the write;
+// the fire-and-forget redirect path should use RecordClick instead.
 func (r *Recorder) Record(ctx context.Context, c Click) error {
 	clickedAt := c.ClickedAt
 	if clickedAt.IsZero() {
@@ -73,8 +104,15 @@ func (r *Recorder) Record(ctx context.Context, c Click) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO clicks
 		     (link_id, clicked_at, ip_address, user_agent, referer,
-		      utm_source, utm_medium, utm_campaign, utm_term, utm_content)
-		 SELECT l.id, $2, $3, $4, $5, $6, $7, $8, $9, $10
+		      utm_source, utm_medium, utm_campaign, utm_term, utm_content,
+		      campaign_id)
+		 SELECT l.id, $2, $3, $4, $5,
+		        COALESCE(NULLIF($6, ''), l.utm_source),
+		        COALESCE(NULLIF($7, ''), l.utm_medium),
+		        COALESCE(NULLIF($8, ''), l.utm_campaign),
+		        COALESCE(NULLIF($9, ''), l.utm_term),
+		        COALESCE(NULLIF($10, ''), l.utm_content),
+		        l.campaign_id
 		   FROM links l
 		  WHERE l.key = $1`,
 		c.Key,
@@ -82,11 +120,11 @@ func (r *Recorder) Record(ctx context.Context, c Click) error {
 		nullableIP(c.IPAddress),
 		nullStr(c.UserAgent),
 		nullStr(c.Referer),
-		nullStr(c.UTMSource),
-		nullStr(c.UTMMedium),
-		nullStr(c.UTMCampaign),
-		nullStr(c.UTMTerm),
-		nullStr(c.UTMContent),
+		c.UTMSource,
+		c.UTMMedium,
+		c.UTMCampaign,
+		c.UTMTerm,
+		c.UTMContent,
 	)
 	return err
 }
