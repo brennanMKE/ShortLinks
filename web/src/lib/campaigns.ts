@@ -399,6 +399,19 @@ export function copyAllShortUrlsText(links: Pick<Link, 'key'>[]): string {
   return links.map((l) => shortUrl(l.key)).join('\n');
 }
 
+// ── QR codes (#0106) ─────────────────────────────────────────────────────
+
+/**
+ * URL for the bulk "every link's QR code" zip download for a campaign (
+ * `GET /api/campaigns/{slug}/qr.zip` — internal/handlers/campaigns.go's
+ * QRZip). Same-origin, cookie-authenticated like every other API route (see
+ * links.ts's qrSvgUrl/qrPngUrl doc comment) — a plain `<a href download>`
+ * is sufficient, no fetch/blob plumbing needed.
+ */
+export function campaignQrZipUrl(slug: string): string {
+  return `/api/campaigns/${encodeURIComponent(slug)}/qr.zip`;
+}
+
 // ── Message formatting ──────────────────────────────────────────────────
 
 /**

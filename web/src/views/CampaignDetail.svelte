@@ -31,6 +31,73 @@
   (stable, lib/campaigns.ts sortLinkRows), each row linking to the existing
   link-detail view. "Copy all short URLs" copies every row's short URL.
 
+  QR column (#0106): a genuine 11th column (the table was already ten —
+  #0103 downstream constraint 5) rather than folding the download link into
+  the existing Actions cell, so "download this link's code" reads as its
+  own affordance next to Created, not as a third control crowding Remove.
+
+  BOTH SVG and PNG links, restored (second review-fix round): an earlier
+  round dropped PNG down to a single "QR" (SVG-only) link to fix a
+  zero-scroll regression, but that measurement was taken against a campaign
+  with short, thin content and did not hold — re-measured with realistic
+  content (placement names like "Rockwell Automation Lobby", titles/
+  destinations that actually reach the cells' max-width caps), the
+  single-link version still overflowed `.table-scroll` to 940 / 926 (14px)
+  at every desktop width, clipping part of Remove. Dropping PNG bought
+  nothing and cost a stated deliverable (issue: both formats "available from
+  the campaign detail links table"), so it is restored here alongside SVG.
+  With both links back in the cell (still at the 4px `.qr-th`/`.qr-cell`
+  padding below), the same adversarial dataset overflowed to 975 / 926
+  (49px) — reclaimed by tightening `.title-cell` (120px → 95px) and
+  `.dest-cell` (150px → 126px), the two free-text columns with real room
+  that already ellipsize, so nothing becomes newly hidden. 49px is the
+  measured minimum: one pixel less (96px/126px) landed at 927 / 926, one
+  pixel over. `.placement-cell`'s own max-width (90px) was left alone — its
+  `<th>` has no cap, and the header word "Placement" alone sets the column
+  to ~102px, making that max-width inert as a squeeze target; noted as a
+  follow-up rather than folded into that pass.
+
+  THIRD review round: that follow-up turned out to be load-bearing, not
+  optional. `table-layout: auto` means a `<td>`'s max-width only bounds a
+  column when nothing ELSE in the column demands more — `.table-scroll`
+  reading `926 == 926` was `max(926, min-content)`, which can be a hard
+  overflow OR a min-content sitting a fraction of a pixel under the
+  threshold with zero real headroom (confirmed by measuring
+  `.links-table` at `width: min-content` directly). It was the latter:
+  generated keys are 6 chars, but custom aliases are a documented 1–12
+  url-safe-char feature, and a realistic 44-row dataset using 12-char
+  aliases pushed min-content to 967.98px against the 926px container —
+  41.98px over. Fixed by capping `.placement-cell`'s `<th>` (the exact gap
+  identified above) and adding a matching `.key-cell` cap to the short-key
+  column, which had NO cap at all.
+
+  FOURTH review round: the third round's own first allocation of the
+  recovered budget was backwards — it spent width on `.title-cell`/
+  `.dest-cell` readability (one extra character each, changing nothing
+  legible) while leaving `.placement-cell` too narrow for its OWN header
+  ("Placement" ellipsized to "PLAC…") and `.key-cell` too narrow for even
+  the DEFAULT 6-character generated key, not just a custom alias. Corrected
+  by cutting `.dest-cell` hard instead — cheap because #0113 (filed
+  separately) established the column carries no information at any width
+  it can afford — and spending the freed budget on `.placement-cell` (wide
+  enough that its header no longer truncates) and `.key-cell` (wide enough
+  for a FULL 12-character alias, not just the 6-char floor). See the
+  `.title-cell`/`.dest-cell`/`.placement-cell`/`.key-cell` rule's own
+  comment below for the full before/after numbers, the final values, and
+  the fit checks (6-char default key, 12-char alias, and the Placement
+  header, all measured `clientWidth == scrollWidth`). Below the 900px
+  breakpoint the column stacks like every other cell (data-label="QR"),
+  unaffected by the desktop width math above; the in-cell SVG/PNG links
+  there are also sized to a real ≥40px tap target below that breakpoint now
+  (see `.qr-links` further down) — they were 24×17px and 25×17px, inherited
+  unchanged from the desktop inline-text styling, which is fine on desktop
+  but not on a phone.
+
+  Bulk QR download: a "Download all QR codes (zip)" link in the toolbar,
+  next to "Copy all short URLs" — same zip archive whether the campaign has
+  zero or many links (internal/handlers/campaigns.go's QRZip degrades to an
+  empty-but-valid archive rather than an error).
+
   Assign/unassign against #0099's endpoints: the assign form accepts pasted
   keys or short URLs (lib/campaigns.ts parseKeysInput), chunks anything over
   the server's 50-key cap (chunkKeys), and surfaces partial success/failure
@@ -60,12 +127,14 @@
     chunkKeys,
     parseKeysInput,
     copyAllShortUrlsText,
+    campaignQrZipUrl,
     toDateInput,
     toIsoDate,
     joinSentences,
     campaignUtmDimensions,
     isEmptyCampaignChannelStats,
   } from '../lib/campaigns';
+  import { qrSvgUrl, qrPngUrl } from '../lib/links';
   import { formatDate } from '../lib/linkDetail';
   import type { CampaignDetail, LinkBucket, LinkSeries } from '../lib/types';
   import Button from '../lib/Button.svelte';
@@ -578,6 +647,35 @@
           <Button variant="subtle" onclick={copyAll} disabled={sortedRows.length === 0}>
             {copiedAll ? 'Copied!' : 'Copy all short URLs'}
           </Button>
+          <!--
+            Bulk QR download (#0106): a plain <a>, NOT a Button (Button.svelte
+            only ever renders a <button>, which cannot trigger a same-origin
+            file download the way a real anchor does) — pointing straight at
+            the zip endpoint, no fetch/blob JS needed since every API route
+            here is same-origin and cookie-authenticated (see
+            lib/campaigns.ts's campaignQrZipUrl doc comment).
+
+            Styled by the LOCAL .qr-zip-link rule below, not Button's
+            `.btn`/`.btn-subtle` classes (review fix): Svelte scopes a
+            component's <style> block to elements IT renders, hashing class
+            names accordingly — `.btn`/`.btn-subtle` only exist, post-hash,
+            on Button.svelte's own <button>. Putting those class names on an
+            <a> in THIS component matches nothing, so the anchor previously
+            rendered as an unstyled `#0000EE` underlined UA-default link (a
+            colour that appears nowhere else in the app) rather than looking
+            like the "Copy all short URLs" button beside it. .qr-zip-link
+            duplicates the relevant subset of Button's .btn + .btn-subtle
+            rules locally so this component owns styling for markup it
+            renders directly.
+
+            Left enabled even with zero links: the endpoint returns a valid,
+            empty archive rather than an error (see
+            internal/handlers/campaigns.go's QRZip), so there's nothing wrong
+            to guard against by disabling it.
+          -->
+          <a class="qr-zip-link" href={campaignQrZipUrl(detail.slug)} download>
+            Download all QR codes (zip)
+          </a>
         </div>
       </div>
 
@@ -592,12 +690,21 @@
           <table class="links-table">
             <thead>
               <tr>
-                <th scope="col">Short key</th>
-                <th scope="col">Title</th>
-                <th scope="col">Destination</th>
+                <th scope="col" class="key-cell">Key</th>
+                <th scope="col" class="title-cell">Title</th>
+                <!-- "URL", not "Destination": .dest-cell is capped at 60px
+                     (see the geometry comment in <style>), and "Destination"
+                     ellipsizes to "DE…" at that width — a truncated column
+                     HEADER removes the label telling you what the column is,
+                     which reads as a bug rather than as a narrow column. "URL"
+                     measures 60px == 60px, so it renders whole at the existing
+                     cap with no geometry change. Same move as "Short key" →
+                     "Key" on .key-cell. The td keeps data-label="Destination",
+                     so the stacked mobile layout still shows the full word. -->
+                <th scope="col" class="dest-cell" title="Destination">URL</th>
                 <th scope="col">Source</th>
                 <th scope="col">Medium</th>
-                <th scope="col">Placement</th>
+                <th scope="col" class="placement-cell" title="Placement">Placement</th>
                 <th scope="col" aria-sort={sortDirection === 'desc' ? 'descending' : 'ascending'}>
                   <button type="button" class="sort-btn" onclick={toggleSort}>
                     Clicks {sortDirection === 'desc' ? '▼' : '▲'}
@@ -605,14 +712,22 @@
                 </th>
                 <th scope="col">Share of listed links</th>
                 <th scope="col">Created</th>
+                <th scope="col" class="qr-th">QR</th>
                 <th scope="col"><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
               {#each sortedRows as row (row.key)}
                 <tr>
-                  <td class="mono" data-label="Short key">
-                    <button type="button" class="link-key-btn" onclick={() => openLink(row.key)}>{row.key}</button>
+                  <td class="mono key-cell" data-label="Short key">
+                    <button
+                      type="button"
+                      class="link-key-btn"
+                      onclick={() => openLink(row.key)}
+                      title={row.key}
+                    >
+                      {row.key}
+                    </button>
                   </td>
                   <td class="title-cell" data-label="Title" title={row.title}>{row.title || '—'}</td>
                   <td class="dest-cell" data-label="Destination" title={row.destination_url}>{row.destination_url}</td>
@@ -622,6 +737,16 @@
                   <td class="num" data-label="Clicks">{row.clicksInWindow}</td>
                   <td class="num" data-label="Share">{row.shareOfTotal}%</td>
                   <td class="text-muted" data-label="Created">{formatDate(row.created_at)}</td>
+                  <td class="qr-cell" data-label="QR">
+                    <span class="qr-links">
+                      <a class="qr-link" href={qrSvgUrl(row.key)} download title="Download QR code (SVG)">
+                        SVG
+                      </a>
+                      <a class="qr-link" href={qrPngUrl(row.key)} download title="Download QR code (PNG)">
+                        PNG
+                      </a>
+                    </span>
+                  </td>
                   <td class="actions-cell" data-label="Actions">
                     <Button
                       variant="danger"
@@ -797,6 +922,31 @@
     justify-content: flex-end;
   }
   /*
+   * Duplicates the relevant subset of Button.svelte's `.btn` + `.btn-subtle`
+   * rules (review fix — see the toolbar markup comment above for why this
+   * can't just reuse those class names). Kept in sync BY HAND with
+   * Button.svelte; if that component's subtle variant changes, this rule
+   * should change with it.
+   */
+  .qr-zip-link {
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--font);
+    font-size: var(--fs-base);
+    line-height: 1;
+    padding: var(--space-2) var(--space-3);
+    border: var(--border-w) solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+    user-select: none;
+  }
+  .qr-zip-link:hover {
+    background: var(--accent-subtle);
+  }
+  /*
    * Hidden above the stacked-card breakpoint — the header's own sort button
    * (inside <thead>) is visible and sufficient on desktop. Shown below it in
    * the @media (max-width: 900px) block further down, alongside the switch
@@ -829,6 +979,17 @@
     color: var(--accent);
     cursor: pointer;
     text-decoration: underline;
+    /*
+     * display:block (not the default inline) + max-width:100% so a long
+     * custom-key alias (up to 12 chars, #0106 third round) ellipsizes
+     * WITHIN the already-capped .key-cell <td> instead of just being
+     * clipped with no "…" — a plain inline button's overflow is invisible
+     * to a hidden-overflow ancestor's text-overflow rule.
+     */
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   /*
    * Column-priority decision (#0103 fix 6): the links table is the widest
@@ -836,26 +997,125 @@
    * wider than even the desktop .table-scroll container (926px), so
    * Created/Remove were cut off at EVERY width, not just narrow ones.
    * Title/Destination/Placement are the three free-text columns with real
-   * room to give back, so they take the squeeze here; Short key, Clicks,
-   * and Share are the numbers/identifier the page exists to show and are
-   * left unconstrained. Placement gets its own (tighter) class rather than
-   * reusing .dest-cell — the two were accidentally sharing one 200px budget,
-   * which was most of the desktop overflow on its own.
+   * room to give back, so they take the squeeze here; Clicks and Share are
+   * the numbers the page exists to show and are left unconstrained.
+   * Placement gets its own (tighter) class rather than reusing .dest-cell —
+   * the two were accidentally sharing one 200px budget, which was most of
+   * the desktop overflow on its own.
+   *
+   * #0106 THIRD review round — table-layout is `auto` (no explicit
+   * table-layout/colgroup), so a `<td>`'s max-width only bounds a column
+   * when nothing else in that column demands more. Two things this table
+   * was still getting wrong, found by measuring `.links-table` at
+   * `width: min-content` directly (the real per-column demand, independent
+   * of the 926px container) rather than trusting a scrollWidth == 926
+   * reading alone — 926 is `max(926, min-content)`, so a scrollWidth match
+   * can still mean zero real headroom:
+   *
+   *   1. .placement-cell's max-width applied to the <td> only. Its <th> —
+   *      plain text, no class — sized itself to "Placement"'s own
+   *      max-content (~101.56px), WIDER than the 90px td cap, so the column
+   *      rendered at the header's width regardless of what the cap said.
+   *      The cap was provably inert. Fixed by putting the SAME class on
+   *      both <th> and <td> for this column (and title/dest/key below) so
+   *      header and data share one real bound — the header word now
+   *      ellipsizes too when it doesn't fit, exactly like the data already
+   *      did (a `title="Placement"` IS added to this <th>, since unlike the
+   *      data cells' own `title` — which mirrors visible, already-known
+   *      text — a truncated "Placem…" has no other way to recover the full
+   *      label on hover; the accessible name read by assistive tech is the
+   *      text node either way, unaffected by the CSS clip).
+   *   2. Short key had NO cap at all. Generated keys are 6 chars, but
+   *      custom aliases are a documented 1–12 url-safe-char feature
+   *      (internal/handlers/links.go's validKey) — a 12-char alias grows
+   *      this column directly, and did so unconstrained. .key-cell caps it
+   *      the same way, with the row's `title` on the button (matching the
+   *      existing Title/Destination/Placement pattern) so a truncated key
+   *      is still recoverable on hover without leaving the table. Its <th>
+   *      shares the same class, so the header text was shortened from
+   *      "Short key" to "Key" instead of letting it ellipsize — "Short key"
+   *      truncates to an illegible "SHO…" at any cap tight enough to matter,
+   *      whereas "Placement"'s single-word truncation ("Placem…") stays
+   *      readable; the mobile stacked-card view keeps the full "Short key"
+   *      label via `data-label`, which is a separate attribute unaffected by
+   *      this rename.
+   *
+   * All four caps were tuned by measuring `.links-table` at
+   * `width: min-content` (the browser's real per-column demand, independent
+   * of the 926px container — 926 is `max(926, min-content)`, so a
+   * scrollWidth match alone can hide a min-content that is already AT the
+   * threshold) against a 44-row adversarial dataset built for THIS round:
+   * realistic long titles/destinations/placements at their caps, and a
+   * 12-CHARACTER custom-key alias on every row — the worst case
+   * `validKey` allows, not the 6-char generated default the previous round
+   * tested. Reproduced this round, in order:
+   *   - This file's second-round shipped state (95px/126px title/dest, a
+   *     90px .placement-cell cap on the <td> only, no key cap) against the
+   *     new dataset: min-content 967.98px, i.e. 41.98px PAST the 926px
+   *     container — confirms the coordinator's finding that the second
+   *     round's "926 == 926" reading had ~0 real headroom and did not
+   *     survive a longer key.
+   *   - Capping both <th>s (.placement-cell at 90px, .key-cell at 84px)
+   *     while leaving .title-cell/.dest-cell at their second-round 95px/
+   *     126px: min-content 929.72px — that's 3.72px PAST the 926px
+   *     container (confirmed by scrollWidth reading 930/926 at this stage),
+   *     i.e. STILL BROKEN, not "3.72px of margin" as an earlier version of
+   *     this comment mis-stated — a sign error that made a failing step
+   *     read as a barely-passing one. Left in this list because the
+   *     progression itself is real and reproducible; only the earlier
+   *     wording of this line was wrong.
+   *   - Tightening .placement-cell to 80px and .key-cell to 66px: 901.72px,
+   *     24.28px of REAL margin (926 − 901.72) — past the ~5px floor a
+   *     genuine fix needs.
+   *   - #0106 fourth review round: the round-three "final" allocation
+   *     (.title-cell 105px, .dest-cell 136px, .placement-cell 75px,
+   *     .key-cell 60px) spent its recovered budget on the wrong columns —
+   *     75px still forces "Placement"'s <th> to ellipsize to "PLAC…" (its
+   *     unconstrained max-content is ~101.56px, measured above), and 60px
+   *     truncates even the DEFAULT 6-character generated key (needs 43px of
+   *     content box + 24px of td padding = 67px minimum,
+   *     `.link-key-btn`'s clientWidth 36px < scrollWidth 43px at that cap)
+   *     — the common case, not the adversarial one. Meanwhile the 10px/10px
+   *     given to .title-cell/.dest-cell bought one more character each and
+   *     changed nothing readable. Reallocated: .title-cell back to 95px
+   *     (its second-round value); .dest-cell cut hard to 60px — cheap
+   *     because #0113 (filed separately) established the column conveys no
+   *     information at any width it can afford (`https://www.ex…` /
+   *     `https://www.so…`, indistinguishable either way) — freeing enough
+   *     to widen .placement-cell to 110px (past its 101.56px unconstrained
+   *     header width, so "Placement" renders whole, not just its data) and
+   *     .key-cell to 111px (fits a FULL 12-character alias — the `87px`
+   *     content box `.link-key-btn` needs at 12 chars, plus 24px padding —
+   *     not just the 6-char floor). Verified both directions: a 6-char
+   *     generated key (`.link-key-btn` clientWidth 43px == scrollWidth
+   *     43px, 3 links checked) and a 12-char alias (same equality, all 44
+   *     rows checked, 0 truncated) now render in full, and `th.placement-
+   *     cell`'s clientWidth (110px) == scrollWidth (110px) — "Placement"
+   *     no longer ellipsizes. Final measured min-content: 910.42px against
+   *     the 926px container — **15.58px of real headroom** — at all of
+   *     1024/1280/1440/1920px, with the same 44-row/12-char-key dataset,
+   *     Remove fully inside `.table-scroll` at every width.
    */
   .title-cell {
-    max-width: 120px;
+    max-width: 95px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .dest-cell {
-    max-width: 150px;
+    max-width: 60px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .placement-cell {
-    max-width: 90px;
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .key-cell {
+    max-width: 111px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -868,6 +1128,30 @@
   .actions-cell {
     text-align: right;
     white-space: nowrap;
+  }
+  /*
+   * QR column (#0106): SVG and PNG download links (see the header comment
+   * for the round(s) this table's zero-scroll invariant was re-measured and
+   * fixed against realistic content). Padding here is var(--space-1) (4px
+   * each side) rather than the table's base var(--space-3) (12px each
+   * side, from app.css's generic `tbody td`/`thead th` rules) — switching
+   * back to the base padding costs 16px (2 sides × 8px), pure arithmetic
+   * independent of any other column's width, which is real money against a
+   * budget this tight; see .title-cell's comment below for the full
+   * min-content accounting and the final measured headroom this leaves.
+   */
+  .qr-th,
+  .qr-cell {
+    padding-left: var(--space-1);
+    padding-right: var(--space-1);
+  }
+  .qr-cell {
+    white-space: nowrap;
+  }
+  .qr-link {
+    color: var(--accent);
+    text-decoration: underline;
+    font-size: var(--fs-sm);
   }
   .unlisted-note {
     padding: 0 var(--space-4) var(--space-3);
@@ -887,6 +1171,21 @@
     }
     .date-row {
       grid-template-columns: 1fr;
+    }
+    /*
+     * Mirrors Button.svelte's own ≤480px rule (`.btn { padding: var(--space-3)
+     * var(--space-3); min-height: 40px; }`) — missed in the initial hand-sync
+     * (review fix). Measured before this fix: 31px tall at 420px viewport vs
+     * the Button beside it (Copy all short URLs) at 40px — a visibly
+     * mismatched, sub-40px tap target on exactly the input where mobile tap
+     * targets matter. .qr-zip-link duplicates .btn/.btn-subtle rather than
+     * reusing those class names (see the toolbar markup comment above for
+     * why), so this mobile rule has to be hand-copied too; if Button.svelte's
+     * mobile rule changes, this one should change with it.
+     */
+    .qr-zip-link {
+      padding: var(--space-3) var(--space-3);
+      min-height: 40px;
     }
     .summary-grid {
       grid-template-columns: repeat(2, 1fr);
@@ -980,6 +1279,36 @@
     }
     .links-table .actions-cell::before {
       content: none;
+    }
+    /*
+     * Mobile QR tap targets (review fix): at desktop widths .qr-link is a
+     * plain inline text link inside the tightest column budget in the app
+     * (see the QR column header comment) — deliberately small there. Below
+     * this breakpoint the stacked card gives each row the FULL viewport
+     * width, so the same tight sizing carries over for no reason and
+     * measured 24.3×17.4px / 25.5×17.4px, well under the 40px minimum this
+     * file already applies to .qr-zip-link's own ≤480px rule — the same
+     * defect class, just unfixed in this cell. .qr-links (the wrapper
+     * around the two <a> tags, added so this rule has something to lay out
+     * without disturbing the desktop inline-text styling above) becomes a
+     * flex row of two real tap targets, each sized like Button's own mobile
+     * rule.
+     */
+    .qr-links {
+      display: flex;
+      gap: var(--space-2);
+    }
+    .links-table .qr-cell .qr-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      min-width: 40px;
+      padding: var(--space-2) var(--space-3);
+      border: var(--border-w) solid var(--border-strong);
+      border-radius: var(--radius);
+      text-decoration: none;
+      font-size: var(--fs-base);
     }
   }
 </style>

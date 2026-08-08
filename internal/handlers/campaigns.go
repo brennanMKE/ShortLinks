@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +18,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
+	"github.com/brennanMKE/ShortLinks/internal/qr"
 )
 
 // campaignStore is the behavior the campaigns handler needs from the data
@@ -115,8 +118,9 @@ const maxCampaignNameLength = 255
 //	POST   /api/campaigns/{slug}/links — assign existing links by key (#0099)
 //	DELETE /api/campaigns/{slug}/links/{key} — unassign one link (#0099)
 //	POST   /api/campaigns/{slug}/links/batch — create N new links at once (#0105)
+//	GET    /api/campaigns/{slug}/qr.zip — every assigned link's QR codes, zipped (#0106)
 //
-// All nine routes MUST be mounted behind middleware.RequireSession; each
+// All ten routes MUST be mounted behind middleware.RequireSession; each
 // handler reads the authenticated user from the request context and scopes
 // every store call to that user, so a request can only see or mutate its own
 // campaigns and links. This mirrors LinksHandler.
@@ -1432,4 +1436,117 @@ func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Reque
 		views = append(views, toLinkView(l))
 	}
 	writeJSON(w, http.StatusCreated, batchCreateLinksResponse{Links: views, SkippedBlankRows: skipped})
+}
+
+// ── Bulk QR download (#0106) ────────────────────────────────────────────
+//
+// One request, one zip archive, every link currently assigned to the
+// campaign, each as both an .svg and a .png — "a stack of printed sheets
+// can be matched to locations without guessing" (issue). Built entirely
+// server-side (see internal/qr's package doc comment for the library/
+// architecture decision): archive/zip is the standard library, so the same
+// per-link qr.Matrix/RenderSVG/RenderPNG calls QRSVG/QRPNG
+// (internal/handlers/links.go) use for a single download are simply
+// written into zip entries instead of the response body directly, with no
+// second dependency and no second encoder to keep in sync.
+
+// qrZipContentType is the MIME type for the bulk archive. "application/zip"
+// rather than a more specific vendor type — every browser and OS already
+// recognizes it and offers to open/extract it, which is the only consumer
+// that matters here.
+const qrZipContentType = "application/zip"
+
+// QRZip handles GET /api/campaigns/{slug}/qr.zip: a zip archive containing
+// every link CURRENTLY assigned to the caller's own campaign, as both
+// "{key}-{placement-slug}.svg" and "{key}-{placement-slug}.png" (see
+// qr.Filename's doc comment for the naming scheme, including the
+// no-placement and non-ASCII-placement fallbacks). A slug that does not
+// exist OR belongs to another user yields 404, matching every other
+// campaign endpoint's indistinguishable-404 contract. A campaign with zero
+// links produces a valid, empty zip archive rather than an error — the same
+// "empty collection, not a failure" contract ListLinks uses.
+func (h *CampaignsHandler) QRZip(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	slug := r.PathValue("slug")
+	if slug == "" {
+		writeError(w, http.StatusBadRequest, "slug is required")
+		return
+	}
+
+	c, err := h.store.GetCampaignBySlug(r.Context(), u.ID, slug)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, campaigns.ErrCampaignNotFound):
+		writeError(w, http.StatusNotFound, "campaign not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	rows, err := h.links.ListLinksForCampaign(r.Context(), u.ID, c.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// Built into an in-memory buffer (campaigns are personal/small-team
+	// scale — see #0098's downstream constraints — so N links x two small
+	// files each is not a streaming-sized concern) so a mid-archive
+	// generation failure can still report a clean 500 instead of a
+	// truncated zip the client would silently treat as complete.
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, l := range rows {
+		bitmap, err := qr.Matrix(qr.ShortURL(l.Key))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		pngBytes, err := qr.RenderPNG(bitmap)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		svgBytes := qr.RenderSVG(bitmap)
+
+		svgEntry, err := zw.Create(qr.Filename(l.Key, l.Placement, "svg"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if _, err := svgEntry.Write(svgBytes); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+
+		pngEntry, err := zw.Create(qr.Filename(l.Key, l.Placement, "png"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if _, err := pngEntry.Write(pngBytes); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+	if err := zw.Close(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// zipFilename uses the campaign's own slug (already filesystem-safe —
+	// campaigns.Store generates it via the same ASCII-slugging as a link
+	// key) rather than its free-text name, so it needs no separate
+	// slugifying step of its own.
+	zipFilename := c.Slug + "-qr-codes.zip"
+	w.Header().Set("Content-Type", qrZipContentType)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+zipFilename+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
 }

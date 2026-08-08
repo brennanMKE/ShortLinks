@@ -20,12 +20,17 @@
   maps to empty fields rather than erroring. Saving PATCHes destination_url (the
   builder's re-composed URL) together with the five discrete fields and
   placement, so the two stay in lockstep the same way create does.
+
+  QR code (#0106): SVG/PNG download links sit right next to the Short URL
+  row, since that's the exact value the code encodes — see docs/campaigns.md
+  for the library/error-correction/DPI decisions and internal/qr's package
+  doc comment for why it's the short URL, never destination_url.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentView, currentUser, links, selectedLinkKey } from '../lib/stores';
   import { getLink, updateLink, deactivateLink, ApiError } from '../lib/api';
-  import { shortUrl, linkStatus, isValidHttpUrl } from '../lib/links';
+  import { shortUrl, qrSvgUrl, qrPngUrl, linkStatus, isValidHttpUrl } from '../lib/links';
   import {
     isEmptyStats,
     utmDimensions,
@@ -255,6 +260,14 @@
           </div>
         </dd>
 
+        <dt>QR code</dt>
+        <dd>
+          <div class="row">
+            <a class="qr-link" href={qrSvgUrl(detail.key)} download>Download SVG</a>
+            <a class="qr-link" href={qrPngUrl(detail.key)} download>Download PNG</a>
+          </div>
+        </dd>
+
         <dt>Destination</dt>
         <dd>
           <a class="dest-link" href={detail.destination_url} target="_blank" rel="noreferrer">
@@ -437,6 +450,10 @@
   .dest-link {
     color: var(--accent);
     word-break: break-all;
+  }
+  .qr-link {
+    color: var(--accent);
+    text-decoration: underline;
   }
   .num {
     font-variant-numeric: tabular-nums;

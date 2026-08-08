@@ -399,6 +399,11 @@ func mountAndServe(
 	mux.Handle("GET /api/links/{key}", requireSession(http.HandlerFunc(linksH.Get)))
 	mux.Handle("PATCH /api/links/{key}", requireSession(http.HandlerFunc(linksH.Patch)))
 	mux.Handle("DELETE /api/links/{key}", requireSession(http.HandlerFunc(linksH.Delete)))
+	// QR codes (#0106): vector SVG and print-resolution PNG, each encoding
+	// the link's SHORT URL (never the destination) so a scan is recorded as
+	// a click like any other visit — see internal/qr's package doc comment.
+	mux.Handle("GET /api/links/{key}/qr.svg", requireSession(http.HandlerFunc(linksH.QRSVG)))
+	mux.Handle("GET /api/links/{key}/qr.png", requireSession(http.HandlerFunc(linksH.QRPNG)))
 
 	// Campaign CRUD + link-membership + stats API (#0098, #0099, #0102) — all
 	// behind RequireSession and scoped to the authenticated user in the
@@ -422,6 +427,10 @@ func mountAndServe(
 		// short link per non-blank row, all assigned to this campaign in a
 		// single atomic request.
 		mux.Handle("POST /api/campaigns/{slug}/links/batch", requireSession(http.HandlerFunc(campaignsH.BatchCreateLinks)))
+		// Bulk QR download (#0106): a zip archive of every assigned link's
+		// SVG + PNG QR codes, named so printed sheets can be matched back to
+		// their placements.
+		mux.Handle("GET /api/campaigns/{slug}/qr.zip", requireSession(http.HandlerFunc(campaignsH.QRZip)))
 	}
 
 	// Current user profile (#0027) — behind RequireSession; returns the caller's

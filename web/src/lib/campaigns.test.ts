@@ -20,6 +20,7 @@ import {
   chunkKeys,
   parseKeysInput,
   copyAllShortUrlsText,
+  campaignQrZipUrl,
   joinSentences,
   MAX_ASSIGN_KEYS_PER_REQUEST,
   type CampaignLinkRow,
@@ -705,6 +706,18 @@ describe('copyAllShortUrlsText', () => {
 
   it('returns an empty string for no links', () => {
     expect(copyAllShortUrlsText([])).toBe('');
+  });
+});
+
+// ── campaignQrZipUrl (#0106) ─────────────────────────────────────────────
+
+describe('campaignQrZipUrl', () => {
+  it('builds the same-origin bulk QR zip API route from a slug', () => {
+    expect(campaignQrZipUrl('summer-fair')).toBe('/api/campaigns/summer-fair/qr.zip');
+  });
+
+  it('encodes an unusual slug defensively', () => {
+    expect(campaignQrZipUrl('a b')).toBe('/api/campaigns/a%20b/qr.zip');
   });
 });
 

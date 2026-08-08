@@ -9,6 +9,8 @@ import type { Link } from './types';
 import {
   SHORT_URL_BASE,
   shortUrl,
+  qrSvgUrl,
+  qrPngUrl,
   isValidHttpUrl,
   deniedReasonLabel,
   noticeForCreated,
@@ -51,6 +53,30 @@ describe('shortUrl', () => {
 
   it('encodes an unusual key defensively', () => {
     expect(shortUrl('a b')).toBe('https://go.sstools.co/u/a%20b');
+  });
+});
+
+// #0106: QR download URLs are same-origin API routes (the backend GENERATES
+// the code), deliberately NOT built on SHORT_URL_BASE like shortUrl() above —
+// that would point at the production redirect domain, not this app's own
+// API, and would 404 in dev.
+describe('qrSvgUrl / qrPngUrl', () => {
+  it('builds the same-origin QR SVG API route from a key', () => {
+    expect(qrSvgUrl('abc123')).toBe('/api/links/abc123/qr.svg');
+  });
+
+  it('builds the same-origin QR PNG API route from a key', () => {
+    expect(qrPngUrl('abc123')).toBe('/api/links/abc123/qr.png');
+  });
+
+  it('encodes an unusual key defensively', () => {
+    expect(qrSvgUrl('a b')).toBe('/api/links/a%20b/qr.svg');
+    expect(qrPngUrl('a b')).toBe('/api/links/a%20b/qr.png');
+  });
+
+  it('does not use the production short-URL base', () => {
+    expect(qrSvgUrl('abc123')).not.toContain(SHORT_URL_BASE);
+    expect(qrPngUrl('abc123')).not.toContain(SHORT_URL_BASE);
   });
 });
 

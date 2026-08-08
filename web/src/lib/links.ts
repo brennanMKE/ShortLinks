@@ -29,6 +29,26 @@ export function shortUrl(key: string): string {
 }
 
 /**
+ * QR code download URLs for a link (#0106) — same-origin API routes, not the
+ * production SHORT_URL_BASE above: these are requests to THIS app's own
+ * backend (`internal/handlers/links.go`'s QRSVG/QRPNG), which is what
+ * generates the code, not a redirect target. Every API request in this app
+ * is same-origin and cookie-authenticated (see the module doc comment on
+ * api.ts), so a plain `<a href={qrSvgUrl(key)} download>` — no fetch/blob
+ * plumbing — already carries the session cookie on click, and the server's
+ * Content-Disposition header supplies the download filename (see
+ * internal/qr's Filename doc comment for the naming scheme).
+ */
+export function qrSvgUrl(key: string): string {
+  return `/api/links/${encodeURIComponent(key)}/qr.svg`;
+}
+
+/** PNG counterpart of {@link qrSvgUrl}, at print resolution (see docs/campaigns.md). */
+export function qrPngUrl(key: string): string {
+  return `/api/links/${encodeURIComponent(key)}/qr.png`;
+}
+
+/**
  * Client-side pre-validation of a destination URL, mirroring the server's
  * `validDestinationURL` (internal/handlers/links.go): a syntactically valid
  * absolute URL with an http or https scheme and a non-empty host. This is a

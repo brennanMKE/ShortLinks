@@ -17,6 +17,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
+	"github.com/brennanMKE/ShortLinks/internal/qr"
 )
 
 // timeseriesDays is the default look-back window supplied to ClicksOverTime
@@ -669,6 +670,130 @@ func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, detail)
+}
+
+// ── QR codes (#0106) ──────────────────────────────────────────────────────
+//
+// Both routes resolve {key} through the SAME user-scoped GetLink as Get
+// above (404 for "does not exist" and "belongs to another user" alike), then
+// hand link.Key — never link.DestinationURL — to qr.ShortURL. That choice is
+// the acceptance criterion this feature exists to protect: encoding the
+// destination would let a scan resolve without ever hitting GET /u/{key},
+// silently bypassing click recording (#0030) and defeating the whole
+// per-placement attribution this issue is for. See
+// TestLinksHandler_QRSVG_EncodesShortURLNotDestination /
+// TestLinksHandler_QRPNG_EncodesShortURLNotDestination, which decode the
+// response body with an independent decoder and assert it equals the short
+// URL and NOT the (deliberately different) destination URL.
+
+// qrCacheControl is applied to every QR response. A link's key never
+// changes once created, so its QR code is immutable content — safe to cache
+// indefinitely client-side — but "immutable" still gets a max-age rather
+// than relying on that keyword alone for older HTTP caches.
+//
+// CAVEAT (review finding): the IMAGE content this caches is genuinely
+// immutable (it only ever encodes the key, which never changes), but the
+// Content-Disposition filename below also bakes in the link's PLACEMENT,
+// which IS editable. Editing a placement and re-downloading within the same
+// browser cache window can therefore serve the OLD filename (stale
+// placement slug) alongside fresh, correct image bytes for up to a year.
+// Cosmetic — the encoded/scanned content is unaffected — but worth knowing
+// before treating this cache header as "everything about this response is
+// pinned to the key". Not fixed here: doing so would mean either dropping
+// the aggressive cache lifetime (this response is requested rarely enough,
+// and cheap enough to regenerate, that the caching is a nice-to-have, not
+// load-bearing) or varying the URL on placement (which would need a cache
+// key scheme this endpoint doesn't have reason to carry otherwise).
+const qrCacheControl = "private, max-age=31536000, immutable"
+
+// QRSVG handles GET /api/links/{key}/qr.svg: a vector QR code encoding this
+// link's short URL, as a download (Content-Disposition: attachment) named
+// via qr.Filename so it lands in a Downloads folder with a sensible name
+// even when fetched on its own rather than through the bulk archive.
+func (h *LinksHandler) QRSVG(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	key := r.PathValue("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	link, err := h.store.GetLink(r.Context(), u.ID, key)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, links.ErrLinkNotFound):
+		writeError(w, http.StatusNotFound, "link not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	bitmap, err := qr.Matrix(qr.ShortURL(link.Key))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	svg := qr.RenderSVG(bitmap)
+
+	filename := qr.Filename(link.Key, link.Placement, "svg")
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Cache-Control", qrCacheControl)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(svg)
+}
+
+// QRPNG handles GET /api/links/{key}/qr.png: a raster QR code at print
+// resolution (qr.ModulePixelsPNG per module — see its doc comment for the
+// DPI/pixel-size reasoning) encoding this link's short URL, as a download
+// named via qr.Filename.
+func (h *LinksHandler) QRPNG(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	key := r.PathValue("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	link, err := h.store.GetLink(r.Context(), u.ID, key)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, links.ErrLinkNotFound):
+		writeError(w, http.StatusNotFound, "link not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	bitmap, err := qr.Matrix(qr.ShortURL(link.Key))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	pngBytes, err := qr.RenderPNG(bitmap)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	filename := qr.Filename(link.Key, link.Placement, "png")
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Cache-Control", qrCacheControl)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(pngBytes)
 }
 
 // patchLinkRequest is the PATCH /api/links/{key} body. Every field is a pointer
