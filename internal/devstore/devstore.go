@@ -905,6 +905,73 @@ func (s *Store) CreateDeniedLink(_ context.Context, in links.NewLink, reasonCode
 	return s.cloneLink(l), nil
 }
 
+// CreateLinksBatch inserts N new links under one lock acquisition, mirroring
+// links.Store.CreateLinksBatch (#0105): dedup is bypassed ENTIRELY (no
+// destination_url lookup at all, unlike CreateOrReactivateLink above), so two
+// rows sharing a destination_url — e.g. two batch rows differing only in
+// `placement`, which is never baked into the URL — both insert as distinct
+// links rather than collapsing onto one. There is no transaction concept in
+// this in-memory store; holding s.mu for the whole loop is the dev-mode
+// equivalent of the real store's single transaction.
+//
+// ATOMIC ON A genKey FAILURE, mirroring the real store's transaction
+// rollback: startLen/startNextID snapshot s.links' length and s.nextLinkID
+// before the loop starts, and a genKey failure on ANY row restores both —
+// truncating s.links back to startLen and resetting s.nextLinkID to
+// startNextID — before returning the error. An earlier version of this
+// method restored NEITHER: it appended each row to s.links (and advanced
+// s.nextLinkID) as soon as genKey succeeded FOR THAT ROW, so a failure on
+// row 3 left rows 1 and 2 permanently in s.links even though its own doc
+// comment claimed "none of the caller-visible state changes" — true only for
+// the failing row itself, not the rows before it (review finding 3). This
+// store is dev-only and the failure path is near-unreachable in practice
+// (genKey only fails on key-space exhaustion), but ./scripts/dev.sh runs
+// against this exact implementation — #0106's UI work runs on it directly —
+// and #0098's Gotchas record two issues' worth of history where a devstore
+// divergence from the real store surfaced only much later. Holding s.mu for
+// the whole call (already true before this fix) means no concurrent read can
+// observe the rolled-back rows in between; the snapshot/restore is what
+// makes the ROLLBACK ITSELF correct, not just invisible to other goroutines.
+func (s *Store) CreateLinksBatch(_ context.Context, rows []links.NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) ([]links.Link, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	startLen := len(s.links)
+	startNextID := s.nextLinkID
+
+	out := make([]links.Link, 0, len(rows))
+	for _, in := range rows {
+		key, err := genKey(func(candidate string) (bool, error) {
+			for _, l := range s.links {
+				if l.Key == candidate {
+					return true, nil
+				}
+			}
+			return false, nil
+		})
+		if err != nil {
+			// Roll back every row appended earlier IN THIS CALL — restoring
+			// the snapshot taken above is what actually makes this atomic;
+			// without it, a failure on row 3 would leave rows 1 and 2
+			// permanently in s.links, contradicting both this comment and
+			// the real store's (Postgres) transactional guarantee that
+			// BatchCreateLinks documents.
+			s.links = s.links[:startLen]
+			s.nextLinkID = startNextID
+			return nil, err
+		}
+
+		l := newLinkFromInput(in)
+		l.ID = s.nextLinkID
+		l.Key = key
+		l.CreatedAt = time.Now()
+		s.nextLinkID++
+		s.links = append(s.links, l)
+		out = append(out, s.cloneLink(l))
+	}
+	return out, nil
+}
+
 // ListLinks returns the user's links, most recent first, paginated.
 func (s *Store) ListLinks(_ context.Context, userID int64, limit, offset int) ([]links.Link, error) {
 	s.mu.Lock()
@@ -1354,6 +1421,7 @@ var _ interface {
 	CreateLink(ctx context.Context, in links.NewLink) (links.Link, error)
 	CreateOrReactivateLink(ctx context.Context, in links.NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) (links.Link, links.CreateOutcome, error)
 	CreateDeniedLink(ctx context.Context, in links.NewLink, reasonCode int16, genKey func(exists func(key string) (bool, error)) (string, error)) (links.Link, error)
+	CreateLinksBatch(ctx context.Context, rows []links.NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) ([]links.Link, error)
 	ListLinks(ctx context.Context, userID int64, limit, offset int) ([]links.Link, error)
 	CountLinks(ctx context.Context, userID int64) (int64, error)
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
@@ -1368,13 +1436,14 @@ var _ interface {
 	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
 } = (*Store)(nil)
 
-// campaignLinksProvider (handlers.CampaignsHandler's link-membership
-// endpoints, #0099): GetLink and ListLinksForCampaign are already pinned
-// above/below by other assertions; ListLinksForCampaign is unique to this
-// interface.
+// campaignLinksProvider (handlers.CampaignsHandler's link-membership +
+// batch-create endpoints, #0099/#0105): GetLink and CreateLinksBatch are
+// already pinned above by other assertions; ListLinksForCampaign is unique to
+// this interface.
 var _ interface {
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
 	ListLinksForCampaign(ctx context.Context, userID, campaignID int64) ([]links.Link, error)
+	CreateLinksBatch(ctx context.Context, rows []links.NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) ([]links.Link, error)
 } = (*Store)(nil)
 
 var _ interface {

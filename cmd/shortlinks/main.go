@@ -173,17 +173,21 @@ func servePostgres(cfg *config.Config) error {
 	// campaign_id/campaign_slug (#0099).
 	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore, campaignStore)
 
-	// Campaign CRUD + link-membership API (#0098, #0099). Link membership
-	// (assign/unassign/list) needs the links store to resolve/list the links
-	// it operates on, scoped to the caller. The stats store (constructed
-	// above for linksH's utm_stats field) doubles as the campaign-scoped
-	// rollup provider (#0102): *clicks.StatsStore satisfies
-	// campaignStatsProvider via CampaignSummary and CampaignRollup — the two
-	// COMPOSITE methods, each of which reads its whole payload from a single
-	// REPEATABLE READ snapshot. The interface is deliberately narrowed to
-	// those two rather than the four per-fragment methods, so a handler
-	// cannot assemble one response from reads taken at different instants.
-	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger, statsStore)
+	// Campaign CRUD + link-membership + batch-create API (#0098, #0099,
+	// #0105). Link membership (assign/unassign/list) and batch-create both
+	// need the links store to resolve/list/insert the links they operate on,
+	// scoped to the caller. The stats store (constructed above for linksH's
+	// utm_stats field) doubles as the campaign-scoped rollup provider
+	// (#0102): *clicks.StatsStore satisfies campaignStatsProvider via
+	// CampaignSummary and CampaignRollup — the two COMPOSITE methods, each of
+	// which reads its whole payload from a single REPEATABLE READ snapshot.
+	// The interface is deliberately narrowed to those two rather than the
+	// four per-fragment methods, so a handler cannot assemble one response
+	// from reads taken at different instants. ruleCache (constructed above
+	// for linksH's #0024 filter check) is wired again here so
+	// BatchCreateLinks (#0105) runs the SAME filter check single-create does,
+	// before inserting anything.
+	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger, statsStore, ruleCache)
 
 	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
 	// read straight off the RequireSession-attached context, so the Svelte SPA
@@ -272,16 +276,19 @@ func serveDevMode(cfg *config.Config) error {
 	// The hard guardrail (cfg.DevMode() check) is enforced inside DevAutoLogin.
 	devAutoLogin := middleware.DevAutoLogin(ds, cfg.DevMode())
 
-	// Campaign CRUD + link-membership API (#0098, #0099): devstore.Store now
-	// implements campaignStore in-memory (CreateCampaign/UpdateCampaign/
-	// DeleteCampaign/ListCampaignsForUser/GetCampaignBySlug/
-	// AssignLinkToCampaign/UnassignLinkFromCampaign) AND campaignLinksProvider
-	// (GetLink/ListLinksForCampaign), so dev mode gets working routes rather
-	// than falling through to the SPA catch-all with a misleading 200
-	// text/html — a real 404-on-unmounted-route problem the review caught,
-	// since #0103's UI work runs against ./scripts/dev.sh (STORAGE=json) and
-	// needs genuine JSON responses to build against.
-	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil, ds)
+	// Campaign CRUD + link-membership + batch-create API (#0098, #0099,
+	// #0105): devstore.Store now implements campaignStore in-memory
+	// (CreateCampaign/UpdateCampaign/DeleteCampaign/ListCampaignsForUser/
+	// GetCampaignBySlug/AssignLinkToCampaign/UnassignLinkFromCampaign) AND
+	// campaignLinksProvider (GetLink/ListLinksForCampaign/CreateLinksBatch),
+	// so dev mode gets working routes rather than falling through to the SPA
+	// catch-all with a misleading 200 text/html — a real
+	// 404-on-unmounted-route problem the review caught, since #0103's UI work
+	// runs against ./scripts/dev.sh (STORAGE=json) and needs genuine JSON
+	// responses to build against. ds also satisfies ruleProvider (already
+	// wired into linksH above), reused here so BatchCreateLinks runs the same
+	// (empty, in dev) filter check.
+	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil, ds, ds)
 
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
@@ -411,6 +418,10 @@ func mountAndServe(
 		mux.Handle("GET /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(campaignsH.ListLinks)))
 		mux.Handle("POST /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(campaignsH.AssignLinks)))
 		mux.Handle("DELETE /api/campaigns/{slug}/links/{key}", requireSession(http.HandlerFunc(campaignsH.UnassignLink)))
+		// Batch create (#0105): one destination URL, a row per channel, one
+		// short link per non-blank row, all assigned to this campaign in a
+		// single atomic request.
+		mux.Handle("POST /api/campaigns/{slug}/links/batch", requireSession(http.HandlerFunc(campaignsH.BatchCreateLinks)))
 	}
 
 	// Current user profile (#0027) — behind RequireSession; returns the caller's

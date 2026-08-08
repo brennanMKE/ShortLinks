@@ -283,6 +283,52 @@ export function unassignLinkFromCampaign(slug: string, key: string): Promise<{ m
   );
 }
 
+/**
+ * One row of POST /api/campaigns/{slug}/links/batch's body (#0105). Mirrors
+ * internal/handlers/campaigns.go's batchCreateLinkRow: destination_url is
+ * the row's FULLY COMPOSED URL — the client bakes each row's UTM values into
+ * it via lib/campaigns.ts's composeBatchRowDestinationUrl (the SAME
+ * composeUtmUrl helper single-create uses), so the server does not
+ * recompose it. Structurally identical to lib/campaigns.ts's
+ * BatchCreateLinkRowPayload; kept as a separate declaration here rather than
+ * imported, matching this file's existing convention of defining its own
+ * *Input shapes independently of lib/ (e.g. CreateLinkInput above).
+ */
+export interface BatchCreateLinkRowInput {
+  destination_url: string;
+  title?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  placement?: string;
+}
+
+/**
+ * POST /api/campaigns/{slug}/links/batch — create one new short link per row
+ * (already filtered to non-blank rows by the caller — see
+ * lib/campaigns.ts's buildBatchCreateRows), all assigned to this campaign,
+ * in ONE atomic server call (#0105: "prefer one server call — a partial
+ * failure halfway through a client-side loop leaves the campaign in a state
+ * the user did not ask for and cannot easily undo"). The whole request
+ * either creates every row or (400/422/500) creates nothing — see
+ * internal/handlers/campaigns.go's BatchCreateLinks doc comment.
+ * skipped_blank_rows always comes back 0 here since the caller already
+ * dropped blank rows before composing the request; the field exists on the
+ * response type because the SERVER also defends against a blank row arriving
+ * (e.g. a future caller that does not pre-filter).
+ */
+export function batchCreateLinksForCampaign(
+  slug: string,
+  rows: BatchCreateLinkRowInput[],
+): Promise<{ links: Link[]; skipped_blank_rows: number }> {
+  return apiPost<{ links: Link[]; skipped_blank_rows: number }>(
+    `/api/campaigns/${encodeURIComponent(slug)}/links/batch`,
+    { rows },
+  );
+}
+
 /** POST /auth/logout — invalidate the current session. */
 export function logout(): Promise<void> {
   return apiPost<void>('/auth/logout');

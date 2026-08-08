@@ -421,6 +421,147 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	return link, OutcomeInserted, nil
 }
 
+// CreateLinksBatch inserts N new links in one transaction and returns them in
+// the same order as rows, for #0105's campaign batch-create endpoint (one
+// destination URL, a row per channel).
+//
+// #0105 DECISION — DEDUP IS BYPASSED ENTIRELY, not extended or worked around.
+// CreateOrReactivateLink's dedup lookup keys SOLELY on (user_id,
+// destination_url), and placement is deliberately NOT baked into
+// destination_url (#0099's data-model note) — so two batch rows differing
+// only in placement compose to a byte-identical destination_url and, run
+// through CreateOrReactivateLink, collapse onto ONE row (see that method's
+// doc comment and #0099's Gotchas for the full history: forward-merge only
+// changed "row 2 ignored" into "row 2 overwrites row 1", it did not fix it).
+// The issue names three options: bypass dedup for the batch endpoint, extend
+// the dedup key beyond destination_url, or bake something per-row into the
+// URL. This method takes the FIRST: it never calls lockExisting and never
+// looks up an existing row by destination_url at all — every row in a batch
+// unconditionally inserts, even if its destination_url is byte-identical to
+// another row's (or to an existing link's). This is the simplest option that
+// is unconditionally correct for the case the issue is centrally about
+// (TestCreateLinksBatch_TwoRowsDifferingOnlyInPlacementCreateTwoDistinctLinks
+// pins it), and it does not require redefining what "duplicate" means for
+// single-create's dedup path, which #0099 already shipped and this issue does
+// not reopen. The handler (internal/handlers/campaigns.go BatchCreateLinks)
+// is responsible for its OWN, separate notion of "duplicate row within this
+// batch" (identical source+medium+content+placement) — a client-side mistake
+// this method has no way to distinguish from two legitimately identical
+// links, so rejecting that is a validation decision, not a storage one.
+//
+// THE STRONGER CASE FOR BYPASSING RATHER THAN EXTENDING THE DEDUP KEY: inside
+// one batch, an exact duplicate row (same source+medium+content+placement) is
+// already rejected before this method is ever called — see BatchCreateLinks'
+// duplicateKey check. That means an extended dedup key (e.g. destination_url
+// + placement) could only ever match a PRE-EXISTING link from an earlier
+// request, never another row in the SAME batch. And matching a pre-existing
+// row means forward-merging onto it (applyRequestedMetadataTx's behavior),
+// which can silently move that link out of whatever campaign it already
+// belonged to and last-write-wins its UTM/placement metadata — a surprising
+// side effect for what the user experiences as "create a new batch of
+// links," not "maybe edit some old ones too." Bypassing dedup entirely avoids
+// that failure mode altogether, not just the placement-collision one.
+//
+// DOUBLE-SUBMIT IS NOT DEDUPLICATED EITHER, and for the same underlying
+// reason (no dedup lookup runs at all): submitting an identical N-row batch
+// twice creates 2N links, not N. This is a CONTRACT CHANGE from single
+// create, where CreateOrReactivateLink reliably folds a repeat submission of
+// the same destination_url onto the existing row. See
+// internal/handlers/campaigns.go's BatchCreateLinks doc comment for the
+// full double-submit rationale (the UI mitigates the common paths; the
+// residual lost-response-then-retry window is an accepted trade).
+//
+// ATOMICITY — the whole batch is one transaction: if any row's INSERT fails,
+// every row inserted earlier IN THIS CALL rolls back and the method returns
+// an error with no partial state. This is a deliberate "all or nothing"
+// choice (see the issue's acceptance criteria: "either atomic, or partial
+// success reported per row" — atomic is simpler to reason about for a batch
+// the user submits as one semantic action, "these are the channels for one
+// promotion", and avoids the #0099 assign-endpoint's documented non-atomic
+// surprise ("earlier keys stayed assigned after a later key failed") for a
+// CREATE path, where a half-created batch is harder for the user to clean up
+// than a half-assigned one (unassigning is one click; deleting stray links
+// is several). The caller (handler) is expected to validate every row BEFORE
+// calling this method (URL syntax, filter-rule denial, in-batch duplicates)
+// so a failure inside the transaction is the rare case (e.g. a genuine key
+// exhaustion or a DB error), not the common path.
+//
+// KEY COLLISIONS ACROSS THE BATCH — each row's key is minted by calling
+// genKey (normally links.GenerateUniqueKey) with an `exists` closure that
+// queries THIS transaction, not the pool. Because Postgres transactions see
+// their own uncommitted writes, row 2's existence check sees row 1's
+// already-inserted (but not yet committed) key, so two rows landing on the
+// same randomly generated key retry correctly within one transaction — this
+// is the same pattern CreateOrReactivateLink's insert branch already uses,
+// just called once per row instead of once per request. See
+// TestCreateLinksBatch_KeyCollisionRetriesWithinSameTransaction, which forces
+// exactly this collision with a scripted genKey and would fail (ErrKeyTaken
+// from the second row's INSERT) if the exists closure queried s.pool instead
+// of tx.
+//
+// campaign_id/UTM/placement are taken directly from each row's NewLink,
+// exactly like CreateLink — no forward-merge logic applies here since there
+// is no existing row to merge onto.
+func (s *Store) CreateLinksBatch(ctx context.Context, rows []NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) ([]Link, error) {
+	if len(rows) == 0 {
+		return []Link{}, nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("links: begin batch tx: %w", err)
+	}
+	// Rollback is a no-op after a successful Commit; guards every error path,
+	// including a failure partway through the loop below (nothing committed
+	// earlier in THIS call survives — see the atomicity note above).
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	out := make([]Link, 0, len(rows))
+	for _, in := range rows {
+		key, err := genKey(func(candidate string) (bool, error) {
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1)`, candidate,
+			).Scan(&exists); err != nil {
+				return false, fmt.Errorf("links: checking key exists in batch tx: %w", err)
+			}
+			return exists, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		link := newLinkFromInput(in)
+		link.Key = key
+		var title *string
+		if in.Title != "" {
+			title = &in.Title
+		}
+		err = tx.QueryRow(ctx,
+			`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
+			                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement)
+			 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12)
+			 RETURNING id, created_at, expires_at`,
+			in.UserID, key, in.DestinationURL, title, in.ExpiresAt,
+			in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
+			nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement),
+		).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+				return nil, ErrKeyTaken
+			}
+			return nil, fmt.Errorf("links: inserting batch link: %w", err)
+		}
+		out = append(out, link)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("links: commit batch tx: %w", err)
+	}
+	return out, nil
+}
+
 // applyRequestedMetadataTx forward-merges in's campaign_id/utm_*/placement
 // onto existing (an already row-locked match from lockExisting), inside the
 // caller's transaction. Only fields the request actually supplied are

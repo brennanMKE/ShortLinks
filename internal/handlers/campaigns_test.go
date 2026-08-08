@@ -12,9 +12,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
+	"github.com/brennanMKE/ShortLinks/internal/cache"
 	"github.com/brennanMKE/ShortLinks/internal/campaigns"
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
+	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
@@ -25,8 +28,18 @@ import (
 // *clicks.StatsStore, mirroring linksMux.
 func campaignsMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
+	return campaignsMuxWithRules(t, pool, nil)
+}
+
+// campaignsMuxWithRules is campaignsMux with an explicit (possibly nil)
+// ruleProvider, so #0105's batch-create filter-check tests can wire a real
+// DB-backed *cache.RuleCache the way filterLinksMux does for single-create,
+// while every other campaigns test keeps using the simpler nil-rules
+// campaignsMux.
+func campaignsMuxWithRules(t *testing.T, pool *pgxpool.Pool, rules ruleProvider) http.Handler {
+	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), nil, clicks.NewStatsStore(pool))
+	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), nil, clicks.NewStatsStore(pool), rules)
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/campaigns", requireSession(http.HandlerFunc(h.List)))
@@ -38,6 +51,7 @@ func campaignsMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	mux.Handle("GET /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(h.ListLinks)))
 	mux.Handle("POST /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(h.AssignLinks)))
 	mux.Handle("DELETE /api/campaigns/{slug}/links/{key}", requireSession(http.HandlerFunc(h.UnassignLink)))
+	mux.Handle("POST /api/campaigns/{slug}/links/batch", requireSession(http.HandlerFunc(h.BatchCreateLinks)))
 	return mux
 }
 
@@ -1023,6 +1037,7 @@ func TestCampaignsLinksUnauthenticated_401(t *testing.T) {
 		{http.MethodGet, "/api/campaigns/some-slug/links"},
 		{http.MethodPost, "/api/campaigns/some-slug/links"},
 		{http.MethodDelete, "/api/campaigns/some-slug/links/some-key"},
+		{http.MethodPost, "/api/campaigns/some-slug/links/batch"},
 	}
 	for _, c := range cases {
 		req, _ := http.NewRequest(c.method, srv.URL+c.path, jsonBody(`{}`))
@@ -1513,4 +1528,500 @@ func linksInCampaign(t *testing.T, pool *pgxpool.Pool, campaignID int64) []strin
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// ── Batch create (#0105) ────────────────────────────────────────────────
+
+// batchCreate POSTs a batch-create request and returns the decoded response
+// body plus the raw status code, so callers can assert either a success body
+// or an error status without duplicating the request plumbing.
+func batchCreate(t *testing.T, srv *httptest.Server, token, slug, body string) (batchCreateLinksResponse, int) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/campaigns/"+slug+"/links/batch", jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(withCookie(req, token))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	var got batchCreateLinksResponse
+	if resp.StatusCode == http.StatusCreated {
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	}
+	return got, resp.StatusCode
+}
+
+// TestCampaignsBatchCreate_CreatesOneLinkPerNonBlankRow asserts N filled-in
+// rows produce N links in ONE call, each carrying its own discrete UTM
+// columns/placement/title AND the campaign's id — matching what single
+// create records (#0099), and each with a unique generated key.
+func TestCampaignsBatchCreate_CreatesOneLinkPerNonBlankRow(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	body := `{"rows":[
+		{"destination_url":"https://example.com/promo?utm_source=newsletter","title":"Newsletter blast","utm_source":"newsletter","utm_medium":"email","utm_campaign":"summer-fair","utm_content":"hero-cta"},
+		{"destination_url":"https://example.com/promo?utm_source=twitter","title":"Tweet","utm_source":"twitter","utm_medium":"social","utm_campaign":"summer-fair","utm_content":"launch-post"},
+		{"destination_url":"https://example.com/promo","title":"Flyer","utm_source":"flyer","utm_medium":"print","utm_campaign":"summer-fair","placement":"18th & Texas board"}
+	]}`
+	got, status := batchCreate(t, srv, "alice-token", c.Slug, body)
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", status)
+	}
+	if len(got.Links) != 3 {
+		t.Fatalf("links = %d, want 3", len(got.Links))
+	}
+	if got.SkippedBlankRows != 0 {
+		t.Errorf("skipped_blank_rows = %d, want 0", got.SkippedBlankRows)
+	}
+
+	keys := make(map[string]bool, 3)
+	campaignID := campaignRowID(t, pool, c.Slug)
+	for i, l := range got.Links {
+		if keys[l.Key] {
+			t.Errorf("row %d: key %q reused", i, l.Key)
+		}
+		keys[l.Key] = true
+		if l.CampaignID == nil || *l.CampaignID != campaignID {
+			t.Errorf("row %d: campaign_id = %v, want %d", i, l.CampaignID, campaignID)
+		}
+		if !l.Active || l.DeniedReason != 0 {
+			t.Errorf("row %d: active=%v denied=%d, want active=true denied=0", i, l.Active, l.DeniedReason)
+		}
+	}
+	if got.Links[2].Placement != "18th & Texas board" {
+		t.Errorf("row 2 placement = %q, want %q", got.Links[2].Placement, "18th & Texas board")
+	}
+
+	inCampaign := linksInCampaign(t, pool, campaignID)
+	if len(inCampaign) != 3 {
+		t.Errorf("links in campaign = %d, want 3", len(inCampaign))
+	}
+}
+
+// TestCampaignsBatchCreate_BlankRowSkipped asserts a row left entirely
+// empty (source/medium/content/placement/title all blank — utm_campaign
+// alone, matching the shared campaign default, must NOT count) is skipped
+// rather than creating a link with empty UTM values, and is reported via
+// skipped_blank_rows rather than silently vanishing.
+func TestCampaignsBatchCreate_BlankRowSkipped(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	body := `{"rows":[
+		{"destination_url":"https://example.com/promo","utm_source":"newsletter","utm_medium":"email","utm_campaign":"summer-fair"},
+		{"destination_url":"https://example.com/promo","utm_campaign":"summer-fair"},
+		{"destination_url":"https://example.com/promo","utm_source":"twitter","utm_medium":"social","utm_campaign":"summer-fair"}
+	]}`
+	got, status := batchCreate(t, srv, "alice-token", c.Slug, body)
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", status)
+	}
+	if len(got.Links) != 2 {
+		t.Fatalf("links = %d, want 2 (the blank middle row must be skipped, not create an empty-UTM link)", len(got.Links))
+	}
+	if got.SkippedBlankRows != 1 {
+		t.Errorf("skipped_blank_rows = %d, want 1", got.SkippedBlankRows)
+	}
+	for _, l := range got.Links {
+		if l.UTMSource == "" {
+			t.Errorf("created link %q has empty utm_source — the blank row was not the one skipped", l.Key)
+		}
+	}
+}
+
+// TestCampaignsBatchCreate_TwoRowsDifferingOnlyInPlacementCreateTwoLinks is
+// the CENTRAL test for #0105 at the HTTP boundary — the confirmed trap from
+// #0099's review: two rows sharing a byte-identical destination_url
+// (placement is never baked into the URL) must produce TWO links, not one.
+// See links.Store.CreateLinksBatch's doc comment for the store-level version
+// of this same test and its manual mutation check.
+func TestCampaignsBatchCreate_TwoRowsDifferingOnlyInPlacementCreateTwoLinks(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	const sharedDest = "https://example.com/summer-sale?utm_source=flyer&utm_medium=print"
+	body := `{"rows":[
+		{"destination_url":"` + sharedDest + `","utm_source":"flyer","utm_medium":"print","placement":"18th & Texas board"},
+		{"destination_url":"` + sharedDest + `","utm_source":"flyer","utm_medium":"print","placement":"Congress & 6th board"}
+	]}`
+	got, status := batchCreate(t, srv, "alice-token", c.Slug, body)
+	if status != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", status)
+	}
+	if len(got.Links) != 2 {
+		t.Fatalf("links = %d, want 2 (dedup must be bypassed — see the trap this issue exists to fix)", len(got.Links))
+	}
+	if got.Links[0].Key == got.Links[1].Key {
+		t.Fatal("both rows got the SAME key")
+	}
+	if got.Links[0].DestinationURL != got.Links[1].DestinationURL {
+		t.Errorf("destination_url differs (%q vs %q) — the test setup requires them identical",
+			got.Links[0].DestinationURL, got.Links[1].DestinationURL)
+	}
+	if got.Links[0].Placement == got.Links[1].Placement {
+		t.Fatal("both rows report the same placement")
+	}
+
+	campaignID := campaignRowID(t, pool, c.Slug)
+	inCampaign := linksInCampaign(t, pool, campaignID)
+	if len(inCampaign) != 2 {
+		t.Fatalf("links in campaign = %d, want 2", len(inCampaign))
+	}
+}
+
+// TestCampaignsBatchCreate_DuplicateRowsRejectedAtomically asserts two rows
+// identical in source+medium+content+placement (a genuine accidental
+// double-entry, NOT the placement-only case above) are rejected with 400 and
+// that NOTHING from the batch — including the row(s) that would otherwise
+// have been fine — is created.
+func TestCampaignsBatchCreate_DuplicateRowsRejectedAtomically(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	body := `{"rows":[
+		{"destination_url":"https://example.com/a","utm_source":"newsletter","utm_medium":"email","utm_content":"hero-cta"},
+		{"destination_url":"https://example.com/b","utm_source":"newsletter","utm_medium":"email","utm_content":"hero-cta"}
+	]}`
+	got, status := batchCreate(t, srv, "alice-token", c.Slug, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	if len(got.Links) != 0 {
+		t.Errorf("links = %d, want 0 (rejected atomically before any insert)", len(got.Links))
+	}
+
+	campaignID := campaignRowID(t, pool, c.Slug)
+	if inCampaign := linksInCampaign(t, pool, campaignID); len(inCampaign) != 0 {
+		t.Errorf("links in campaign = %v, want none", inCampaign)
+	}
+}
+
+// TestCampaignsBatchCreate_CapEnforced asserts a request over
+// maxBatchCreateRows non-blank rows is rejected with 400 and creates
+// nothing, mirroring TestCampaignsAssignLinks_KeysCapEnforced.
+func TestCampaignsBatchCreate_CapEnforced(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	var b strings.Builder
+	b.WriteString(`{"rows":[`)
+	for i := 0; i < maxBatchCreateRows+1; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"destination_url":"https://example.com/x","utm_source":"s%d","utm_medium":"email"}`, i)
+	}
+	b.WriteString(`]}`)
+
+	got, status := batchCreate(t, srv, "alice-token", c.Slug, b.String())
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (%d rows exceeds the %d cap)", status, maxBatchCreateRows+1, maxBatchCreateRows)
+	}
+	if len(got.Links) != 0 {
+		t.Errorf("links = %d, want 0", len(got.Links))
+	}
+	campaignID := campaignRowID(t, pool, c.Slug)
+	if inCampaign := linksInCampaign(t, pool, campaignID); len(inCampaign) != 0 {
+		t.Errorf("links in campaign = %v, want none", inCampaign)
+	}
+}
+
+// TestCampaignsBatchCreate_InvalidDestinationURLRejectsWholeBatch asserts
+// one row with a syntactically invalid destination_url fails the ENTIRE
+// batch (400) with nothing created — including the otherwise-valid row(s)
+// alongside it, per the atomic decision.
+func TestCampaignsBatchCreate_InvalidDestinationURLRejectsWholeBatch(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	body := `{"rows":[
+		{"destination_url":"https://example.com/good","utm_source":"newsletter","utm_medium":"email"},
+		{"destination_url":"not-a-url","utm_source":"twitter","utm_medium":"social"}
+	]}`
+	got, status := batchCreate(t, srv, "alice-token", c.Slug, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	if len(got.Links) != 0 {
+		t.Errorf("links = %d, want 0", len(got.Links))
+	}
+	campaignID := campaignRowID(t, pool, c.Slug)
+	if inCampaign := linksInCampaign(t, pool, campaignID); len(inCampaign) != 0 {
+		t.Errorf("links in campaign = %v, want none (the good row must not survive alongside the bad one)", inCampaign)
+	}
+}
+
+// TestCampaignsBatchCreate_CampaignOwnershipEnforced asserts a slug
+// belonging to another user 404s and creates nothing — the same
+// indistinguishable-404 contract every other campaign endpoint uses.
+func TestCampaignsBatchCreate_CampaignOwnershipEnforced(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	seedSession(t, pool, bob, "bob-token")
+	bobCampaign := createCampaign(t, srv, "bob-token", `{"name":"Bob Campaign"}`)
+
+	body := `{"rows":[{"destination_url":"https://example.com/x","utm_source":"newsletter","utm_medium":"email"}]}`
+	got, status := batchCreate(t, srv, "alice-token", bobCampaign.Slug, body)
+	if status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", status)
+	}
+	if len(got.Links) != 0 {
+		t.Errorf("links = %d, want 0", len(got.Links))
+	}
+	bobCampaignID := campaignRowID(t, pool, bobCampaign.Slug)
+	if inCampaign := linksInCampaign(t, pool, bobCampaignID); len(inCampaign) != 0 {
+		t.Errorf("links in bob's campaign = %v, want none", inCampaign)
+	}
+}
+
+// TestCampaignsBatchCreate_AllBlankRowsRejected asserts a request whose
+// every row is blank (e.g. the user clicked "Create" without filling in
+// anything) is rejected with 400 rather than silently succeeding with zero
+// links created.
+func TestCampaignsBatchCreate_AllBlankRowsRejected(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	body := `{"rows":[{"destination_url":"https://example.com/x"},{"destination_url":"https://example.com/x"}]}`
+	_, status := batchCreate(t, srv, "alice-token", c.Slug, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (every row is blank)", status)
+	}
+}
+
+// campaignsBatchFilterMux mirrors filterLinksMux (url_filters_test.go) but
+// for the campaigns batch-create route: the given ruleCache is wired into
+// NewCampaignsHandler so BatchCreateLinks' #0024 filter check runs against
+// the live DB-backed rules.
+func campaignsBatchFilterMux(t *testing.T, pool *pgxpool.Pool, ruleCache *cache.RuleCache) http.Handler {
+	t.Helper()
+	return campaignsMuxWithRules(t, pool, ruleCache)
+}
+
+// TestCampaignsBatchCreate_FilterDeniedRowRejectsWholeBatch asserts a batch
+// containing one row whose destination_url matches an active URL-filter rule
+// (#0024) fails the WHOLE request with 422, creating nothing — including any
+// good rows alongside it, per the atomic decision. Mirrors
+// TestLinksCreate_FilterDeniesAndRecords's setup but asserts atomicity
+// instead of the (batch-create does NOT record a denied-link row; see
+// BatchCreateLinks' doc comment for why).
+func TestCampaignsBatchCreate_FilterDeniedRowRejectsWholeBatch(t *testing.T) {
+	pool := filterTestPool(t)
+	ruleCache := newFilterRuleCache(pool)
+	srv := httptest.NewServer(campaignsBatchFilterMux(t, pool, ruleCache))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	seedFilterRule(t, pool, `evil\.com`, int16(filters.ReasonMalware))
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	body := `{"rows":[
+		{"destination_url":"https://example.com/good","utm_source":"newsletter","utm_medium":"email"},
+		{"destination_url":"http://evil.com/x","utm_source":"twitter","utm_medium":"social"}
+	]}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/campaigns/"+c.Slug+"/links/batch", jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", resp.StatusCode)
+	}
+
+	campaignID := campaignRowID(t, pool, c.Slug)
+	if inCampaign := linksInCampaign(t, pool, campaignID); len(inCampaign) != 0 {
+		t.Errorf("links in campaign = %v, want none (the good row must not survive alongside the denied one)", inCampaign)
+	}
+}
+
+// campaignsAuditBatchMux mirrors campaignsBatchFilterMux but ALSO wires a
+// real *audit.Logger (campaignsMuxWithRules leaves the auditor nil, since no
+// other campaigns test asserts against audit_log), so
+// TestCampaignsBatchCreate_FilterDeniedRowWritesAuditEntry can assert a
+// link.denied row actually landed.
+func campaignsAuditBatchMux(t *testing.T, pool *pgxpool.Pool, ruleCache *cache.RuleCache) http.Handler {
+	t.Helper()
+	authStore := auth.NewStore(pool)
+	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), audit.New(pool), clicks.NewStatsStore(pool), ruleCache)
+	requireSession := middleware.RequireSession(authStore)
+	mux := http.NewServeMux()
+	mux.Handle("POST /api/campaigns", requireSession(http.HandlerFunc(h.Create)))
+	mux.Handle("POST /api/campaigns/{slug}/links/batch", requireSession(http.HandlerFunc(h.BatchCreateLinks)))
+	return mux
+}
+
+// TestCampaignsBatchCreate_FilterDeniedRowWritesAuditEntry is review finding
+// 1's regression test: a filter-denied row in a batch must write a
+// link.denied audit entry, even though (unlike single-create) no denied link
+// row is created to attribute it to. Asserts the entry's actor, nil
+// target_id (there is no link row), and metadata (destination_url,
+// campaign_slug, batch:true, and the row's ORIGINAL 1-based position).
+//
+// MUTATION CHECK (performed manually, not committed): commenting out the
+// h.auditor.Record call in BatchCreateLinks' filter-check block makes this
+// test fail at lastAuditFor's t.Fatalf("no audit_log row for action %q"),
+// since nothing else in this test's flow writes a link.denied row. Restoring
+// the call makes it pass again — confirming the test actually exercises the
+// new Record call rather than something else in the request path.
+func TestCampaignsBatchCreate_FilterDeniedRowWritesAuditEntry(t *testing.T) {
+	pool := filterTestPool(t)
+	ruleCache := newFilterRuleCache(pool)
+	srv := httptest.NewServer(campaignsAuditBatchMux(t, pool, ruleCache))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	seedFilterRule(t, pool, `evil\.com`, int16(filters.ReasonMalware))
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	const blocked = "http://evil.com/x"
+	// A LEADING BLANK ROW is deliberate. Without it the denied row's original
+	// index (3) equals its post-blank-filter index (2), so the metadata.row
+	// assertion below passes under either implementation — it could not
+	// express the very defect origIndex exists to prevent (review nit 3, the
+	// same shape #0104's review flagged). With the blank row the two indices
+	// differ, so dropping origIndex here fails this test.
+	body := `{"rows":[
+		{"destination_url":"","utm_source":"","utm_medium":""},
+		{"destination_url":"https://example.com/good","utm_source":"newsletter","utm_medium":"email"},
+		{"destination_url":"` + blocked + `","utm_source":"twitter","utm_medium":"social"}
+	]}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/campaigns/"+c.Slug+"/links/batch", jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", resp.StatusCode)
+	}
+
+	row := lastAuditFor(t, pool, audit.ActionLinkDenied)
+	if row.ActorID == nil || *row.ActorID != alice {
+		t.Errorf("actor_id = %v, want %d", row.ActorID, alice)
+	}
+	if row.TargetID != nil {
+		t.Errorf("target_id = %v, want nil (no denied link row is created for a batch)", *row.TargetID)
+	}
+	if row.TargetType == nil || *row.TargetType != audit.TargetLink {
+		t.Errorf("target_type = %v, want %q", row.TargetType, audit.TargetLink)
+	}
+	if got := row.Metadata["destination_url"]; got != blocked {
+		t.Errorf("metadata.destination_url = %v, want %q", got, blocked)
+	}
+	if got := row.Metadata["campaign_slug"]; got != c.Slug {
+		t.Errorf("metadata.campaign_slug = %v, want %q", got, c.Slug)
+	}
+	if batch, _ := row.Metadata["batch"].(bool); !batch {
+		t.Errorf("metadata.batch = %v, want true", row.Metadata["batch"])
+	}
+	// JSON numbers decode as float64 through lastAuditFor's json.Unmarshal.
+	if rowNum, _ := row.Metadata["row"].(float64); rowNum != 3 {
+		t.Errorf("metadata.row = %v, want 3 — the ORIGINAL submitted position of the denied row. A value of 2 means the post-blank-filter index leaked out instead of origIndex", row.Metadata["row"])
+	}
+}
+
+// batchCreateError POSTs a batch-create request expected to fail and returns
+// the decoded error body's "error" message alongside the status code, for
+// tests asserting on the message text (row numbers) rather than just the
+// status.
+func batchCreateError(t *testing.T, srv *httptest.Server, token, slug, body string) (string, int) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/campaigns/"+slug+"/links/batch", jsonBody(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(withCookie(req, token))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	var got struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return got.Error, resp.StatusCode
+}
+
+// TestCampaignsBatchCreate_ErrorRowNumberIsOriginalIndex is review finding
+// 5's regression test: [filled, blank, blank, dup-of-1] must report the
+// duplicate as "row 4 duplicates row 1" — origIndex, the row's position in
+// what the client actually submitted (and what the UI labels Row 4) — not
+// "row 2 duplicates row 1", which is what the row's position in the
+// post-blank-filter slice used to report.
+func TestCampaignsBatchCreate_ErrorRowNumberIsOriginalIndex(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"Summer Fair"}`)
+
+	body := `{"rows":[
+		{"destination_url":"https://example.com/a","utm_source":"flyer","utm_medium":"print","utm_content":"c1"},
+		{"destination_url":"https://example.com/a"},
+		{"destination_url":"https://example.com/a"},
+		{"destination_url":"https://example.com/b","utm_source":"flyer","utm_medium":"print","utm_content":"c1"}
+	]}`
+	msg, status := batchCreateError(t, srv, "alice-token", c.Slug, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
+	}
+	const want = "row 4 duplicates row 1 (same source, medium, content, and placement)"
+	if msg != want {
+		t.Errorf("error = %q, want %q (rows 2/3 are blank and must not shift the reported index)", msg, want)
+	}
+
+	campaignID := campaignRowID(t, pool, c.Slug)
+	if inCampaign := linksInCampaign(t, pool, campaignID); len(inCampaign) != 0 {
+		t.Errorf("links in campaign = %v, want none", inCampaign)
+	}
 }

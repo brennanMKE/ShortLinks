@@ -5,6 +5,7 @@
 import type { Campaign, CampaignStats, CampaignWithCounts, Link, LinkBucket, UTMBucket } from './types';
 import { shortUrl } from './links';
 import { sortBuckets } from './linkDetail';
+import { composeUtmUrl, emptyUtmParams, type UtmParams } from './utm';
 
 // ── List filtering ──────────────────────────────────────────────────────────
 
@@ -418,4 +419,242 @@ export function joinSentences(first: string, second: string): string {
   if (trimmed === '') return second;
   const needsPeriod = !/[.!?]$/.test(trimmed);
   return `${trimmed}${needsPeriod ? '.' : ''} ${second}`;
+}
+
+// ── Batch create (#0105) ────────────────────────────────────────────────
+//
+// One destination URL, then a row per channel. The issue's deliverable list
+// is explicit about which fields vary PER ROW: source, medium, content,
+// placement, and an optional title. utm_campaign and utm_term are NOT part
+// of a row — they are shared across the whole batch (usually the campaign's
+// own default_utm_campaign/default_utm_term, editable once for the batch),
+// since repeating a field that is almost always identical across every
+// channel in one promotion eight times would be exactly the fragmentation
+// docs/utm.md's "Canonical casing" section warns about, just self-inflicted
+// instead of caused by different authors. See BatchCreateLinks.svelte for
+// the form that edits these.
+//
+// THE DEDUP TRAP (see links.Store.CreateLinksBatch's Go-side doc comment for
+// the full history): `placement` is never baked into destination_url, so two
+// rows differing only in placement compose to a byte-identical
+// destination_url. The backend's fix is to bypass CreateOrReactivateLink's
+// dedup entirely for the batch endpoint — nothing on THIS side needs to work
+// around it — but the duplicateBatchRowIndices check below is a SEPARATE,
+// deliberate concern: catching a genuine accidental double-entry (the same
+// channel typed twice, placement included) before it reaches the server.
+//
+// PREFILLING default_utm_source/_medium/_content — ROW 1 ONLY, deliberately
+// (review finding 2). The issue's bolded deliverable ("prefill each row from
+// the campaign's default_utm_* values", #0098) was implemented for
+// utm_campaign/utm_term (the shared pair above) but the other three were
+// never read at all: a campaign with default_utm_source="flyer" produced
+// entirely blank rows, while #0099's single-create form DOES prefill all
+// five via fillBlankUtmParams — the same campaign prefilled "flyer" in one
+// form and nothing in the other. initialBatchRows below fixes that, but only
+// for the FIRST row, not every row: prefilling identical source/medium/
+// content into every row would make rows 2..N byte-identical to row 1 under
+// duplicateBatchRowIndices (an immediate, spurious "duplicate row" error
+// before the user has typed anything), AND would make every untouched row
+// non-blank, defeating isBlankBatchRow's skip-on-blank behavior — a form
+// opened and closed without editing anything would submit N identical links
+// instead of zero. Row 1 gets the campaign's starting point (still fully
+// editable, per #0098/#0099's "starting point, never a lock" rule); rows
+// 2..N stay genuinely blank and stay skippable, exactly like "add row"
+// already produces.
+
+/**
+ * POST /api/campaigns/{slug}/links/batch's server-enforced per-request cap
+ * (maxBatchCreateRows, #0105). Client twin of MAX_ASSIGN_KEYS_PER_REQUEST
+ * above — review finding 4: without this, "+ Add row" was unbounded and a
+ * user who filled in 51 rows got back a raw server 400 instead of the
+ * button simply disabling at the limit.
+ */
+export const MAX_BATCH_CREATE_ROWS_PER_REQUEST = 50;
+
+/**
+ * One row of the batch-create form: the five fields that vary row to row.
+ * utm_campaign/utm_term are handled separately (see the module doc comment
+ * above) — they are not part of a row's own state.
+ */
+export interface BatchChannelRow {
+  utm_source: string;
+  utm_medium: string;
+  utm_content: string;
+  placement: string;
+  title: string;
+}
+
+/** A fresh, entirely blank row — what "add row" appends. */
+export function emptyBatchChannelRow(): BatchChannelRow {
+  return { utm_source: '', utm_medium: '', utm_content: '', placement: '', title: '' };
+}
+
+/**
+ * Builds the batch form's initial row list when a campaign detail view
+ * first opens the batch-create panel: exactly ONE row, prefilled from the
+ * campaign's default_utm_source/_medium/_content (review finding 2 — see
+ * the module doc comment's "PREFILLING" section above for why row 1 only,
+ * not every row). placement and title are never prefilled — the issue's
+ * deliverable list does not name them as campaign defaults, and #0098's
+ * campaigns table has no default_placement column to prefill from.
+ *
+ * A campaign whose three defaults are all empty (never set, or explicitly
+ * cleared via PATCH) produces a row indistinguishable from
+ * emptyBatchChannelRow() — isBlankBatchRow(rows[0]) is true, exactly the
+ * pre-#0105-fix behavior, so this is a strict improvement with no new edge
+ * case to guard.
+ */
+export function initialBatchRows(
+  campaign: Pick<Campaign, 'default_utm_source' | 'default_utm_medium' | 'default_utm_content'>,
+): BatchChannelRow[] {
+  return [
+    {
+      ...emptyBatchChannelRow(),
+      utm_source: campaign.default_utm_source,
+      utm_medium: campaign.default_utm_medium,
+      utm_content: campaign.default_utm_content,
+    },
+  ];
+}
+
+/**
+ * Whether every one of a row's own five fields is blank/whitespace-only —
+ * i.e. the row was added but never touched. Used to skip such rows rather
+ * than composing a link with empty UTM values (#0105 AC). Deliberately does
+ * NOT look at the batch's shared utm_campaign/utm_term (see the module doc
+ * comment): those are usually non-empty campaign defaults applied to every
+ * row, so their presence must never by itself make an otherwise-untouched
+ * row count as "filled in".
+ */
+export function isBlankBatchRow(row: BatchChannelRow): boolean {
+  return (
+    row.utm_source.trim() === '' &&
+    row.utm_medium.trim() === '' &&
+    row.utm_content.trim() === '' &&
+    row.placement.trim() === '' &&
+    row.title.trim() === ''
+  );
+}
+
+/** Only the non-blank rows, in their original order — what actually gets submitted. */
+export function nonBlankBatchRows(rows: BatchChannelRow[]): BatchChannelRow[] {
+  return rows.filter((r) => !isBlankBatchRow(r));
+}
+
+/**
+ * Indices (into `rows`) of rows that duplicate an EARLIER row in the same
+ * list, keyed on (utm_source, utm_medium, utm_content, placement) after
+ * trimming.
+ *
+ * DELIBERATELY INCLUDES placement, unlike the issue's acceptance-criterion
+ * shorthand ("same source+medium+content"): applied literally, that
+ * definition would flag the exact "two rows differing only in placement"
+ * case this issue exists to make work as a duplicate and block it — the
+ * opposite of the fix. Two rows that differ ONLY in placement (two poster
+ * locations for the same channel) are legitimate and must NOT appear here;
+ * two rows identical even in placement (the same channel typed twice) are a
+ * genuine accidental double-entry and DO appear here. Mirrors the backend's
+ * duplicateKey exactly (internal/handlers/campaigns.go) so a row flagged
+ * here would also be rejected server-side, and vice versa — which is exactly
+ * why BLANK rows are skipped entirely below: the backend's duplicate check
+ * (internal/handlers/campaigns.go's BatchCreateLinks) runs AFTER blank rows
+ * are already dropped, so it never sees them and never flags one blank row
+ * against another. A first version of this function scanned the full `rows`
+ * array unconditionally, which meant adding a THIRD blank row (e.g. "eight
+ * rows, fill in a few now, come back to the rest later" — exactly the
+ * workflow the issue's own "eight rows at 375px" verification state
+ * exercises) flagged it as a duplicate of the second blank row and disabled
+ * the whole submit button, even though every blank row was always going to
+ * be silently skipped and never reached the server at all. Caught rendering
+ * this in a real browser, not by a unit test — see campaigns.test.ts's
+ * "does not flag a third blank row" case, added after.
+ *
+ * Comparison is exact and case-sensitive — this module does not normalize
+ * casing (see docs/utm.md's "Canonical casing" section); silently folding
+ * case here would let two rows collide even though composeUtmUrl bakes them
+ * as genuinely different values.
+ */
+export function duplicateBatchRowIndices(rows: BatchChannelRow[]): Set<number> {
+  const seen = new Set<string>();
+  const dupes = new Set<number>();
+  rows.forEach((r, i) => {
+    if (isBlankBatchRow(r)) return;
+    const key = JSON.stringify([r.utm_source.trim(), r.utm_medium.trim(), r.utm_content.trim(), r.placement.trim()]);
+    if (seen.has(key)) {
+      dupes.add(i);
+    } else {
+      seen.add(key);
+    }
+  });
+  return dupes;
+}
+
+/**
+ * Composes one batch row's destination_url from the shared base URL, the
+ * row's own source/medium/content, and the batch-level (shared)
+ * utm_campaign/utm_term — reusing composeUtmUrl (#0048), the SAME pure
+ * helper single-create's builder uses, rather than a second composition path
+ * (issue note: "Batch composition is N calls to the same pure helper —
+ * resist writing a second composition path").
+ *
+ * `previous` is ALWAYS emptyUtmParams(): a freshly-typed batch row's builder
+ * never "owned" anything already present in the base URL — unlike an EDIT
+ * form's builder, which owns exactly what utmParamsFromLink seeded it with
+ * (see composeUtmUrl's own doc comment for why `previous` must not be
+ * conflated with `params`, and #0105's issue notes for this exact
+ * prescription: "For batch rows, previous should be emptyUtmParams() — a new
+ * row's builder never owned anything").
+ */
+export function composeBatchRowDestinationUrl(
+  baseUrl: string,
+  row: BatchChannelRow,
+  sharedUtmCampaign: string,
+  sharedUtmTerm: string,
+): string {
+  const params: UtmParams = {
+    utm_source: row.utm_source,
+    utm_medium: row.utm_medium,
+    utm_campaign: sharedUtmCampaign,
+    utm_term: sharedUtmTerm,
+    utm_content: row.utm_content,
+  };
+  return composeUtmUrl(baseUrl, params, emptyUtmParams());
+}
+
+/** One row of POST /api/campaigns/{slug}/links/batch's request body (api.ts's BatchCreateLinkRowInput mirrors this shape). */
+export interface BatchCreateLinkRowPayload {
+  destination_url: string;
+  title?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  placement?: string;
+}
+
+/**
+ * Builds the batch-create request payload: filters out blank rows, composes
+ * each remaining row's destination_url (via composeBatchRowDestinationUrl),
+ * and folds in the shared utm_campaign/utm_term. Pure — no fetch, no
+ * validation of duplicates (call duplicateBatchRowIndices separately before
+ * this so the caller can show a blocking error instead of silently
+ * submitting past it).
+ */
+export function buildBatchCreateRows(
+  baseUrl: string,
+  rows: BatchChannelRow[],
+  sharedUtmCampaign: string,
+  sharedUtmTerm: string,
+): BatchCreateLinkRowPayload[] {
+  return nonBlankBatchRows(rows).map((r) => ({
+    destination_url: composeBatchRowDestinationUrl(baseUrl, r, sharedUtmCampaign, sharedUtmTerm),
+    title: r.title.trim() || undefined,
+    utm_source: r.utm_source.trim() || undefined,
+    utm_medium: r.utm_medium.trim() || undefined,
+    utm_campaign: sharedUtmCampaign.trim() || undefined,
+    utm_term: sharedUtmTerm.trim() || undefined,
+    utm_content: r.utm_content.trim() || undefined,
+    placement: r.placement.trim() || undefined,
+  }));
 }

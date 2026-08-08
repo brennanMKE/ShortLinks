@@ -178,15 +178,59 @@ overwrite**: a field the request leaves blank is never cleared, so a bare
 assignment or UTM values an earlier create already set on that row. See
 `internal/links/store.go`'s `applyRequestedMetadataTx`.
 
-This does **not** solve #0105's batch-creation problem. Two batch rows
-differing only in `placement` still compose to the identical
+This did **not**, by itself, solve #0105's batch-creation problem. Two batch
+rows differing only in `placement` still compose to the identical
 `destination_url` (`placement` is never baked into the URL), so the dedup
-lookup still matches them to the same row — row 2 never becomes a second
-link. Forward-merge only changes what happens to that one shared row: before
-this change, row 2's placement was silently ignored; now, row 2's placement
-silently overwrites row 1's. #0105 needs its own fix (distinguishable
-`destination_url`s per batch row, or a dedup key other than
-`destination_url` alone) — not attempted here.
+lookup still matched them to the same row — row 2 never became a second
+link. Forward-merge only changed what happened to that one shared row:
+before it, row 2's placement was silently ignored; after it, row 2's
+placement silently overwrote row 1's.
+
+**#0105 fixes this by bypassing dedup entirely for batch creation**, rather
+than extending the dedup key or baking something new into the URL.
+`POST /api/campaigns/{slug}/links/batch` creates every non-blank row through
+`links.Store.CreateLinksBatch`, a separate method that never calls
+`CreateOrReactivateLink` or looks up an existing row by `destination_url` at
+all — every row unconditionally inserts, even when its `destination_url` is
+byte-identical to another row's. Two rows differing only in `placement`
+therefore become two links, each with its own generated key. The whole
+batch is one transaction (all rows commit, or none do), and a separate,
+narrower client- and server-side check rejects an EXACT duplicate row (same
+source + medium + content + **and** placement) as a likely accidental
+double-entry — deliberately not the same check as dedup, and deliberately
+including placement so it cannot reject the placement-only case the fix
+exists to allow. See `links.Store.CreateLinksBatch`'s doc comment
+(`internal/links/store.go`) for the full decision and
+`internal/handlers/campaigns.go`'s `BatchCreateLinks` for the request-level
+validation (row cap, blank-row skip, URL-filter check, duplicate-row
+rejection), all of which run BEFORE any row is inserted.
+
+**Bypassing dedup also means a double-submit is not deduplicated — a
+contract change from single create.** Submitting the identical batch twice
+(e.g. a lost response followed by a retry) creates 2N links, not N, where a
+repeat `POST /api/links` for the same URL reliably folds onto the existing
+row via `CreateOrReactivateLink`. The batch UI mitigates the common paths
+(the submit button disables while the request is in flight, and the form
+resets on success), leaving only the genuine lost-response-then-retry
+window — an accepted trade, not an oversight, but worth stating since
+[#0106](../issues/0106.md) builds QR sheets on these links and a doubled
+batch means doubled sheets.
+
+**`default_utm_source`/`_medium`/`_content` prefill ROW 1 of the batch form
+only, not every row.** Like the single-create form, the batch form prefills
+per-channel fields from the campaign's own `default_utm_*` values — but
+where single-create has one set of UTM fields to prefill, the batch form has
+N rows, and prefilling the same source/medium/content into all of them would
+make rows 2..N byte-identical to row 1 (an immediate, spurious "duplicate
+row" error under the batch's own duplicate-row check, before the user has
+typed anything) and would make every untouched row non-blank (defeating
+blank-row skipping — an unedited form would submit N identical links instead
+of zero). `lib/campaigns.ts`'s `initialBatchRows` therefore prefills only
+the first row; every row added afterward via "+ Add row" starts genuinely
+blank, exactly as before this fix. `utm_campaign`/`utm_term` remain the
+exception described above: they are shared across the whole batch (one
+field each, not per-row), so prefilling them once is unambiguous and does
+not have this collision.
 
 **A `NULL` `default_utm_campaign` prefills empty, never the campaign's
 slug.** The column can be cleared via `PATCH /api/campaigns/{slug}` and is

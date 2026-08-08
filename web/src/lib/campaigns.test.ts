@@ -23,6 +23,15 @@ import {
   joinSentences,
   MAX_ASSIGN_KEYS_PER_REQUEST,
   type CampaignLinkRow,
+  emptyBatchChannelRow,
+  initialBatchRows,
+  isBlankBatchRow,
+  nonBlankBatchRows,
+  duplicateBatchRowIndices,
+  composeBatchRowDestinationUrl,
+  buildBatchCreateRows,
+  MAX_BATCH_CREATE_ROWS_PER_REQUEST,
+  type BatchChannelRow,
 } from './campaigns';
 
 function campaign(overrides: Partial<CampaignWithCounts> = {}): CampaignWithCounts {
@@ -734,5 +743,266 @@ describe('joinSentences', () => {
   it('returns the second fragment alone when the first is empty or blank', () => {
     expect(joinSentences('', 'Some links were assigned.')).toBe('Some links were assigned.');
     expect(joinSentences('   ', 'Some links were assigned.')).toBe('Some links were assigned.');
+  });
+});
+
+// ── Batch create (#0105) ────────────────────────────────────────────────
+
+function batchRow(overrides: Partial<BatchChannelRow> = {}): BatchChannelRow {
+  return { ...emptyBatchChannelRow(), ...overrides };
+}
+
+describe('emptyBatchChannelRow', () => {
+  it('returns every field blank', () => {
+    expect(emptyBatchChannelRow()).toEqual({
+      utm_source: '',
+      utm_medium: '',
+      utm_content: '',
+      placement: '',
+      title: '',
+    });
+  });
+
+  it('returns a fresh object each call (mutating one does not affect another)', () => {
+    const a = emptyBatchChannelRow();
+    const b = emptyBatchChannelRow();
+    a.utm_source = 'newsletter';
+    expect(b.utm_source).toBe('');
+  });
+});
+
+// initialBatchRows (review finding 2): the campaign's default_utm_source/
+// _medium/_content prefill ROW 1 ONLY, not every row — pinning the fix and
+// the "row 2 stays blank" decision this issue's review specifically asked
+// for a test on.
+describe('initialBatchRows', () => {
+  it('prefills a single row from the campaign default_utm_source/_medium/_content', () => {
+    const c = campaign({ default_utm_source: 'flyer', default_utm_medium: 'print', default_utm_content: 'hero-cta' });
+    const rows = initialBatchRows(c);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      utm_source: 'flyer',
+      utm_medium: 'print',
+      utm_content: 'hero-cta',
+      placement: '',
+      title: '',
+    });
+  });
+
+  it('does not prefill placement or title — the campaign has no default for either', () => {
+    const c = campaign({ default_utm_source: 'flyer', default_utm_medium: 'print', default_utm_content: 'hero-cta' });
+    const rows = initialBatchRows(c);
+    expect(rows[0].placement).toBe('');
+    expect(rows[0].title).toBe('');
+  });
+
+  it('row 1 is prefilled (non-blank) and a row 2 added afterward stays entirely blank', () => {
+    const c = campaign({ default_utm_source: 'flyer', default_utm_medium: 'print', default_utm_content: 'hero-cta' });
+    const rows = [...initialBatchRows(c), emptyBatchChannelRow()];
+    expect(isBlankBatchRow(rows[0])).toBe(false);
+    expect(isBlankBatchRow(rows[1])).toBe(true);
+  });
+
+  it('two rows built this way are NOT flagged as duplicates of each other', () => {
+    // Guards against the exact regression a naive "prefill every row" fix
+    // would introduce: row 2 is genuinely blank, not a copy of row 1, so it
+    // must never collide with row 1 under duplicateBatchRowIndices.
+    const c = campaign({ default_utm_source: 'flyer', default_utm_medium: 'print', default_utm_content: 'hero-cta' });
+    const rows = [...initialBatchRows(c), emptyBatchChannelRow()];
+    expect(duplicateBatchRowIndices(rows).size).toBe(0);
+  });
+
+  it('a campaign with no defaults set produces a blank row 1, same as before this fix', () => {
+    const c = campaign({ default_utm_source: '', default_utm_medium: '', default_utm_content: '' });
+    const rows = initialBatchRows(c);
+    expect(isBlankBatchRow(rows[0])).toBe(true);
+  });
+});
+
+describe('MAX_BATCH_CREATE_ROWS_PER_REQUEST', () => {
+  it('matches the server-enforced cap (maxBatchCreateRows, internal/handlers/campaigns.go)', () => {
+    expect(MAX_BATCH_CREATE_ROWS_PER_REQUEST).toBe(50);
+  });
+});
+
+describe('isBlankBatchRow', () => {
+  it('is true for an untouched row', () => {
+    expect(isBlankBatchRow(emptyBatchChannelRow())).toBe(true);
+  });
+
+  it('is true for a row containing only whitespace', () => {
+    expect(isBlankBatchRow(batchRow({ utm_source: '   ', title: '\t' }))).toBe(true);
+  });
+
+  it.each(['utm_source', 'utm_medium', 'utm_content', 'placement', 'title'] as const)(
+    'is false once %s is filled in',
+    (field) => {
+      expect(isBlankBatchRow(batchRow({ [field]: 'x' }))).toBe(false);
+    },
+  );
+});
+
+describe('nonBlankBatchRows', () => {
+  it('drops blank rows and keeps the rest in order', () => {
+    const rows = [
+      batchRow({ utm_source: 'newsletter' }),
+      emptyBatchChannelRow(),
+      batchRow({ utm_source: 'twitter' }),
+    ];
+    expect(nonBlankBatchRows(rows).map((r) => r.utm_source)).toEqual(['newsletter', 'twitter']);
+  });
+
+  it('does not mutate the input array', () => {
+    const rows = [emptyBatchChannelRow(), batchRow({ utm_source: 'x' })];
+    const before = [...rows];
+    nonBlankBatchRows(rows);
+    expect(rows).toEqual(before);
+  });
+});
+
+describe('duplicateBatchRowIndices', () => {
+  // THE CENTRAL CASE (#0105's Relation note): two rows differing ONLY in
+  // placement must NOT be flagged as duplicates — that is the trap this
+  // issue exists to fix, and a duplicate-row guard that caught this case
+  // would silently re-introduce it on the client side even though the
+  // server-side dedup bypass is correct.
+  it('does NOT flag two rows differing only in placement', () => {
+    const rows = [
+      batchRow({ utm_source: 'flyer', utm_medium: 'print', placement: '18th & Texas board' }),
+      batchRow({ utm_source: 'flyer', utm_medium: 'print', placement: 'Congress & 6th board' }),
+    ];
+    expect(duplicateBatchRowIndices(rows)).toEqual(new Set());
+  });
+
+  it('flags a row identical to an earlier one, including placement', () => {
+    const rows = [
+      batchRow({ utm_source: 'newsletter', utm_medium: 'email', utm_content: 'hero-cta' }),
+      batchRow({ utm_source: 'newsletter', utm_medium: 'email', utm_content: 'hero-cta' }),
+    ];
+    expect(duplicateBatchRowIndices(rows)).toEqual(new Set([1]));
+  });
+
+  it('flags only the later occurrences of a repeated tuple, never the first', () => {
+    const rows = [
+      batchRow({ utm_source: 'a', utm_medium: 'b' }),
+      batchRow({ utm_source: 'a', utm_medium: 'b' }),
+      batchRow({ utm_source: 'a', utm_medium: 'b' }),
+    ];
+    expect(duplicateBatchRowIndices(rows)).toEqual(new Set([1, 2]));
+  });
+
+  it('is case-sensitive — differing casing is not treated as a duplicate', () => {
+    const rows = [batchRow({ utm_source: 'Newsletter' }), batchRow({ utm_source: 'newsletter' })];
+    expect(duplicateBatchRowIndices(rows)).toEqual(new Set());
+  });
+
+  it('trims before comparing, so whitespace-only differences ARE flagged', () => {
+    const rows = [batchRow({ utm_source: 'newsletter' }), batchRow({ utm_source: '  newsletter  ' })];
+    expect(duplicateBatchRowIndices(rows)).toEqual(new Set([1]));
+  });
+
+  // Caught rendering the real form in a browser, not by a unit test: eight
+  // rows with only a few filled in (the issue's own "eight rows at 375px"
+  // verification state) left several blank rows behind, and a first version
+  // of this function flagged every blank row after the first as a
+  // "duplicate" of it — disabling the submit button even though every blank
+  // row is always dropped before it would ever reach the server, and none of
+  // them carry any real content that could collide. Blank rows must be
+  // excluded from the scan entirely, not merely tolerated when there happen
+  // to be only two of them.
+  it('does not flag ANY blank row, no matter how many — not even a third one', () => {
+    const rows = [emptyBatchChannelRow(), emptyBatchChannelRow(), emptyBatchChannelRow()];
+    expect(duplicateBatchRowIndices(rows)).toEqual(new Set());
+  });
+
+  it('a blank row sitting between two real duplicate rows does not break the pairing', () => {
+    const rows = [
+      batchRow({ utm_source: 'a', utm_medium: 'b' }),
+      emptyBatchChannelRow(),
+      batchRow({ utm_source: 'a', utm_medium: 'b' }),
+    ];
+    expect(duplicateBatchRowIndices(rows)).toEqual(new Set([2]));
+  });
+});
+
+describe('composeBatchRowDestinationUrl', () => {
+  it('bakes the row source/medium/content plus the shared campaign/term onto the base URL', () => {
+    const row = batchRow({ utm_source: 'newsletter', utm_medium: 'email', utm_content: 'hero-cta' });
+    const url = composeBatchRowDestinationUrl('https://example.com/promo', row, 'summer-fair', '');
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get('utm_source')).toBe('newsletter');
+    expect(parsed.searchParams.get('utm_medium')).toBe('email');
+    expect(parsed.searchParams.get('utm_content')).toBe('hero-cta');
+    expect(parsed.searchParams.get('utm_campaign')).toBe('summer-fair');
+    expect(parsed.searchParams.has('utm_term')).toBe(false);
+  });
+
+  // Placement is NEVER part of the composed URL — the whole reason the dedup
+  // trap exists. Two rows differing only in placement must compose to the
+  // SAME destination_url; the fix lives in bypassing dedup server-side, not
+  // in making the URLs differ.
+  it('does not bake placement into the URL — two rows differing only in placement compose identically', () => {
+    const rowA = batchRow({ utm_source: 'flyer', utm_medium: 'print', placement: '18th & Texas board' });
+    const rowB = batchRow({ utm_source: 'flyer', utm_medium: 'print', placement: 'Congress & 6th board' });
+    const urlA = composeBatchRowDestinationUrl('https://example.com/promo', rowA, 'summer-fair', '');
+    const urlB = composeBatchRowDestinationUrl('https://example.com/promo', rowB, 'summer-fair', '');
+    expect(urlA).toBe(urlB);
+  });
+
+  it('never deletes a param the base URL already carried (previous is always empty)', () => {
+    const row = emptyBatchChannelRow();
+    const url = composeBatchRowDestinationUrl(
+      'https://example.com/promo?utm_source=partner-newsletter&ref=homepage',
+      row,
+      '',
+      '',
+    );
+    expect(url).toContain('utm_source=partner-newsletter');
+    expect(url).toContain('ref=homepage');
+  });
+});
+
+describe('buildBatchCreateRows', () => {
+  it('drops blank rows and composes destination_url for the rest', () => {
+    const rows = [
+      batchRow({ utm_source: 'newsletter', utm_medium: 'email' }),
+      emptyBatchChannelRow(),
+      batchRow({ utm_source: 'twitter', utm_medium: 'social' }),
+    ];
+    const payload = buildBatchCreateRows('https://example.com/promo', rows, 'summer-fair', '');
+    expect(payload).toHaveLength(2);
+    expect(payload[0].utm_source).toBe('newsletter');
+    expect(payload[1].utm_source).toBe('twitter');
+    expect(payload.every((r) => r.utm_campaign === 'summer-fair')).toBe(true);
+  });
+
+  it('omits blank optional fields rather than sending empty strings', () => {
+    const rows = [batchRow({ utm_source: 'newsletter', utm_medium: 'email' })];
+    const payload = buildBatchCreateRows('https://example.com/promo', rows, '', '');
+    expect(payload[0].placement).toBeUndefined();
+    expect(payload[0].title).toBeUndefined();
+    expect(payload[0].utm_campaign).toBeUndefined();
+    expect(payload[0].utm_term).toBeUndefined();
+  });
+
+  // THE CENTRAL CASE at the request-building layer: two rows differing only
+  // in placement must both survive into the request payload as two entries
+  // sharing an identical destination_url — it is the SERVER's job (bypassing
+  // dedup) to keep them as two links, not this function's job to make them
+  // look different.
+  it('two rows differing only in placement both appear in the payload with identical destination_url', () => {
+    const rows = [
+      batchRow({ utm_source: 'flyer', utm_medium: 'print', placement: '18th & Texas board' }),
+      batchRow({ utm_source: 'flyer', utm_medium: 'print', placement: 'Congress & 6th board' }),
+    ];
+    const payload = buildBatchCreateRows('https://example.com/promo', rows, 'summer-fair', '');
+    expect(payload).toHaveLength(2);
+    expect(payload[0].destination_url).toBe(payload[1].destination_url);
+    expect(payload[0].placement).toBe('18th & Texas board');
+    expect(payload[1].placement).toBe('Congress & 6th board');
+  });
+
+  it('returns an empty array when every row is blank', () => {
+    expect(buildBatchCreateRows('https://example.com/promo', [emptyBatchChannelRow()], '', '')).toEqual([]);
   });
 });

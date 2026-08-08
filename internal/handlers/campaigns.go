@@ -13,6 +13,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/campaigns"
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
+	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
@@ -75,14 +76,18 @@ type campaignStatsProvider interface {
 }
 
 // campaignLinksProvider is the slice of the links data layer the campaigns
-// handler needs (#0099) for the three link-membership endpoints: resolving a
-// client-supplied key to a link the CALLER owns (the ownership gate for
-// assign — a key belonging to another user 404s exactly like a nonexistent
-// one) and listing every link currently assigned to a campaign.
-// *links.Store satisfies this via GetLink/ListLinksForCampaign.
+// handler needs (#0099/#0105) for the link-membership + batch-create
+// endpoints: resolving a client-supplied key to a link the CALLER owns (the
+// ownership gate for assign — a key belonging to another user 404s exactly
+// like a nonexistent one), listing every link currently assigned to a
+// campaign, and inserting N new links in one transaction (#0105's batch
+// create, which deliberately bypasses CreateOrReactivateLink's dedup — see
+// links.Store.CreateLinksBatch's doc comment for why). *links.Store satisfies
+// this via GetLink/ListLinksForCampaign/CreateLinksBatch.
 type campaignLinksProvider interface {
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
 	ListLinksForCampaign(ctx context.Context, userID, campaignID int64) ([]links.Link, error)
+	CreateLinksBatch(ctx context.Context, rows []links.NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) ([]links.Link, error)
 }
 
 // maxCampaignNameLength bounds the campaign name so it (and the slug derived
@@ -109,23 +114,29 @@ const maxCampaignNameLength = 255
 //	GET    /api/campaigns/{slug}/links — links in the campaign (#0099)
 //	POST   /api/campaigns/{slug}/links — assign existing links by key (#0099)
 //	DELETE /api/campaigns/{slug}/links/{key} — unassign one link (#0099)
+//	POST   /api/campaigns/{slug}/links/batch — create N new links at once (#0105)
 //
-// All eight routes MUST be mounted behind middleware.RequireSession; each
+// All nine routes MUST be mounted behind middleware.RequireSession; each
 // handler reads the authenticated user from the request context and scopes
 // every store call to that user, so a request can only see or mutate its own
 // campaigns and links. This mirrors LinksHandler.
 type CampaignsHandler struct {
 	store campaignStore
 	// links resolves/lists the links a campaign's membership endpoints
-	// operate on (#0099). May be nil only in tests that never exercise those
-	// three routes — List/AssignLinks/UnassignLink would panic on a nil
-	// dereference otherwise, so every real wiring (main.go, campaignsMux)
-	// must supply a non-nil value.
+	// operate on (#0099), and inserts the links a batch-create request
+	// generates (#0105). May be nil only in tests that never exercise those
+	// four routes — List/AssignLinks/UnassignLink/BatchCreateLinks would
+	// panic on a nil dereference otherwise, so every real wiring (main.go,
+	// campaignsMux) must supply a non-nil value.
 	links campaignLinksProvider
 	// auditor records the campaign.created/updated/deleted/link_assigned/
 	// link_unassigned audit entries in-band with the mutation
-	// (audit.Logger.WriteTx, called from inside the store's transaction). May
-	// be nil in unit tests that do not assert audit rows.
+	// (audit.Logger.WriteTx, called from inside the store's transaction), and
+	// (#0105) a link.created entry per batch-created link, fire-and-forget
+	// after the batch commits — the same convention LinksHandler.Create
+	// already uses for single-link creates, since a batch-created link is
+	// otherwise indistinguishable from one created singly with campaign_id
+	// set. May be nil in unit tests that do not assert audit rows.
 	auditor *audit.Logger
 	// stats provides the campaign-scoped click rollups (#0102) enriching GET
 	// /api/campaigns/{slug} and backing GET /api/campaigns/{slug}/stats. May
@@ -133,15 +144,23 @@ type CampaignsHandler struct {
 	// those fields and the dedicated stats endpoint reports 500 — mirroring
 	// LinksHandler's nil-provider degradation.
 	stats campaignStatsProvider
+	// rules is the active-URL-filter-rule provider (#0024) BatchCreateLinks
+	// consults before inserting anything (#0105) — the same optional
+	// dependency LinksHandler.Create takes. May be nil (no filter cache
+	// wired), in which case the filter check is skipped entirely, matching
+	// LinksHandler's degradation.
+	rules ruleProvider
 }
 
 // NewCampaignsHandler constructs a CampaignsHandler over the data layer, the
-// links lookup for the membership endpoints (#0099), the audit logger, and
-// the campaign-scoped stats provider (#0102). Pass a nil auditor to disable
-// audit writes and a nil statsProvider to omit the stats/timeseries fields
-// (e.g. in unit tests that do not exercise those paths).
-func NewCampaignsHandler(store campaignStore, linkLookup campaignLinksProvider, auditor *audit.Logger, statsProvider campaignStatsProvider) *CampaignsHandler {
-	return &CampaignsHandler{store: store, links: linkLookup, auditor: auditor, stats: statsProvider}
+// links lookup for the membership + batch-create endpoints (#0099/#0105),
+// the audit logger, the campaign-scoped stats provider (#0102), and the
+// active-URL-filter-rule provider BatchCreateLinks consults (#0105). Pass a
+// nil auditor to disable audit writes, a nil statsProvider to omit the
+// stats/timeseries fields, and a nil ruleProvider to disable the batch-create
+// filter check (e.g. in unit tests that do not exercise those paths).
+func NewCampaignsHandler(store campaignStore, linkLookup campaignLinksProvider, auditor *audit.Logger, statsProvider campaignStatsProvider, rules ruleProvider) *CampaignsHandler {
+	return &CampaignsHandler{store: store, links: linkLookup, auditor: auditor, stats: statsProvider, rules: rules}
 }
 
 // campaignView is the JSON shape for a single campaign, shared by every
@@ -1015,4 +1034,402 @@ func (h *CampaignsHandler) UnassignLink(w http.ResponseWriter, r *http.Request) 
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
+}
+
+// ── Batch create (#0105) ────────────────────────────────────────────────
+//
+// One destination URL, then a row per channel (source, medium, content,
+// placement, optional title) — every non-blank row becomes its own short
+// link, assigned to this campaign, in ONE server call. See
+// links.Store.CreateLinksBatch's doc comment for the central decision this
+// issue exists to make: dedup is bypassed ENTIRELY for this path, because
+// #0099's forward-merge does not (and cannot) fix the trap where two rows
+// differing only in placement compose to a byte-identical destination_url —
+// see CreateOrReactivateLink's and CreateLinksBatch's doc comments for the
+// full history.
+
+// maxBatchCreateRows caps how many rows a single POST
+// /api/campaigns/{slug}/links/batch request may submit, mirroring
+// maxAssignLinksKeys' rationale: each row costs one key-generation exists
+// check plus one INSERT inside the batch transaction, all sequential.
+// Generous for the "channels in one promotion" workflow (the issue's own
+// worked example tops out at eight rows) while keeping one request's cost
+// and the transaction's duration bounded.
+const maxBatchCreateRows = 50
+
+// batchCreateLinkRow is one row of the POST /api/campaigns/{slug}/links/batch
+// body: the per-channel fields that vary row to row. Deliberately narrower
+// than createLinkRequest — no key/custom_key (batch rows always use
+// generated keys; a custom alias would need to be unique across the whole
+// batch AND the table, which is out of this issue's scope), no campaign_id/
+// campaign_slug (the campaign is the URL's {slug}, not per-row), and no
+// expires_at (not part of the issue's deliverable list). destination_url is
+// the row's FULLY COMPOSED URL — the client bakes each row's UTM values into
+// it via the SAME composeUtmUrl helper single-create uses (issue note:
+// "resist writing a second composition path"), so this handler does not
+// recompose it server-side; it only validates that what arrived is a valid
+// absolute URL, exactly like createLinkRequest's destination_url.
+type batchCreateLinkRow struct {
+	DestinationURL string `json:"destination_url"`
+	Title          string `json:"title"`
+	UTMSource      string `json:"utm_source"`
+	UTMMedium      string `json:"utm_medium"`
+	UTMCampaign    string `json:"utm_campaign"`
+	UTMTerm        string `json:"utm_term"`
+	UTMContent     string `json:"utm_content"`
+	Placement      string `json:"placement"`
+}
+
+// trimmed returns a copy of r with every field trimmed — the shape every
+// validation/insertion step below actually operates on, computed once per
+// row rather than re-trimming at each call site.
+func (r batchCreateLinkRow) trimmed() batchCreateLinkRow {
+	return batchCreateLinkRow{
+		DestinationURL: strings.TrimSpace(r.DestinationURL),
+		Title:          strings.TrimSpace(r.Title),
+		UTMSource:      strings.TrimSpace(r.UTMSource),
+		UTMMedium:      strings.TrimSpace(r.UTMMedium),
+		UTMCampaign:    strings.TrimSpace(r.UTMCampaign),
+		UTMTerm:        strings.TrimSpace(r.UTMTerm),
+		UTMContent:     strings.TrimSpace(r.UTMContent),
+		Placement:      strings.TrimSpace(r.Placement),
+	}
+}
+
+// isBlank reports whether a row was added but left entirely empty — every
+// field EXCEPT destination_url/utm_campaign/utm_term is blank. destination_url
+// is excluded because the client always sends the shared base URL on every
+// row regardless of whether the row itself was touched (composing an
+// all-blank row's params onto the base returns the base unchanged — see
+// composeUtmUrl), so it cannot distinguish a filled-in row from an empty one.
+// utm_campaign/utm_term are excluded for the same reason: the batch form
+// shares ONE campaign/term pair across every row (issue deliverable list:
+// only source, medium, content, placement, and title vary per row), usually
+// prefilled from the campaign's own default_utm_campaign/default_utm_term,
+// so their mere non-blank presence must not by itself make an otherwise
+// completely untouched row count as "filled in". Per the issue's acceptance
+// criterion ("a row left blank is skipped rather than creating a link with
+// empty UTM values"), a blank row is dropped before validation/insertion —
+// it is not an error.
+func (r batchCreateLinkRow) isBlank() bool {
+	return r.UTMSource == "" && r.UTMMedium == "" && r.UTMContent == "" &&
+		r.Placement == "" && r.Title == ""
+}
+
+// duplicateKey is the tuple this handler treats as "the same row" for the
+// in-batch duplicate check below: (source, medium, content, placement).
+//
+// #0105 DECISION: the issue's acceptance-criterion shorthand says duplicate
+// rows are "same source+medium+content" — but that definition, applied
+// literally, would reject the exact "two rows differing only in placement"
+// case this issue exists to make work (see links.Store.CreateLinksBatch's
+// doc comment). placement is deliberately ADDED to the tuple here so the two
+// concerns stay separable: rows that differ ONLY in placement are legitimate
+// (two poster locations for the same channel) and must both be created;
+// rows identical even in placement are a genuine accidental double-entry
+// (the same channel typed twice) and are rejected. Comparison is exact and
+// case-sensitive — this handler does not normalize casing (see
+// docs/utm.md's "Canonical casing" section); silently folding case here
+// would let two rows with different casing collide even though
+// composeUtmUrl would bake them as different values, which is a worse
+// surprise than leaving the check exact.
+func (r batchCreateLinkRow) duplicateKey() string {
+	return r.UTMSource + "\x00" + r.UTMMedium + "\x00" + r.UTMContent + "\x00" + r.Placement
+}
+
+// batchCreateLinksRequest is the POST /api/campaigns/{slug}/links/batch body.
+type batchCreateLinksRequest struct {
+	Rows []batchCreateLinkRow `json:"rows"`
+}
+
+// indexedBatchRow pairs a trimmed, non-blank batchCreateLinkRow with
+// origIndex — its 1-based position in the ORIGINALLY SUBMITTED req.Rows,
+// before blank rows were filtered out. BatchCreateLinks uses origIndex
+// (never the row's position in the filtered slice) in every "row N" error
+// message, so the number reported always matches the row the client-side
+// form labeled Row N (review finding 5).
+type indexedBatchRow struct {
+	batchCreateLinkRow
+	origIndex int
+}
+
+// batchCreateLinksResponse is the POST /api/campaigns/{slug}/links/batch
+// success body. links is always non-nil so it encodes as [] rather than
+// null. skipped_blank_rows reports how many submitted rows were dropped as
+// blank (see batchCreateLinkRow.isBlank) — surfaced rather than silent so a
+// user who left a row empty on purpose (or by mistake) sees that it was
+// skipped, not silently ignored.
+type batchCreateLinksResponse struct {
+	Links            []linkView `json:"links"`
+	SkippedBlankRows int        `json:"skipped_blank_rows"`
+}
+
+// BatchCreateLinks handles POST /api/campaigns/{slug}/links/batch: creates
+// one new short link per non-blank row, all assigned to the caller's own
+// campaign, in a SINGLE server call (issue: "prefer one server call — a
+// partial failure halfway through a client-side loop leaves the campaign in
+// a state the user did not ask for and cannot easily undo").
+//
+// THE WHOLE REQUEST IS ATOMIC. Every row is validated BEFORE any link is
+// inserted — cap, blank-row filtering, URL syntax, in-batch duplicates, and
+// (when a rule cache is wired) URL-filter denial all run first, over the
+// full row set, and a failure at any of those steps writes an error
+// response with NOTHING created. Once validation passes,
+// links.Store.CreateLinksBatch inserts every row inside one transaction:
+// either all of them commit, or (on an unexpected DB error) none do. See
+// links.Store.CreateLinksBatch's doc comment for the full atomicity
+// rationale and CreateLinksBatch's dedup-bypass decision — the reason this
+// issue exists.
+//
+// A slug that does not exist OR belongs to another user yields 404, matching
+// every other campaign endpoint's indistinguishable-404 contract.
+//
+// DOUBLE-SUBMIT IS NOT DEDUPLICATED — a CONTRACT CHANGE relative to
+// single-create. Because this endpoint's dedup is bypassed entirely (see
+// links.Store.CreateLinksBatch), submitting the identical N-row batch twice
+// (e.g. a lost response followed by a retry) creates 2N links, not N —
+// unlike POST /api/links, where "create the same link twice" reliably
+// yields one link back via CreateOrReactivateLink's dedup lookup. The UI
+// mitigates the common paths (submit button disabled while the request is
+// in flight; the form resets on success, so there is nothing left to
+// resubmit by accident), leaving only the genuine lost-response-then-retry
+// window — judged an acceptable trade against the complexity of an
+// idempotency key, but worth stating plainly since #0106 builds QR sheets
+// on top of these links and a doubled batch means doubled sheets.
+func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	slug := r.PathValue("slug")
+	if slug == "" {
+		writeError(w, http.StatusBadRequest, "slug is required")
+		return
+	}
+
+	var req batchCreateLinksRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	c, err := h.store.GetCampaignBySlug(r.Context(), u.ID, slug)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, campaigns.ErrCampaignNotFound):
+		writeError(w, http.StatusNotFound, "campaign not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// Trim every row up front; every check below operates on the trimmed
+	// shape. Blank rows (issue AC: "a row left blank is skipped rather than
+	// creating a link with empty UTM values") are dropped here, BEFORE the
+	// cap check, so a form with a trailing empty row the user never removed
+	// does not itself push a legitimate batch over the cap.
+	//
+	// Each surviving row carries its ORIGINAL 1-based position in req.Rows
+	// (origIndex), not its position in the post-filter slice (review finding
+	// 5). Every error message below reports origIndex so "row N" always
+	// matches the row the UI labeled Row N — before this, a request shaped
+	// [filled, blank, blank, dup-of-1] returned "row 2 duplicates row 1"
+	// (positions in the filtered slice) while the form showed the duplicate
+	// as Row 4, sending the user hunting the wrong row.
+	trimmedAll := make([]batchCreateLinkRow, 0, len(req.Rows))
+	for _, row := range req.Rows {
+		trimmedAll = append(trimmedAll, row.trimmed())
+	}
+	rows := make([]indexedBatchRow, 0, len(trimmedAll))
+	skipped := 0
+	for i, row := range trimmedAll {
+		if row.isBlank() {
+			skipped++
+			continue
+		}
+		rows = append(rows, indexedBatchRow{batchCreateLinkRow: row, origIndex: i + 1})
+	}
+
+	if len(rows) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one non-blank row is required")
+		return
+	}
+	if len(rows) > maxBatchCreateRows {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("at most %d rows per request", maxBatchCreateRows))
+		return
+	}
+
+	// Duplicate-row check (issue AC: "duplicate rows are either rejected or
+	// allowed deliberately — decide, state, test"). DECISION: rejected, atomically
+	// (the whole request fails, nothing is created) — see duplicateKey's doc
+	// comment for why placement is part of the tuple and two rows differing
+	// only in placement are NOT flagged here.
+	seen := make(map[string]int, len(rows)) // duplicateKey -> first row's ORIGINAL 1-based position (origIndex)
+	for _, row := range rows {
+		key := row.duplicateKey()
+		if first, ok := seen[key]; ok {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("row %d duplicates row %d (same source, medium, content, and placement)", row.origIndex, first))
+			return
+		}
+		seen[key] = row.origIndex
+	}
+
+	// URL syntax validation — every row, before any insert, so a single
+	// malformed row fails the whole batch rather than creating the rows
+	// before it and silently dropping the rest.
+	for _, row := range rows {
+		if !validDestinationURL(row.DestinationURL) {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("row %d: destination_url must be a valid absolute http(s) URL", row.origIndex))
+			return
+		}
+	}
+
+	// #0024 URL FILTER CHECK — every row's composed URL, before any insert,
+	// mirroring LinksHandler.Create's single-URL check but applied to the
+	// whole batch atomically: ANY row matching an active filter rule fails
+	// the ENTIRE request with 422, and nothing is created. Skipped entirely
+	// when no rule cache is wired (h.rules == nil), matching LinksHandler's
+	// degradation.
+	//
+	// This handler makes TWO SEPARATE decisions about what LinksHandler.Create
+	// does on a match, and they do not share a rationale:
+	//
+	//  1. NO DENIED LINK ROW. LinksHandler.Create calls CreateDeniedLink to
+	//     persist an inactive row (active=false, denied_reason=code) it can
+	//     attribute the denial to. A batch has no single row to attribute
+	//     it to before the caller fixes the offending row and resubmits, and
+	//     recording N-1 good rows as denied alongside the one that matched
+	//     would misrepresent what was actually blocked. This part is
+	//     deliberate and unchanged.
+	//
+	//  2. AN AUDIT ENTRY IS STILL RECORDED, unlike an earlier version of this
+	//     handler which skipped it too — that was an oversight, not a
+	//     decision: recording "no denied row" has a real reason (there is no
+	//     row), but recording "no audit entry" had none (an audit.Entry
+	//     carries the campaign, the denied URL, and the row index directly —
+	//     it needs no link row to attribute to). Without it, POST /api/links
+	//     surfaced a link.denied audit row for `http://evil.com/x` while the
+	//     identical URL submitted as a batch row surfaced NOTHING, making the
+	//     batch endpoint a filter-probing route with zero audit visibility —
+	//     defeating #0025's coverage of #0024 for exactly this path (review
+	//     finding 1). TargetID is nil (no link row exists to point at);
+	//     Metadata carries batch:true and the row's origIndex so a reviewer
+	//     can tell a batch denial apart from a single-create one and match it
+	//     back to the submitted row.
+	if h.rules != nil {
+		activeRules, err := h.rules.Rules(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		for _, row := range rows {
+			if code, ruleID, matched := filters.Evaluate(activeRules, row.DestinationURL); matched {
+				label := filters.ReasonLabel(code)
+
+				if h.auditor != nil {
+					actor := u.ID
+					h.auditor.Record(r.Context(), audit.Entry{
+						ActorID:    &actor,
+						UserID:     &actor,
+						Action:     audit.ActionLinkDenied,
+						TargetType: audit.TargetLink,
+						TargetID:   nil,
+						Metadata: map[string]any{
+							"destination_url": row.DestinationURL,
+							"reason_code":     code,
+							"reason_label":    label,
+							"matched_rule_id": ruleID,
+							"campaign_slug":   c.Slug,
+							"campaign_id":     c.ID,
+							"batch":           true,
+							"row":             row.origIndex,
+						},
+						IP: clientIP(r),
+					})
+				}
+
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"error":  "url_denied",
+					"reason": code,
+					"label":  label,
+					"row":    row.origIndex,
+				})
+				return
+			}
+		}
+	}
+
+	campaignID := c.ID
+	newLinks := make([]links.NewLink, 0, len(rows))
+	for _, row := range rows {
+		newLinks = append(newLinks, links.NewLink{
+			UserID:         u.ID,
+			DestinationURL: row.DestinationURL,
+			Title:          row.Title,
+			CampaignID:     &campaignID,
+			UTMSource:      row.UTMSource,
+			UTMMedium:      row.UTMMedium,
+			UTMCampaign:    row.UTMCampaign,
+			UTMTerm:        row.UTMTerm,
+			UTMContent:     row.UTMContent,
+			Placement:      row.Placement,
+		})
+	}
+
+	created, err := h.links.CreateLinksBatch(r.Context(), newLinks, links.GenerateUniqueKey)
+	switch {
+	case err == nil:
+		// fall through.
+	case errors.Is(err, links.ErrKeyTaken):
+		// Unreachable in practice — batch rows never carry a custom alias,
+		// and generated-key collisions retry inside the same transaction
+		// (see links.Store.CreateLinksBatch) — but mapped defensively rather
+		// than falling into the generic 500 below.
+		writeError(w, http.StatusConflict, "key already taken")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	// #0025 audit: one link.created entry per batch-created link,
+	// fire-and-forget after the batch's transaction has already committed —
+	// the same convention LinksHandler.Create uses for a single insert. Each
+	// entry additionally records batch=true and the campaign so a reviewer
+	// of the audit log can tell a batch-created link apart from one created
+	// singly with campaign_id set.
+	if h.auditor != nil {
+		actor := u.ID
+		for _, l := range created {
+			lid := l.ID
+			h.auditor.Record(r.Context(), audit.Entry{
+				ActorID:    &actor,
+				UserID:     &actor,
+				Action:     audit.ActionLinkCreated,
+				TargetType: audit.TargetLink,
+				TargetID:   &lid,
+				Metadata: map[string]any{
+					"key":             l.Key,
+					"destination_url": l.DestinationURL,
+					"title":           l.Title,
+					"duplicate":       false,
+					"batch":           true,
+					"campaign_slug":   c.Slug,
+					"campaign_id":     c.ID,
+				},
+				IP: clientIP(r),
+			})
+		}
+	}
+
+	views := make([]linkView, 0, len(created))
+	for _, l := range created {
+		views = append(views, toLinkView(l))
+	}
+	writeJSON(w, http.StatusCreated, batchCreateLinksResponse{Links: views, SkippedBlankRows: skipped})
 }

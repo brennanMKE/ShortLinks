@@ -72,6 +72,7 @@
   import Panel from '../lib/Panel.svelte';
   import CampaignClicksChart from '../lib/CampaignClicksChart.svelte';
   import UTMBarChart from '../lib/UTMBarChart.svelte';
+  import BatchCreateLinks from '../lib/BatchCreateLinks.svelte';
 
   const MAX_NAME_LENGTH = 255;
 
@@ -642,6 +643,11 @@
           </p>
         {/if}
       {/if}
+    </Panel>
+
+    <!-- Batch create (#0105) -->
+    <Panel title="Batch create links">
+      <BatchCreateLinks campaign={detail} oncreated={() => load(detail!.slug)} />
     </Panel>
 
     <!-- Assign -->
