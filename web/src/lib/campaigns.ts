@@ -2,8 +2,9 @@
 // (#0103). Same discipline as utm.ts/charts.ts/linkDetail.ts — every function
 // here is unit-testable without a DOM or Svelte; see campaigns.test.ts.
 
-import type { Campaign, CampaignStats, CampaignWithCounts, Link, LinkBucket } from './types';
+import type { Campaign, CampaignStats, CampaignWithCounts, Link, LinkBucket, UTMBucket } from './types';
 import { shortUrl } from './links';
+import { sortBuckets } from './linkDetail';
 
 // ── List filtering ──────────────────────────────────────────────────────────
 
@@ -126,10 +127,51 @@ export function campaignDateRangeLabel(campaign: Pick<Campaign, 'starts_at' | 'e
  * drift from the clamp and silently overstate the window (#0103's "clicks
  * over five months" defect). Falls back to a generic label when stats are
  * absent (no provider wired, dev mode, or still loading).
+ *
+ * window_to is the EXCLUSIVE end of the half-open [window_from, window_to)
+ * range (same convention charts.ts's fillDayGapsInWindow subtracts a day
+ * for before walking calendar days). Rendering window_to VERBATIM as the
+ * caption's end date disagreed with the chart axis by one day — e.g.
+ * captioning "Aug 1 – Aug 2" over an axis whose only bucket is Aug 1, or
+ * "Jul 1 – Aug 1" over an axis ending Jul 31 (#0104 review finding 3: "the
+ * chart is right — the caption is wrong"). Subtracting a day here, the same
+ * way the chart already does, is the fix.
+ *
+ * EMPTY WINDOW: when window_from === window_to the half-open range spans zero
+ * days, and subtracting one puts the end BEFORE the start — rendering
+ * "Aug 1, 2026 – Jul 31, 2026" (#0104 re-review finding 1). That state is
+ * reachable: a campaign whose starts_at equals its ends_at is the natural way
+ * to enter a one-day event, is permitted by the campaigns_check constraint
+ * (ends_at >= starts_at), and the create form imposes no min/max. A backwards
+ * range reads as a broken app rather than as "this window covers no days", so
+ * say the latter explicitly.
  */
 export function windowLabel(stats: Pick<CampaignStats, 'window_from' | 'window_to'> | null | undefined): string {
   if (!stats?.window_from || !stats?.window_to) return 'recent activity';
-  return `${formatDateOnly(stats.window_from)} – ${formatDateOnly(stats.window_to)}`;
+  const inclusiveEnd = subtractOneDayUTC(stats.window_to) ?? stats.window_to;
+  if (inclusiveEnd < stats.window_from) {
+    // Zero-day window. YYYY-MM-DD sorts lexicographically, so a plain string
+    // comparison is a correct date comparison here.
+    return `${formatDateOnly(stats.window_from)} (no days in window)`;
+  }
+  return `${formatDateOnly(stats.window_from)} – ${formatDateOnly(inclusiveEnd)}`;
+}
+
+/**
+ * Subtracts one calendar day from a "YYYY-MM-DD" date-only string, in UTC.
+ * Returns null for malformed input. The half-open-window → inclusive-end
+ * conversion windowLabel needs (see its doc comment); mirrors the
+ * subtraction charts.ts's fillDayGapsInWindow already does for the chart
+ * axis, so caption and axis read the same last day.
+ */
+function subtractOneDayUTC(value: string): string | null {
+  const ms = parseDateOnlyUTC(value);
+  if (ms === null) return null;
+  const d = new Date(ms - 86_400_000);
+  const y = d.getUTCFullYear();
+  const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const da = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${mo}-${da}`;
 }
 
 /**
@@ -160,6 +202,51 @@ export function windowDayCount(stats: Pick<CampaignStats, 'window_from' | 'windo
 export function clicksPerDayAverage(clickCount: number, days: number): number {
   if (days <= 0) return 0;
   return Math.round((clickCount / days) * 10) / 10;
+}
+
+// ── Channel breakdown (#0104) ───────────────────────────────────────────────
+
+/**
+ * One channel-breakdown dimension prepared for display, mirroring
+ * linkDetail.ts's `UTMDimension` shape/discipline but for the three
+ * dimensions the campaign detail view shows (#0104's scope: source, medium,
+ * content — NOT referer, which CampaignStats also carries but this issue
+ * does not surface).
+ */
+export interface CampaignUTMDimension {
+  dimension: 'source' | 'medium' | 'content';
+  label: string;
+  buckets: UTMBucket[];
+}
+
+/**
+ * The three channel-breakdown dimensions for the campaign detail view's
+ * chart slot, each labeled and sorted by count descending (reusing
+ * linkDetail.ts's `sortBuckets` rather than a second copy of that ordering).
+ * Dimensions with no rows are still returned (empty `buckets`); use
+ * `isEmptyCampaignChannelStats` to gate the whole section the way
+ * LinkDetail's `isEmptyStats` does for the per-link UTM grid — the two views
+ * should feel like the same product, not a second charting idiom.
+ */
+export function campaignUtmDimensions(stats: CampaignStats | undefined | null): CampaignUTMDimension[] {
+  return [
+    { dimension: 'source', label: 'Source', buckets: sortBuckets(stats?.by_source) },
+    { dimension: 'medium', label: 'Medium', buckets: sortBuckets(stats?.by_medium) },
+    { dimension: 'content', label: 'Content', buckets: sortBuckets(stats?.by_content) },
+  ];
+}
+
+/**
+ * Whether a campaign's windowed stats carry no channel data worth charting:
+ * absent, zero windowed clicks, or every one of the three dimensions above
+ * is empty. Mirrors linkDetail.ts's `isEmptyStats` (same three-part check,
+ * against CampaignStats's fields instead of ClickStats's).
+ */
+export function isEmptyCampaignChannelStats(stats: CampaignStats | undefined | null): boolean {
+  if (!stats) return true;
+  if (stats.click_count > 0) return false;
+  const dims = [stats.by_source, stats.by_medium, stats.by_content];
+  return dims.every((d) => !d || d.length === 0);
 }
 
 // ── Links table rows ─────────────────────────────────────────────────────

@@ -16,6 +16,7 @@
     toPolylinePoints,
     yAxisTicks,
     yCoord,
+    xCoord,
     defaultDateRange,
     DEFAULT_CHART_GEO,
   } from './charts';
@@ -133,8 +134,17 @@
       {#if polyline}
         {@const firstPt = points[0]}
         {@const lastPt = points[points.length - 1]}
-        {@const firstX = geo.padLeft + (points.length === 1 ? geo.innerW / 2 : 0)}
-        {@const lastX = geo.padLeft + geo.innerW}
+        {@const firstX = xCoord(0, points.length, geo)}
+        <!-- lastX must equal firstX for a single-point window — otherwise
+             the area polygon fans from the centered point out to the right
+             edge, drawing a phantom multi-day decline over a window that has
+             only one day (#0104 review finding 2; same bug fixed in
+             CampaignClicksChart.svelte, where it's actually reachable). This
+             component's own days-lookback window (defaultDateRange) never
+             produces points.length === 1 in normal use, so this branch is
+             latent here, not visible — fixed for correctness/consistency,
+             not because it changes anything on screen today. -->
+        {@const lastX = points.length === 1 ? firstX : geo.padLeft + geo.innerW}
         {@const baseY = geo.padTop + geo.innerH}
         <polygon
           class="chart-area"

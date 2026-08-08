@@ -24,6 +24,54 @@
   --accent-text:   #ffffff;
   --accent-subtle: #e7eef7;
 
+  /*
+   * Chart series (categorical, #0104) — CampaignClicksChart's per-link
+   * lines/legend swatches. Six hand-picked hue slots (never generated/
+   * cycled — see docs/frontend.md and the dataviz skill's color-formula):
+   * fixed order.
+   *
+   * Contrast: each slot's ratio against this file's own --bg-panel surfaces
+   * (#ffffff light / #161b22 dark) was computed directly from the WCAG 2.1
+   * relative-luminance formula (no external tool or script — an earlier
+   * comment here cited a scripts/validate_palette.js that was never
+   * committed to this repo; #0104 review finding 5). Measured ratios:
+   *
+   *   slot      light    dark
+   *   1 #2a78d6  4.42    4.75
+   *   2 #eb6834  3.20    4.45
+   *   3 #1baf7a  2.82    5.08
+   *   4 #c98500  3.07    5.63   (raised from #eda100's 2.17 — below any
+   *                              applicable threshold; now shares the
+   *                              dark-mode value on both sides)
+   *   5 #e87ba4  2.69    4.38
+   *   6 #008300  4.95    3.50
+   *
+   * WCAG 1.4.11 (non-text contrast, the criterion that actually applies to a
+   * 2px chart stroke) wants 3:1. Slots 3 and 5 stay below that in light mode
+   * as a DOCUMENTED trade-off: distinguishing "which line is which" doesn't
+   * rely on raw line color alone even there — the "Other" series is dashed
+   * (not just a color), each series has its own dot markers, and the
+   * accessible data table (below, in every chart component) is the true
+   * fallback for reading exact values. The always-visible legend does NOT
+   * fix low line-color contrast the way an earlier version of this comment
+   * claimed: the legend swatch is the identical color at the identical
+   * contrast, so it tells you which label a already-visible line carries —
+   * it cannot make a hard-to-see line easier to see in the first place.
+   *
+   * --series-other is the synthetic "Other" fold (internal/clicks/stats.go
+   * seriesByLinkCap) and deliberately reuses --text-faint rather than a 7th
+   * hue, so a fold of many links reads as a muted aggregate — never mistaken
+   * for a named link's identity — the same "(none)" convention UTMBarChart
+   * already uses for an absent UTM value.
+   */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #c98500;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-other: var(--text-faint);
+
   /* Status (use sparingly) */
   --success: #2e7d32;
   --danger:  #c62828;
@@ -331,6 +379,25 @@ tbody tr:last-child td { border-bottom: none; }
     --accent-hover:  #6aa3f5;
     --accent-text:   #0d1117;
     --accent-subtle: #1a2a45;
+
+    /* Chart series (categorical, #0104) — dark-mode adjustments of the six
+       light-block slots above, brightened for legibility against
+       --bg-panel #161b22 (see the light block's comment for the measured
+       contrast ratios and how they were computed). TWO slots are identical
+       to their light values rather than "steps": --series-6 (#008300), which
+       already clears 3.50:1 against the dark panel unmodified, and
+       --series-4 (#c98500), which became identical when the light value was
+       raised from #eda100 to fix its 2.17:1 light contrast (#0104 review
+       finding 4) — its dark override is now a no-op, kept only so the block
+       lists all six slots in one place.
+       --series-other still resolves via var(--text-faint) above, no
+       separate override needed. */
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
 
     /* Status colours — brighter for dark backgrounds */
     --success: #3fb950;

@@ -63,11 +63,15 @@
     toDateInput,
     toIsoDate,
     joinSentences,
+    campaignUtmDimensions,
+    isEmptyCampaignChannelStats,
   } from '../lib/campaigns';
   import { formatDate } from '../lib/linkDetail';
-  import type { CampaignDetail, LinkBucket } from '../lib/types';
+  import type { CampaignDetail, LinkBucket, LinkSeries } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import CampaignClicksChart from '../lib/CampaignClicksChart.svelte';
+  import UTMBarChart from '../lib/UTMBarChart.svelte';
 
   const MAX_NAME_LENGTH = 255;
 
@@ -76,6 +80,11 @@
   let loadError = $state<string | null>(null);
   let detail = $state<CampaignDetail | null>(null);
   let byLink = $state<LinkBucket[]>([]);
+  let seriesByLink = $state<LinkSeries[]>([]);
+
+  // ── Charts (#0104) ────────────────────────────────────────────────────
+  const channelDimensions = $derived(campaignUtmDimensions(detail?.stats));
+  const noChannelData = $derived(isEmptyCampaignChannelStats(detail?.stats));
 
   // ── Links table ────────────────────────────────────────────────────────
   const rows = $derived(buildLinkRows(detail?.links ?? [], byLink));
@@ -148,8 +157,10 @@
     try {
       const rollup = await getCampaignStats(slug);
       byLink = rollup.by_link;
+      seriesByLink = rollup.series_by_link;
     } catch {
       byLink = [];
+      seriesByLink = [];
     }
 
     if (initial) loading = false;
@@ -510,9 +521,31 @@
       </div>
     </Panel>
 
-    <!-- Chart slot — #0104 -->
+    <!-- Clicks over time (#0104) -->
     <Panel title="Clicks over time">
-      <p class="text-muted">Charts land here in #0104.</p>
+      <p class="text-faint chart-window-label">{windowLabel(detail.stats)}</p>
+      <CampaignClicksChart
+        timeseries={detail.timeseries}
+        {seriesByLink}
+        windowFrom={detail.stats?.window_from ?? ''}
+        windowTo={detail.stats?.window_to ?? ''}
+      />
+    </Panel>
+
+    <!-- Channel breakdown (#0104) -->
+    <Panel title="Channel breakdown">
+      {#if noChannelData}
+        <p class="text-muted">No click data yet — share this campaign's links to start collecting stats.</p>
+      {:else}
+        <div class="utm-grid">
+          {#each channelDimensions as dim (dim.dimension)}
+            <div class="utm-dim">
+              <h3 class="utm-dim-title">{dim.label}</h3>
+              <UTMBarChart buckets={dim.buckets} dimension={dim.dimension} label={dim.label} />
+            </div>
+          {/each}
+        </div>
+      {/if}
     </Panel>
 
     <!-- Links table -->
@@ -727,6 +760,22 @@
   }
   .stat-warn .stat-value {
     color: var(--warning);
+  }
+
+  /* ── Charts (#0104) ─────────────────────────────────────────────────── */
+  .chart-window-label {
+    margin: 0 0 var(--space-3);
+    font-size: var(--fs-sm);
+  }
+  .utm-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+    gap: var(--space-5);
+  }
+  .utm-dim-title {
+    margin: 0 0 var(--space-2);
+    font-size: var(--fs-md);
+    font-weight: 600;
   }
 
   /* ── Links table ────────────────────────────────────────────────────── */

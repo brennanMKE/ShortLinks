@@ -2,7 +2,7 @@
 // No DOM or Svelte — pure function tests only.
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import type { CampaignWithCounts, Link, LinkBucket } from './types';
+import type { CampaignStats, CampaignWithCounts, Link, LinkBucket } from './types';
 import {
   visibleCampaigns,
   campaignDateRangeLabel,
@@ -12,6 +12,8 @@ import {
   windowDayCount,
   windowLabel,
   clicksPerDayAverage,
+  campaignUtmDimensions,
+  isEmptyCampaignChannelStats,
   buildLinkRows,
   unlistedClickCount,
   sortLinkRows,
@@ -69,6 +71,24 @@ function link(overrides: Partial<Link> = {}): Link {
 
 function bucket(key: string, count: number): LinkBucket {
   return { link_id: 1, key, title: '', count };
+}
+
+function utmBucket(value: string, count: number) {
+  return { value, count };
+}
+
+function campaignStats(overrides: Partial<CampaignStats> = {}): CampaignStats {
+  return {
+    click_count: 0,
+    excluded_bot_count: 0,
+    by_source: [],
+    by_medium: [],
+    by_content: [],
+    by_referer: [],
+    window_from: '2026-06-01',
+    window_to: '2026-06-30',
+    ...overrides,
+  };
 }
 
 // ── visibleCampaigns ─────────────────────────────────────────────────────
@@ -282,6 +302,26 @@ describe('windowDayCount', () => {
 // ── windowLabel ──────────────────────────────────────────────────────────
 
 describe('windowLabel', () => {
+  // #0104 re-review finding 1. window_from === window_to is a half-open range
+  // spanning ZERO days, and the inclusive-end subtraction that fixed the
+  // off-by-one caption turns it backwards: "Aug 1, 2026 - Jul 31, 2026". The
+  // state is reachable, not theoretical -- starts_at == ends_at is how you
+  // enter a one-day event, campaigns_check permits it (ends_at >= starts_at),
+  // and the create form imposes no min/max. All three other windowLabel tests
+  // use non-empty windows, so nothing else covers this.
+  it('says the window covers no days rather than rendering a backwards range', () => {
+    expect(windowLabel({ window_from: '2026-08-01', window_to: '2026-08-01' })).toBe(
+      'Aug 1, 2026 (no days in window)',
+    );
+  });
+
+  it('still renders a normal range for a one-DAY (not zero-day) window', () => {
+    // The adjacent case that must not regress: [Aug 1, Aug 2) is one real day.
+    expect(windowLabel({ window_from: '2026-08-01', window_to: '2026-08-02' })).toBe(
+      'Aug 1, 2026 - Aug 1, 2026'.replace(/-/g, '\u2013'),
+    );
+  });
+
   it('describes a generic fallback when stats are absent', () => {
     expect(windowLabel(undefined)).toBe('recent activity');
     expect(windowLabel(null)).toBe('recent activity');
@@ -303,6 +343,82 @@ describe('windowLabel', () => {
     const label = windowLabel({ window_from: '2026-07-01', window_to: '2026-08-08' });
     expect(label).toContain('Aug');
     expect(label).not.toContain('Dec');
+  });
+
+  // #0104 review finding 3: window_to is the EXCLUSIVE end of the half-open
+  // [window_from, window_to) range — the same convention
+  // fillDayGapsInWindow (charts.ts) already accounts for by subtracting a
+  // day before it walks calendar days. Rendering window_to VERBATIM in the
+  // caption disagreed with the chart axis it sits above by one day.
+  it('labels the INCLUSIVE last day, one before the exclusive window_to (agreeing with the chart axis)', () => {
+    // [2026-06-01, 2026-06-30) => the axis's last bucket is Jun 29, not Jun
+    // 30. A verbatim-window_to caption would read "Jun 1 – Jun 30" here.
+    const label = windowLabel({ window_from: '2026-06-01', window_to: '2026-06-30' });
+    expect(label).toContain('Jun 29');
+    expect(label).not.toContain('Jun 30');
+  });
+
+  it('labels a single-day window (window_to one day after window_from) as that ONE day, not a two-day range', () => {
+    // [2026-08-01, 2026-08-02) => the axis has exactly one bucket, Aug 1.
+    // The #0104 review's exact repro: verbatim window_to captioned this as
+    // "Aug 1 – Aug 2" over an axis with only one point.
+    const label = windowLabel({ window_from: '2026-08-01', window_to: '2026-08-02' });
+    expect(label).toContain('Aug 1, 2026 – Aug 1, 2026');
+  });
+
+  it('agrees with the axis across a month boundary (Jul 1 – Aug 1 exclusive => ends Jul 31)', () => {
+    const label = windowLabel({ window_from: '2026-07-01', window_to: '2026-08-01' });
+    expect(label).toContain('Jul 31');
+    expect(label).not.toContain('Aug 1');
+  });
+});
+
+// ── campaignUtmDimensions / isEmptyCampaignChannelStats ─────────────────────
+
+describe('campaignUtmDimensions', () => {
+  it('returns source, medium, and content — not referer', () => {
+    const dims = campaignUtmDimensions(campaignStats());
+    expect(dims.map((d) => d.dimension)).toEqual(['source', 'medium', 'content']);
+  });
+
+  it('labels each dimension for display', () => {
+    const dims = campaignUtmDimensions(campaignStats());
+    expect(dims.map((d) => d.label)).toEqual(['Source', 'Medium', 'Content']);
+  });
+
+  it('sorts each dimension by count descending', () => {
+    const dims = campaignUtmDimensions(
+      campaignStats({
+        by_source: [utmBucket('email', 3), utmBucket('social', 9)],
+      }),
+    );
+    expect(dims[0].buckets.map((b) => b.value)).toEqual(['social', 'email']);
+  });
+
+  it('returns empty buckets (not undefined) for a missing dimension, and [] for absent stats', () => {
+    expect(campaignUtmDimensions(undefined).every((d) => d.buckets.length === 0)).toBe(true);
+    expect(campaignUtmDimensions(null).every((d) => d.buckets.length === 0)).toBe(true);
+  });
+});
+
+describe('isEmptyCampaignChannelStats', () => {
+  it('is empty when stats are absent', () => {
+    expect(isEmptyCampaignChannelStats(undefined)).toBe(true);
+    expect(isEmptyCampaignChannelStats(null)).toBe(true);
+  });
+
+  it('is empty when click_count is 0 and every dimension is empty', () => {
+    expect(isEmptyCampaignChannelStats(campaignStats())).toBe(true);
+  });
+
+  it('is NOT empty when click_count is positive, even with empty dimension arrays', () => {
+    expect(isEmptyCampaignChannelStats(campaignStats({ click_count: 5 }))).toBe(false);
+  });
+
+  it('is NOT empty when any dimension has rows, even if click_count reads 0', () => {
+    expect(
+      isEmptyCampaignChannelStats(campaignStats({ by_medium: [utmBucket('email', 1)] })),
+    ).toBe(false);
   });
 });
 
