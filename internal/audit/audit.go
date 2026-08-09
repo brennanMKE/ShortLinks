@@ -16,7 +16,8 @@
 //     fire-and-forget path used by the API/admin handlers, whose store call has
 //     already committed by the time the audit entry is written.
 //
-//   - WriteTx writes through an already-open pgx.Tx. The auth ceremonies
+//   - WriteTx writes through an already-open pgx.Tx, for any caller that owns
+//     the transaction for the mutation it's recording. The auth ceremonies
 //     (registration finish, login finish, recovery finish) open a transaction to
 //     make account/credential/session creation atomic; their audit entries are
 //     written inside that same transaction so a committed action can never lose
@@ -25,9 +26,22 @@
 //     transaction (poisoning the pgx connection state), WriteTx returns its error
 //     and the caller treats it like any other step of the ceremony.
 //
-// In short: handlers whose action is already committed log-and-continue
-// (Record); ceremonies that own a transaction write the audit row in-band
-// (WriteTx) so the row commits or rolls back atomically with the action.
+//     internal/campaigns.Store (#0098-#0099) follows the same rule for a
+//     different reason: every mutation it performs (CreateCampaign,
+//     UpdateCampaign, ArchiveCampaign, DeleteCampaign, AssignLinkToCampaign,
+//     UnassignLinkFromCampaign) writes its audit row via WriteTx inside the
+//     same transaction as the mutation — not because campaign management is a
+//     "ceremony", but because the same atomicity argument applies uniformly to
+//     every write that store performs. That is a cleaner line to draw than
+//     splitting by whether a given caller happens to look like an auth
+//     ceremony.
+//
+// In short: request-path code whose action has already committed by the time
+// it logs uses Record (log-and-continue) — this covers most API/admin
+// handlers, including link creation and campaign batch-create. Code that owns
+// the transaction for the mutation it's recording uses WriteTx so the audit
+// row commits or rolls back atomically with the action — this covers the auth
+// ceremonies and every campaigns.Store mutation.
 package audit
 
 import (

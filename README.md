@@ -8,7 +8,8 @@ A self-hosted URL shortener built with Go, PostgreSQL, and Svelte. Deployed on A
 - **Passkey authentication** — WebAuthn/FIDO2 only, no passwords; iCloud Keychain sync supported
 - **Per-user URL deduplication** — submitting the same destination URL returns the existing link
 - **URL filtering** — admin-managed regex rules block malware, phishing, and spam links
-- **Click analytics** — UTM parameter capture and breakdown per link
+- **Click analytics** — UTM parameter capture and breakdown per link, with automated bot/preview-crawler traffic classified and excluded from stats by default
+- **Campaigns** — group links across channels (email, social, print) under one campaign, with per-campaign click totals, timeseries, and channel breakdowns; batch-create a link per channel in one request; per-link QR codes (SVG/PNG, plus a bulk zip) for print placements; per-link CSV export — see [`docs/campaigns.md`](docs/campaigns.md)
 - **Real-time dashboard** — new links appear instantly via Server-Sent Events
 - **Audit log** — append-only record of every significant action
 - **Admin panel** — user management, URL filter CRUD, registration toggle
@@ -92,7 +93,7 @@ sudo systemctl start shortlinks
 
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for full EC2 setup instructions and [`docs/email_setup.md`](docs/email_setup.md) for AWS SES configuration.
 
-Full developer/operator documentation lives in [`docs/`](docs/README.md) — architecture, configuration, database, auth, passkeys, links, analytics, UTM, URL filtering, audit, events, and the frontend.
+Full developer/operator documentation lives in [`docs/`](docs/README.md) — architecture, configuration, database, auth, passkeys, links, analytics, UTM, campaigns, URL filtering, audit, events, and the frontend.
 
 ## Configuration
 
@@ -121,8 +122,10 @@ internal/
   cache/              # Ristretto cache (redirect + filter rules)
   auth/               # WebAuthn, sessions, mailer
   links/              # link creation, key generation, deduplication
+  campaigns/          # campaign CRUD, slugs, link assignment
   filters/            # URL filter rule loading and regex evaluation
-  clicks/             # click recording
+  clicks/             # click recording, bot classification, stats queries
+  qr/                 # QR code bitmap generation, SVG/PNG rendering
   audit/              # audit log write path
   events/             # SSE broker
   handlers/           # HTTP handlers

@@ -242,6 +242,12 @@ is not, so it can already have drifted from what the campaign is now called.
 there is no fallback path to reach for. See "a NULL default_utm_campaign
 ... does NOT fall back to the campaign slug" in `utm.test.ts`.
 
+**Print/flier rows** have a suggested (not enforced) UTM convention —
+`utm_medium=print`, `utm_source=flyer`, with `utm_content` or `placement`
+naming the physical location — documented in full in `docs/campaigns.md`'s
+"Print-row convention" section, alongside the rest of the batch-create and
+campaign data model.
+
 ---
 
 ## Stage 2 — Redirect passthrough
@@ -303,25 +309,31 @@ computed independently, by different code, against different inputs.
 
 ### What values are recorded (#0100 fallback precedence)
 
-Each of the five `utm_*` columns on the click row resolves independently, in
+**The following precedence statement is worded identically in this document
+and in `docs/analytics.md`'s "UTM fallback precedence" section** — do not
+let the two drift; if one changes, change both.
+
+Each of the five `utm_*` columns on a click row resolves independently, in
 this exact precedence:
 
-1. **The inbound short URL's query string** (the values shown in Step 5
-   above) — if present and non-empty, this wins.
-2. **Otherwise, the link's own stored discrete UTM column** (#0099's
-   `links.utm_source`/`utm_medium`/`utm_campaign`/`utm_term`/`utm_content` —
-   whatever the UTM builder baked in at create/edit time).
+1. **The inbound short-URL query parameter** — if present and non-empty
+   (`?utm_source=...` on the `/u/{key}` request), this wins.
+2. **Otherwise, the link's own stored discrete UTM value** — what the UTM
+   builder baked into `links.utm_source`/`utm_medium`/`utm_campaign`/`utm_term`/`utm_content`
+   at create or edit time ([#0099](../issues/0099.md)).
 3. **Otherwise, `(none)`** in analytics (`NULL` in the column).
 
-Resolution happens per key, not all-or-nothing: a short URL followed with only
-`?utm_source=twitter` records `utm_source = "twitter"` (inbound wins) while
-`utm_medium`, `utm_campaign`, `utm_term`, and `utm_content` still fall back to
-whatever the link has stored for each, independently. This is implemented in
-`internal/clicks/recorder.go`'s `Record` as
-`COALESCE(NULLIF($n, ''), l.utm_source)` per column, inside the same INSERT
-that resolves `link_id` — see `docs/analytics.md`'s "UTM fallback precedence"
-section for the full detail, including the `campaign_id` denormalization that
-shipped alongside it.
+Resolution happens per key, not all-or-nothing: a short URL followed with
+only `?utm_source=twitter` records `utm_source = "twitter"` (inbound wins)
+while `utm_medium`, `utm_campaign`, `utm_term`, and `utm_content` still fall
+back to whatever the link has stored for each, independently. An inbound
+empty string (`?utm_source=`) is treated as absent and falls back — never
+stored as a literal empty override. Implemented as
+`COALESCE(NULLIF($n, ''), l.utm_source)` per column in
+`internal/clicks/recorder.go`'s `Record`, inside the same INSERT that
+resolves `link_id` and `campaign_id` ([#0100](../issues/0100.md)). See
+`docs/analytics.md`'s "UTM fallback precedence" section for the
+`campaign_id` denormalization that shipped alongside this.
 
 **Before #0100**, a link author who baked `utm_source=email` into the
 destination URL but shared the short link without appending UTM params to the

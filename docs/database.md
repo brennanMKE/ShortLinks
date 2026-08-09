@@ -86,7 +86,7 @@ address are auto-promoted on creation.
 
 ---
 
-### `links` — `000002_create_links.up.sql`
+### `links` — `000002_create_links.up.sql`, extended by `000011_links_campaign_and_utm.up.sql`
 
 Short codes that map a key to a destination URL, each owned by one user.
 `active` and `denied_reason` together encode the effective link state as
@@ -97,12 +97,19 @@ described in the PRD.
 | `id` | `BIGSERIAL` | Primary key |
 | `user_id` | `BIGINT` | FK → `users(id)`, not null |
 | `key` | `VARCHAR(12)` | Unique short code used in redirect URLs (`/u/{key}`). UNIQUE constraint is the redirect-lookup index. |
-| `destination_url` | `TEXT` | Full destination URL, not null |
+| `destination_url` | `TEXT` | Full destination URL, not null. Always the composed URL (UTM params baked in, if any) — see `docs/utm.md` |
 | `title` | `TEXT` | Optional display title |
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |
 | `expires_at` | `TIMESTAMPTZ` | Nullable; links past this timestamp are treated as inactive |
 | `active` | `BOOLEAN` | Default `true` |
 | `denied_reason` | `SMALLINT` | Default `0` (not denied). Non-zero codes correspond to URL filter rule reason codes. |
+| `campaign_id` | `BIGINT` | FK → `campaigns(id)`, `ON DELETE SET NULL`, nullable (#0099). A link belongs to at most one campaign. |
+| `utm_source` / `utm_medium` / `utm_campaign` / `utm_term` / `utm_content` | `TEXT` | Nullable (#0099). Discrete copies of what the UTM builder baked into `destination_url` — see `docs/utm.md` |
+| `placement` | `TEXT` | Nullable (#0099). Free-text operational label (e.g. a physical poster location), deliberately separate from `utm_content` — see `docs/campaigns.md` |
+
+Existing rows from before migration `000011` keep `NULL` in all seven
+campaign/UTM/placement columns; they are not backfilled by parsing
+`destination_url`.
 
 **Indexes:**
 
@@ -111,10 +118,11 @@ described in the PRD.
 | `idx_links_user_id` | List all links owned by a user |
 | `idx_links_user_destination` | Per-user dedup lookup — partial, `WHERE denied_reason = 0` |
 | `idx_links_denied_reason` | Admin query for all denied links — partial, `WHERE denied_reason > 0` |
+| `idx_links_campaign_id` | Campaign-scoped link lookups — partial, `WHERE campaign_id IS NOT NULL` (#0099) |
 
 ---
 
-### `clicks` — `000003_create_clicks.up.sql`
+### `clicks` — `000003_create_clicks.up.sql`, extended by `000012_clicks_campaign_and_bot.up.sql`
 
 One row per redirect, capturing request metadata and any inbound UTM parameters
 for analytics. `link_id` is nullable; the FK does not cascade-delete so click
@@ -128,11 +136,16 @@ history is preserved if a link is deleted.
 | `ip_address` | `INET` | Nullable |
 | `user_agent` | `TEXT` | Nullable |
 | `referer` | `TEXT` | Nullable |
-| `utm_source` | `TEXT` | Nullable |
-| `utm_medium` | `TEXT` | Nullable |
-| `utm_campaign` | `TEXT` | Nullable |
-| `utm_term` | `TEXT` | Nullable |
-| `utm_content` | `TEXT` | Nullable |
+| `utm_source` | `TEXT` | Nullable. Inbound short-URL value if present, else the link's own stored value (#0100), else `NULL` — see `docs/analytics.md`'s "UTM fallback precedence" |
+| `utm_medium` | `TEXT` | Same precedence as `utm_source` |
+| `utm_campaign` | `TEXT` | Same precedence as `utm_source` |
+| `utm_term` | `TEXT` | Same precedence as `utm_source` |
+| `utm_content` | `TEXT` | Same precedence as `utm_source` |
+| `campaign_id` | `BIGINT` | FK → `campaigns(id)`, `ON DELETE SET NULL`, nullable (#0100). **Denormalized** — resolved from the link's `campaign_id` at record time, not joined at query time, so reassigning or unassigning the link never changes a historical click's `campaign_id`. |
+| `is_bot` | `BOOLEAN` | Default `FALSE` (#0100 adds the column, #0101 populates it). Classified at record time from `user_agent`; flagged, never dropped. Rows recorded before #0101 shipped keep `FALSE` regardless of whether they were automated. |
+
+Existing rows from before migration `000012` keep `campaign_id = NULL` and
+`is_bot = FALSE`; neither is backfilled retroactively.
 
 **Indexes:**
 
@@ -140,6 +153,41 @@ history is preserved if a link is deleted.
 |---|---|
 | `idx_clicks_link_id` | Aggregate click counts per link |
 | `idx_clicks_clicked_at` | Time-range analytics queries |
+| `idx_clicks_campaign_id` | Aggregate click counts per campaign — partial, `WHERE campaign_id IS NOT NULL` (#0100) |
+| `idx_clicks_campaign_time` | Campaign-scoped time-range queries — partial, `WHERE campaign_id IS NOT NULL` (#0100). Backs the campaign timeseries query. Its partial predicate covers `campaign_id IS NOT NULL` only, **not** `is_bot = FALSE`; bot exclusion is applied in the query's WHERE clause instead. That is **deliberate** — extending the predicate would make this index unusable for any query not also filtering `is_bot = FALSE` (e.g. the excluded-bot count). The reasoning, with `EXPLAIN (ANALYZE, BUFFERS)` measurements, is in the package note above `UTMStatsForLink` in `internal/clicks/stats.go` — read it before touching this index. A residual `Filter: (NOT is_bot)` node is that decision working, not a defect. |
+
+---
+
+### `campaigns` — `000010_create_campaigns.up.sql`
+
+A user-owned grouping of links that promote the same thing across channels.
+See `docs/campaigns.md` for the full data model rationale (the
+membership-is-an-FK decision, batch create, QR codes, CSV export, and what
+the resulting data can and cannot honestly compare).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `BIGSERIAL` | Primary key |
+| `user_id` | `BIGINT` | FK → `users(id)`, not null. Campaigns are scoped per user, matching `links`. |
+| `name` | `TEXT` | Not null |
+| `slug` | `TEXT` | Not null. URL-safe, derived from `name`, immutable after creation |
+| `description` | `TEXT` | Nullable |
+| `starts_at` | `TIMESTAMPTZ` | Nullable; drives the default analytics window when set |
+| `ends_at` | `TIMESTAMPTZ` | Nullable |
+| `archived` | `BOOLEAN` | Default `false`. Reversible — unlike delete. |
+| `default_utm_source` / `default_utm_medium` / `default_utm_campaign` / `default_utm_term` / `default_utm_content` | `TEXT` | Nullable. Prefill values for the create/batch UTM builder; `default_utm_campaign` defaults to the slug at creation and is never re-derived once cleared. |
+| `created_at` / `updated_at` | `TIMESTAMPTZ` | Default `now()` |
+
+**Constraints:** `UNIQUE (user_id, slug)` — slugs are unique per user, not
+globally. `CHECK (ends_at IS NULL OR starts_at IS NULL OR ends_at >= starts_at)`
+— rejects an inverted date range at the schema level, not only in the
+handler.
+
+**Indexes:**
+
+| Index | Purpose |
+|---|---|
+| `idx_campaigns_user_id` | List/scope campaigns by owner |
 
 ---
 
@@ -343,6 +391,10 @@ login").
 
 ```
 users ──< links ──< clicks
+  │  │      │          │
+  │  │      └──────────┼──< campaigns.id  (links.campaign_id, ON DELETE SET NULL, #0099)
+  │  │                 └──< campaigns.id  (clicks.campaign_id, ON DELETE SET NULL — DENORMALIZED, #0100)
+  │  └──< campaigns (campaigns.user_id — campaigns are owned per user, #0098)
   │
   ├──< sessions
   ├──< passkey_credentials

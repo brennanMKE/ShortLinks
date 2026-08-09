@@ -357,6 +357,15 @@ any artifact isn't what's expected it stops with an error (and prints a
 diagnosis for the embed check) instead of shipping a broken deploy. Override
 defaults with `SERVICE=… PUBLIC_URL=… BIN=… ./scripts/deploy.sh`.
 
+**`scripts/deploy.sh` does not run `migrate` at all** — it only builds the
+SPA, builds and installs the binary, and restarts the service. If the
+commit being deployed added new migration files, running the script alone
+is not a complete deploy: run `migrate ... up` (section 5, "Migrations")
+**before** running `./scripts/deploy.sh`, so the schema is already in the
+state the freshly built binary's queries expect by the time the service
+restarts onto it. See the next section for how to tell whether this is
+needed.
+
 ### Is a migration needed this deploy?
 
 A migration is required only when someone added a
@@ -368,6 +377,60 @@ git diff --name-only <last-deployed-sha>..HEAD -- migrations/   # any output => 
 # or compare the DB's applied version to the highest migration file:
 migrate -path migrations -database "$DATABASE_URL" version
 ```
+
+**The campaigns feature deploy needs this.** It ships three new migrations —
+`000010_create_campaigns`, `000011_links_campaign_and_utm`, and
+`000012_clicks_campaign_and_bot` (see `docs/database.md` for what each
+adds) — unlike the `v0.2.0` release, which changed no migration files and
+was a binary-plus-SPA-only deploy. Run
+
+```bash
+migrate -path migrations -database "$DATABASE_URL" up
+```
+
+**before** running `./scripts/deploy.sh` (or before confirming its `[y/N]`
+restart prompt, if you've already started it) on any host still at schema
+version 9. The blast radius of skipping it is broader than just campaigns:
+`internal/clicks/recorder.go`'s `Record` unconditionally selects
+`l.campaign_id` and inserts `campaign_id`/`is_bot` on **every** click, not
+only clicks on links that belong to a campaign. Redirects themselves would
+keep working (the `/u/{key}` lookup that resolves the destination and
+issues the 302 selects only the pre-existing `destination_url`/`active`/
+`expires_at`/`denied_reason` columns), but click recording is fire-and-forget
+and its failures are logged and swallowed rather than surfaced — so on an
+un-migrated schema, **every click would silently stop being recorded at
+all**, app-wide, until the migration runs.
+
+The loud half of the gap is **not** limited to campaigns either — the
+dashboard goes down with it. `internal/links/store.go`'s `linkColumns` is
+the shared column list for `ListLinks`, `ListLinksForCampaign` and
+`GetLink`, and it unconditionally selects the seven columns migration
+`000011` adds (`campaign_id`, the five `utm_*` columns, `placement`); every
+`click_count` path additionally references `c.is_bot`, added by `000012`.
+So on a schema-v9 host these all return 500 immediately:
+
+- `GET /api/links` (the dashboard list), `GET /api/links/{key}`,
+  `POST /api/links`, `PATCH /api/links/{key}` (it re-reads through
+  `GetLink`)
+- `GET /api/links/{key}/qr.svg` and `qr.png` (both call `GetLink`)
+- every `/api/campaigns/...` route, read and write alike
+
+Of the link and campaign APIs, **only the `/u/{key}` redirect survives** —
+its resolver selects just `destination_url`/`active`/`expires_at`/
+`denied_reason`. **Do not read this as "the app keeps working minus
+campaigns": the dashboard is dead.**
+
+Two qualifications, so this isn't over-read in the other direction. Auth and
+admin are **unaffected** — `GET /health`, the `/auth/*` ceremonies,
+`GET /api/me`, `GET /api/events` (SSE), `/admin/users`, `/admin/audit`, the
+`/admin/url-filters` routes and the SPA shell touch no `000011`/`000012`
+column, so you can still log in and reach the admin panel. And
+`DELETE /api/links/{key}` still returns **200**: its `GetLink` call is
+deliberately non-fatal (a miss only weakens the audit entry) and
+`DeactivateLink` is a bare `UPDATE links SET active = FALSE`. So
+deactivation succeeds on an un-migrated host **while silently losing its
+`link.deactivated` audit row** — a quiet integrity gap worth knowing about
+before you decide to "just leave it until morning."
 
 ### Manual steps (what the script automates)
 

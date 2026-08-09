@@ -17,6 +17,7 @@ with the architecture overview, then dive into the subsystem you need.
 - [Links, redirects & caching](links.md) — key generation, the `/u/{key}` redirect path, the Ristretto cache
 - [Click analytics & metrics](analytics.md) — click recording and the dashboard stats queries
 - [UTM / marketing parameters](utm.md) — the UTM builder, redirect passthrough, and analytics
+- [Campaigns](campaigns.md) — campaign data model, membership, batch create, QR codes, CSV export, and what the data can and cannot honestly compare
 - [URL filtering & safety](url-filters.md) — destination screening, rules, and denial reasons
 - [Audit log](audit.md) — recorded actions, write path, and the admin surface
 - [Real-time updates (SSE)](events.md) — the events broker and the SPA's live updates

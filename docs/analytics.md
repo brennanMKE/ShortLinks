@@ -1,8 +1,10 @@
 # Click Analytics
 
-This document covers click recording and the metrics surface for ShortLinks: what
-is captured per redirect, the two backend stats queries, and how the Svelte SPA
-renders the data as charts.
+This document covers click recording and the metrics surface for ShortLinks:
+what is captured per redirect, bot classification, the per-link and
+per-campaign stats queries, and how the Svelte SPA renders the data as
+charts. For the campaign-specific data model and the honest-comparison
+caveats around comparing channels, see `docs/campaigns.md`.
 
 ---
 
@@ -37,7 +39,7 @@ Each click maps to one row in the `clicks` table (migration
 | `utm_term` | `TEXT` | Same precedence as `utm_source` |
 | `utm_content` | `TEXT` | Same precedence as `utm_source` |
 | `campaign_id` | `BIGINT` | The link's `campaign_id` **at the moment of the click** (#0100), `NULL` if the link had no campaign. `REFERENCES campaigns(id) ON DELETE SET NULL`. See "Campaign attribution" below |
-| `is_bot` | `BOOLEAN` | Added by #0100, always `FALSE` today — nothing populates it yet. Bot classification is [#0101](../issues/0101.md) |
+| `is_bot` | `BOOLEAN` | Classified at record time from `user_agent` ([#0101](../issues/0101.md)) — see "Bot classification" below. Column added by #0100; rows recorded before #0101 shipped keep `FALSE` regardless of whether they were automated traffic |
 
 `user_agent`/`referer`/`ip_address` have no fallback: the recorder stores an
 empty string as SQL NULL for these three (via `nullStr`/`nullableIP` in
@@ -56,23 +58,30 @@ Four indexes support analytics queries:
 
 ### UTM fallback precedence (#0100)
 
-`internal/clicks/recorder.go`'s `Record` resolves each of the five `utm_*`
-columns independently, in this exact precedence:
+**The following precedence statement is worded identically in this document
+and in `docs/utm.md`'s "What values are recorded" section** — do not let the
+two drift; if one changes, change both.
 
-1. **The inbound short-URL query parameter**, if present and non-empty
-   (`?utm_source=...` on the `/u/{key}` request).
-2. Otherwise, **the link's own stored discrete UTM value** (#0099's
-   `links.utm_source` etc.) — what was baked into the link at create/edit time.
-3. Otherwise, `NULL` (the analytics `(none)` bucket).
+Each of the five `utm_*` columns on a click row resolves independently, in
+this exact precedence:
 
-This resolution happens **per key**, not all-or-nothing: a short URL followed
-with only `?utm_source=twitter` appended records `utm_source = "twitter"`
-(inbound wins) while `utm_medium`/`utm_campaign`/etc. still fall back to
-whatever the link has stored, if anything. An inbound empty string
-(`?utm_source=`) is treated as absent and falls back — never stored as a
-literal empty override. The SQL expression is
-`COALESCE(NULLIF($n, ''), l.utm_source)` per column, executed inside the same
-INSERT that resolves `link_id` (see "Statement shape" below).
+1. **The inbound short-URL query parameter** — if present and non-empty
+   (`?utm_source=...` on the `/u/{key}` request), this wins.
+2. **Otherwise, the link's own stored discrete UTM value** — what the UTM
+   builder baked into `links.utm_source`/`utm_medium`/`utm_campaign`/`utm_term`/`utm_content`
+   at create or edit time ([#0099](../issues/0099.md)).
+3. **Otherwise, `(none)`** in analytics (`NULL` in the column).
+
+Resolution happens per key, not all-or-nothing: a short URL followed with
+only `?utm_source=twitter` records `utm_source = "twitter"` (inbound wins)
+while `utm_medium`, `utm_campaign`, `utm_term`, and `utm_content` still fall
+back to whatever the link has stored for each, independently. An inbound
+empty string (`?utm_source=`) is treated as absent and falls back — never
+stored as a literal empty override. Implemented as
+`COALESCE(NULLIF($n, ''), l.utm_source)` per column in
+`internal/clicks/recorder.go`'s `Record`, inside the same INSERT that
+resolves `link_id` and `campaign_id` ([#0100](../issues/0100.md)) — see
+"Statement shape" below.
 
 **This is a behavior change to existing per-link analytics, and it is not
 retroactive.** Before #0100, a link with `utm_source=newsletter` baked into its
@@ -112,6 +121,43 @@ predate campaigns entirely and are **not backfilled** by guessing from
 `utm_campaign` strings (a wrong guess is worse than a known gap, matching
 migration 000011's UTM-column decision).
 
+### Bot classification (#0101)
+
+Comparing channels (campaign detail view, `docs/campaigns.md`) only means
+something if the click counts reflect human interest rather than automated
+fetches. `internal/clicks/botdetect.go`'s `IsBot` classifies each click's
+`User-Agent` header, case-insensitively, against the exported
+`BotUserAgentSubstrings` list — `bot`, `crawler`, `spider`, `preview`,
+`facebookexternalhit`, `Slackbot`, `Twitterbot`, `Discordbot`, `WhatsApp`,
+`TelegramBot`, `LinkedInBot`, `headless`, `curl`, `wget`, `python-requests`
+— with one exception checked **first**: `NotBotUserAgentSubstrings`
+(currently just `cubot`) wins unconditionally, so a CUBOT-brand phone stays
+classified as human despite its UA containing the load-bearing `bot`
+substring. The result is classified in Go and passed into the same INSERT that
+resolves `link_id`/`campaign_id`/the UTM fallback, so classification adds no
+extra query on the redirect path.
+
+An **empty or absent User-Agent is NOT classified as a bot** — deliberate:
+absence of a UA is missing evidence rather than evidence of automation, and
+every crawler on the list self-identifies by default. A bot click is
+**flagged, never dropped** — `is_bot = TRUE` still writes the row, so the
+data stays inspectable rather than silently vanishing.
+
+**Every stats query in this document excludes `is_bot = TRUE` by default**
+(`UTMStatsForLink`'s `ClickCount`, `ClicksOverTime`, every `Campaign*` query
+below, and `links.Store`'s `click_count` at every call site) and surfaces the
+excluded count alongside the total rather than silently shrinking the
+number — `UTMStats` does not currently expose this field, but every
+campaign-level struct does, as `ExcludedBotCount` (see "Campaign stats
+queries" below).
+
+**User-agent filtering is a floor, not a solution.** Some unfurl/preview
+crawlers do not identify themselves in their `User-Agent` string, so a
+social channel's click count after filtering is a better number than before
+filtering, not a clean one. See `docs/campaigns.md`'s "What this data can
+and cannot honestly compare" for the fuller discussion of what this means
+for comparing channels.
+
 ### Statement shape
 
 Both the UTM fallback and the campaign resolution fit inside the **same
@@ -149,6 +195,42 @@ whatever campaign the link actually belonged to at record time.
 connection multiplexing. `RecordClick(c Click)` is the fire-and-forget entry
 point used on the redirect path; `Record(ctx, c)` is the lower-level method used
 in tests.
+
+---
+
+## Deploy-boundary discontinuities
+
+Three numbers change meaning at the moment the campaigns migrations
+(`000010`–`000012`) deploy, none of them retroactively. A chart or export
+whose date range spans the deploy date will show a step at the boundary in
+each case — that step is an artifact of when the new logic started applying,
+not a real change in traffic, and should not be read as a trend:
+
+1. **UTM fallback (#0100).** Before the deploy, a link with UTM values baked
+   into its `destination_url` but shared as a bare short URL recorded
+   `(none)` for every dimension on every click. After, the same bare short
+   URL falls back to the link's stored values (see "UTM fallback
+   precedence" above). Historical click rows are not rewritten, so a
+   per-link or per-campaign breakdown spanning the deploy date jumps from
+   mostly-`(none)` to mostly-attributed right at the boundary.
+2. **Bot exclusion (#0101).** `is_bot` did not exist before migration
+   `000012`, and nothing populated it until #0101 shipped — every click row
+   recorded before then keeps `is_bot = FALSE` regardless of whether it was
+   actually automated traffic. Historical bot traffic is therefore
+   **understated**: a chart spanning the deploy shows a step down in total
+   click count (or up, depending on which side excludes more) that reflects
+   when filtering started, not a change in how much bot traffic actually
+   occurred.
+3. **`click_count`'s meaning on links and campaigns.** Before #0101,
+   `links.Store`'s `click_count` (surfaced on the dashboard list, the link
+   detail response, and the duplicate/reactivate response from
+   `POST /api/links`) was a raw `COUNT(*)` over every recorded click. As of
+   #0101 it excludes `is_bot = TRUE` at every call site, matching
+   `UTMStatsForLink`'s `ClickCount` and every campaign-level count. A link
+   with bot clicks reports a **lower** `click_count` after the deploy than
+   it would have before — not because clicks were lost, but because the
+   field's definition changed from "every recorded click" to "every
+   non-bot recorded click."
 
 ---
 
@@ -278,6 +360,74 @@ type TimeseriesResult struct {
 
 ---
 
+## Campaign stats queries (#0102)
+
+Four campaign-scoped queries extend `internal/clicks/stats.go`'s
+`StatsStore`, all grouping on **`clicks.campaign_id`** — never on
+`utm_campaign` strings, which is the point of the FK (see
+`docs/campaigns.md`'s "Campaign membership is a foreign key" for why):
+
+```go
+func (s *StatsStore) CampaignStats(ctx, campaignID int64, from, to time.Time) (CampaignStats, error)
+func (s *StatsStore) CampaignClicksOverTime(ctx, campaignID int64, from, to time.Time) (TimeseriesResult, error)
+func (s *StatsStore) CampaignClicksByLink(ctx, campaignID int64, from, to time.Time) ([]LinkBucket, error)
+func (s *StatsStore) CampaignSeriesByLink(ctx, campaignID int64, from, to time.Time) ([]LinkSeries, error)
+```
+
+`CampaignStats` returns the bot-excluded total click count, the excluded bot
+count, and breakdowns for source, medium, content, and referer (reusing the
+same `breakdown` helper — renamed `dimensionBreakdown` internally — and its
+column allowlist as the per-link query above, so there is one validated
+interpolation site rather than two that could drift). `CampaignSeriesByLink`
+caps the per-link series at **6 named links plus one "Other" fold** — the
+cap lives in the query layer so the frontend cannot forget it or pick a
+different limit than what the backend enforces.
+
+**These four methods are not the public interface.** `campaignStatsProvider`
+exposes exactly two **composite** methods, each of which reads its entire
+payload inside one `REPEATABLE READ`, read-only transaction:
+
+```go
+func (s *StatsStore) CampaignSummary(ctx, campaignID int64, from, to time.Time) (CampaignSummary, error)
+func (s *StatsStore) CampaignRollup(ctx, campaignID int64, from, to time.Time) (CampaignRollup, error)
+```
+
+`CampaignSummary` (stats + timeseries) backs `GET /api/campaigns/{slug}`;
+`CampaignRollup` (+ by-link + series-by-link) backs
+`GET /api/campaigns/{slug}/stats` and the CSV export
+(`docs/campaigns.md`'s "CSV export" section). Assembling a response from the
+four standalone methods directly — each against its own snapshot — is
+possible but production-dead: doing so under concurrent writes lets a
+response's timeseries and total disagree, because each fragment would be
+read at a different instant. The four standalone methods exist for tests and
+carry `STANDALONE:` warnings in their doc comments for exactly this reason.
+
+**Default window:** the campaign's own `starts_at`–`ends_at` when both are
+set, clamped so `to` never exceeds today (`campaignWindow` in
+`internal/clicks/stats.go`); otherwise the existing 30-day default shared
+with the per-link queries above. `CampaignStats.WindowFrom`/`WindowTo` report
+the window actually used, so the frontend (and the CSV export's filename)
+label and divide by the server's resolved window rather than re-deriving it
+client-side.
+
+**Two numbers on two time scales, in the same payload — by design, not a
+bug.** `GET /api/campaigns/{slug}` returns `total_clicks` (all-time,
+membership-independent of the window) alongside `stats.click_count`
+(windowed). A campaign with clicks only outside the current window
+legitimately shows a non-zero `total_clicks` next to a zero
+`stats.click_count`. This divergence is intentionally pinned by a named test
+(`TestCampaignsGet_TotalClicksIsAllTimeStatsClickCountIsWindowed`) rather
+than "fixed" by making the two agree.
+
+**Bot exclusion generalizes the same trap #0101 found on links**: a campaign
+whose every click is a bot click must still appear in `GET /api/campaigns`'s
+list, and `campaigns.Store`'s `link_count`/`total_clicks` use the same
+correlated-subquery bot-exclusion spelling as `links.Store`, specifically to
+avoid a `LEFT JOIN ... ON is_bot = FALSE` collapsing the row out of the
+result via `GROUP BY`.
+
+---
+
 ## SPA consumption
 
 The SPA fetches link detail — including both `utm_stats` and `timeseries` fields —
@@ -396,9 +546,11 @@ When `buckets` is empty or null, the component renders "No data." in faint text.
 | Name | Location | Value | Meaning |
 |---|---|---|---|
 | `recordTimeout` | `internal/clicks/recorder.go` | 5s | Max time a background click INSERT may run |
-| `defaultTimeseriesDays` | `internal/clicks/stats.go` | 30 | Look-back window when no range is supplied |
+| `defaultTimeseriesDays` | `internal/clicks/stats.go` | 30 | Look-back window when no range is supplied (per-link and campaign-without-dates) |
 | `NoneBucket` | `internal/clicks/stats.go` | `"(none)"` | Label for NULL/empty UTM values in breakdowns |
-| `breakdownLimit` | `internal/clicks/stats.go` | 20 | Top-N rows returned per UTM dimension |
+| `breakdownLimit` | `internal/clicks/stats.go` | 20 | Top-N rows returned per UTM dimension, per-link and per-campaign alike |
+| `BotUserAgentSubstrings` | `internal/clicks/botdetect.go` | 15 substrings | Case-insensitive bot classification list — see "Bot classification" above |
+| series cap (`CampaignSeriesByLink`) | `internal/clicks/stats.go` | 6 + "Other" | Per-link series shown on the campaign clicks-over-time chart |
 
 ---
 
@@ -408,13 +560,17 @@ When `buckets` is empty or null, the component renders "No data." in faint text.
 |---|---|
 | `migrations/000003_create_clicks.up.sql` | Original schema for the `clicks` table and its first two indexes |
 | `migrations/000012_clicks_campaign_and_bot.{up,down}.sql` | Adds `campaign_id`/`is_bot` and `idx_clicks_campaign_id`/`idx_clicks_campaign_time` (#0100) |
-| `internal/clicks/recorder.go` | `Click` type, `Recorder`, `RecordClick` (fire-and-forget), `Record` (the #0100 UTM fallback + campaign_id resolution) |
-| `internal/clicks/stats.go` | `StatsStore`, `UTMStatsForLink`, `ClicksOverTime`, `Bucket`, `UTMStats`, `DayBucket`, `TimeseriesResult` |
-| `internal/clicks/stats_test.go` | DB integration tests for `ClicksOverTime` (BasicBuckets, NoClicks, ZeroDefaults) |
+| `internal/clicks/recorder.go` | `Click` type, `Recorder`, `RecordClick` (fire-and-forget), `Record` (the #0100 UTM fallback + campaign_id resolution + #0101 bot classification) |
+| `internal/clicks/botdetect.go` | `IsBot`, `BotUserAgentSubstrings` (#0101) |
+| `internal/clicks/stats.go` | `StatsStore`; per-link `UTMStatsForLink`/`ClicksOverTime`; campaign `CampaignStats`/`CampaignSummary`/`CampaignRollup`/`CampaignClicksOverTime`/`CampaignClicksByLink`/`CampaignSeriesByLink` (#0102); `Bucket`, `UTMStats`, `DayBucket`, `TimeseriesResult`, `LinkBucket`, `LinkSeries` |
+| `internal/clicks/stats_test.go` | DB integration tests for `ClicksOverTime` (BasicBuckets, NoClicks, ZeroDefaults) and the campaign queries |
 | `internal/handlers/links.go` | Link-detail handler; owns the `statsProvider` interface and populates `linkDetailView.Timeseries` |
+| `internal/handlers/campaigns.go` | Campaign endpoints, including `GET /api/campaigns/{slug}/stats` |
 | `web/src/lib/charts.ts` | Pure data-shaping helpers and SVG geometry (unit-tested) |
 | `web/src/lib/charts.test.ts` | 26 unit tests covering gap-fill, boundary cases, proportion math, NaN guards |
-| `web/src/lib/ClicksChart.svelte` | Inline-SVG area+line chart (clicks over time) |
-| `web/src/lib/UTMBarChart.svelte` | Inline-SVG proportional bar chart (per UTM dimension) |
-| `web/src/views/LinkDetail.svelte` | Renders both chart panels; sources data from `GET /api/links/{key}` |
-| `web/src/lib/types.ts` | TypeScript types: `DayBucket`, `TimeseriesResult`, `UTMBucket`, `LinkDetail` |
+| `web/src/lib/ClicksChart.svelte` | Inline-SVG area+line chart (per-link clicks over time) |
+| `web/src/lib/CampaignClicksChart.svelte` | Inline-SVG area+line chart, combined/per-link toggle (#0104) |
+| `web/src/lib/UTMBarChart.svelte` | Inline-SVG proportional bar chart (per UTM dimension), reused for both per-link and per-campaign breakdowns |
+| `web/src/views/LinkDetail.svelte` | Renders both per-link chart panels; sources data from `GET /api/links/{key}` |
+| `web/src/views/CampaignDetail.svelte` | Renders the campaign summary, charts, and links table; sources data from `GET /api/campaigns/{slug}` and `.../stats` |
+| `web/src/lib/types.ts` | TypeScript types: `DayBucket`, `TimeseriesResult`, `UTMBucket`, `LinkDetail`, `CampaignStats`, `LinkBucket`, `LinkSeries` |

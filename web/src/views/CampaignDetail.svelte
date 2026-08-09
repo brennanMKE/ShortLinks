@@ -623,6 +623,19 @@
             </div>
           {/each}
         </div>
+        <!-- Inside the has-data branch on purpose: the note explains how to read
+             the BARS, so on an empty campaign it would follow "No click data yet"
+             with a paragraph ending "Relative bar height here does not by itself
+             say which channel performed better" — about bars that aren't on
+             screen (#0108 review nit 3). -->
+        <p class="text-faint honest-comparison-note">
+          Bot filtering reduces but does not eliminate social-channel inflation — some preview crawlers
+          don't identify themselves. Print scans carry no bot noise and are the cleanest signal per click,
+          but naturally show fewer clicks in raw comparison, since impression volume (how many people saw
+          the post vs. how many walked past the poster) differs by orders of magnitude between channels,
+          and ShortLinks has no way to measure impressions. Relative bar height here does not by itself
+          say which channel performed better.
+        </p>
       {/if}
     </Panel>
 
@@ -941,6 +954,11 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
     gap: var(--space-5);
+  }
+  .honest-comparison-note {
+    margin: var(--space-4) 0 0;
+    font-size: var(--fs-sm);
+    max-width: 60rem;
   }
   .utm-dim-title {
     margin: 0 0 var(--space-2);
