@@ -54,6 +54,8 @@ func campaignsMuxWithRules(t *testing.T, pool *pgxpool.Pool, rules ruleProvider)
 	mux.Handle("POST /api/campaigns/{slug}/links/batch", requireSession(http.HandlerFunc(h.BatchCreateLinks)))
 	// Bulk QR download (#0106) — see qr_test.go.
 	mux.Handle("GET /api/campaigns/{slug}/qr.zip", requireSession(http.HandlerFunc(h.QRZip)))
+	// Per-link CSV export (#0107) — see campaigns_export_test.go.
+	mux.Handle("GET /api/campaigns/{slug}/export.csv", requireSession(http.HandlerFunc(h.Export)))
 	return mux
 }
 

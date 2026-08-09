@@ -21,6 +21,7 @@ import {
   parseKeysInput,
   copyAllShortUrlsText,
   campaignQrZipUrl,
+  campaignExportCsvUrl,
   joinSentences,
   MAX_ASSIGN_KEYS_PER_REQUEST,
   type CampaignLinkRow,
@@ -718,6 +719,22 @@ describe('campaignQrZipUrl', () => {
 
   it('encodes an unusual slug defensively', () => {
     expect(campaignQrZipUrl('a b')).toBe('/api/campaigns/a%20b/qr.zip');
+  });
+});
+
+// ── campaignExportCsvUrl (#0107) ──────────────────────────────────────────
+
+describe('campaignExportCsvUrl', () => {
+  it('builds the same-origin CSV export API route from a slug', () => {
+    expect(campaignExportCsvUrl('summer-fair')).toBe('/api/campaigns/summer-fair/export.csv');
+  });
+
+  it('encodes an unusual slug defensively', () => {
+    expect(campaignExportCsvUrl('a b')).toBe('/api/campaigns/a%20b/export.csv');
+  });
+
+  it('carries no query params, so the export reuses the same default window the on-screen table shows', () => {
+    expect(campaignExportCsvUrl('summer-fair')).not.toContain('?');
   });
 });
 

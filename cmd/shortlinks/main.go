@@ -431,6 +431,11 @@ func mountAndServe(
 		// SVG + PNG QR codes, named so printed sheets can be matched back to
 		// their placements.
 		mux.Handle("GET /api/campaigns/{slug}/qr.zip", requireSession(http.HandlerFunc(campaignsH.QRZip)))
+		// Per-link CSV export (#0107): the campaign's rollup as a downloadable
+		// CSV, over the same optional ?from=/?to= window and defaults as
+		// /stats above, reusing that same clicks.StatsStore.CampaignRollup
+		// call so the two can never disagree.
+		mux.Handle("GET /api/campaigns/{slug}/export.csv", requireSession(http.HandlerFunc(campaignsH.Export)))
 	}
 
 	// Current user profile (#0027) — behind RequireSession; returns the caller's

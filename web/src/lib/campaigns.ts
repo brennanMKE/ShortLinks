@@ -412,6 +412,25 @@ export function campaignQrZipUrl(slug: string): string {
   return `/api/campaigns/${encodeURIComponent(slug)}/qr.zip`;
 }
 
+// ── CSV export (#0107) ───────────────────────────────────────────────────
+
+/**
+ * URL for the per-link CSV export download (`GET
+ * /api/campaigns/{slug}/export.csv` — internal/handlers/campaigns.go's
+ * Export). Same-origin, cookie-authenticated, no query params — deliberately
+ * omitting `from`/`to` so the download reuses the SAME default window
+ * getCampaignStats(slug) (no explicit window either, see CampaignDetail's
+ * script) already resolved for the on-screen table, which is exactly what
+ * makes the exported numbers reconcile with what's on screen: both requests
+ * hit the server's identical default-window resolution
+ * (clicks.campaignWindow) with nothing for the two calls to disagree about.
+ * A plain `<a href download>` is sufficient here for the same reason
+ * campaignQrZipUrl's doc comment gives — no fetch/blob plumbing needed.
+ */
+export function campaignExportCsvUrl(slug: string): string {
+  return `/api/campaigns/${encodeURIComponent(slug)}/export.csv`;
+}
+
 // ── Message formatting ──────────────────────────────────────────────────
 
 /**

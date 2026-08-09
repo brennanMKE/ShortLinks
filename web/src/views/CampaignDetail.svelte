@@ -98,6 +98,13 @@
   zero or many links (internal/handlers/campaigns.go's QRZip degrades to an
   empty-but-valid archive rather than an error).
 
+  CSV export (#0107): a "Download CSV" link in the same toolbar, next to the
+  QR zip link — the per-link rollup (internal/handlers/campaigns_export.go's
+  Export) over the SAME default window this view already shows (no
+  from/to picker exists here, so nothing for the two requests to disagree
+  about). Also degrades cleanly for an empty campaign (header row, no data
+  rows, never an error).
+
   Assign/unassign against #0099's endpoints: the assign form accepts pasted
   keys or short URLs (lib/campaigns.ts parseKeysInput), chunks anything over
   the server's 50-key cap (chunkKeys), and surfaces partial success/failure
@@ -128,6 +135,7 @@
     parseKeysInput,
     copyAllShortUrlsText,
     campaignQrZipUrl,
+    campaignExportCsvUrl,
     toDateInput,
     toIsoDate,
     joinSentences,
@@ -676,6 +684,37 @@
           <a class="qr-zip-link" href={campaignQrZipUrl(detail.slug)} download>
             Download all QR codes (zip)
           </a>
+          <!--
+            Per-link CSV export (#0107): same pattern as the QR zip link
+            above — a plain <a>, not a Button, pointing straight at the
+            export endpoint (same-origin, cookie-authenticated, no
+            fetch/blob JS needed — see lib/campaigns.ts's
+            campaignExportCsvUrl doc comment). Lives in the TOOLBAR, not the
+            links table, deliberately: the table is already at its measured
+            min-content headroom against the zero-horizontal-scroll
+            invariant (see the geometry comment in <style> below), and a
+            download control costs no table width sitting here instead.
+
+            No ?from=/?to= query params: this view never lets the user pick
+            an explicit window (getCampaignStats(slug) above is called with
+            none either), so the export always resolves the SAME default
+            window the on-screen table is already showing — the reason the
+            AC's reconciliation holds with no extra wiring here.
+
+            Styled by the LOCAL .export-csv-link rule below, duplicating
+            .qr-zip-link's own duplicated subset of Button's .btn/
+            .btn-subtle rules (see that rule's comment for why a shared
+            class can't just be reused across components) — kept in sync BY
+            HAND with .qr-zip-link/Button.svelte.
+
+            Left enabled even with zero links: an empty campaign exports a
+            valid header-only CSV, not an error (internal/handlers/
+            campaigns_export.go's Export), the same "empty collection, not a
+            failure" contract the QR zip link already relies on.
+          -->
+          <a class="export-csv-link" href={campaignExportCsvUrl(detail.slug)} download>
+            Download CSV
+          </a>
         </div>
       </div>
 
@@ -947,6 +986,31 @@
     background: var(--accent-subtle);
   }
   /*
+   * CSV export (#0107): identical rule to .qr-zip-link above, duplicated
+   * rather than shared for the same reason that rule gives — this is a
+   * SEPARATE <a> this component renders directly, so it needs its own
+   * class. Kept in sync BY HAND with .qr-zip-link/Button.svelte's subtle
+   * variant.
+   */
+  .export-csv-link {
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--font);
+    font-size: var(--fs-base);
+    line-height: 1;
+    padding: var(--space-2) var(--space-3);
+    border: var(--border-w) solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+    user-select: none;
+  }
+  .export-csv-link:hover {
+    background: var(--accent-subtle);
+  }
+  /*
    * Hidden above the stacked-card breakpoint — the header's own sort button
    * (inside <thead>) is visible and sufficient on desktop. Shown below it in
    * the @media (max-width: 900px) block further down, alongside the switch
@@ -1184,6 +1248,13 @@
      * mobile rule changes, this one should change with it.
      */
     .qr-zip-link {
+      padding: var(--space-3) var(--space-3);
+      min-height: 40px;
+    }
+    /* Mirrors .qr-zip-link's own ≤480px rule immediately above — same 40px
+       tap-target reasoning, hand-copied for the same "duplicates, does not
+       share, a class" reason (#0107). */
+    .export-csv-link {
       padding: var(--space-3) var(--space-3);
       min-height: 40px;
     }

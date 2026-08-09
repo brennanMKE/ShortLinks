@@ -119,8 +119,9 @@ const maxCampaignNameLength = 255
 //	DELETE /api/campaigns/{slug}/links/{key} — unassign one link (#0099)
 //	POST   /api/campaigns/{slug}/links/batch — create N new links at once (#0105)
 //	GET    /api/campaigns/{slug}/qr.zip — every assigned link's QR codes, zipped (#0106)
+//	GET    /api/campaigns/{slug}/export.csv — per-link rollup as CSV (#0107)
 //
-// All ten routes MUST be mounted behind middleware.RequireSession; each
+// All eleven routes MUST be mounted behind middleware.RequireSession; each
 // handler reads the authenticated user from the request context and scopes
 // every store call to that user, so a request can only see or mutate its own
 // campaigns and links. This mirrors LinksHandler.
