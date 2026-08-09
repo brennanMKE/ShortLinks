@@ -754,8 +754,8 @@
                      "Key" on .key-cell. The td keeps data-label="Destination",
                      so the stacked mobile layout still shows the full word. -->
                 <th scope="col" class="dest-cell" title="Destination">URL</th>
-                <th scope="col">Source</th>
-                <th scope="col">Medium</th>
+                <th scope="col" class="source-cell">Source</th>
+                <th scope="col" class="medium-cell">Medium</th>
                 <th scope="col" class="placement-cell" title="Placement">Placement</th>
                 <th scope="col" aria-sort={sortDirection === 'desc' ? 'descending' : 'ascending'}>
                   <button type="button" class="sort-btn" onclick={toggleSort}>
@@ -783,8 +783,8 @@
                   </td>
                   <td class="title-cell" data-label="Title" title={row.title}>{row.title || '—'}</td>
                   <td class="dest-cell" data-label="Destination" title={row.destination_url}>{row.destination_url}</td>
-                  <td class="text-muted" data-label="Source">{row.utm_source || '—'}</td>
-                  <td class="text-muted" data-label="Medium">{row.utm_medium || '—'}</td>
+                  <td class="text-muted source-cell" data-label="Source" title={row.utm_source}><span class="bidi-ltr">{row.utm_source || '—'}</span></td>
+                  <td class="text-muted medium-cell" data-label="Medium" title={row.utm_medium}><span class="bidi-ltr">{row.utm_medium || '—'}</span></td>
                   <td class="placement-cell" data-label="Placement" title={row.placement}>{row.placement || '—'}</td>
                   <td class="num" data-label="Clicks">{row.clicksInWindow}</td>
                   <td class="num" data-label="Share">{row.shareOfTotal}%</td>
@@ -1177,6 +1177,31 @@
    *     the 926px container — **15.58px of real headroom** — at all of
    *     1024/1280/1440/1920px, with the same 44-row/12-char-key dataset,
    *     Remove fully inside `.table-scroll` at every width.
+   *
+   *   - #0112: this round's own adversarial dataset (12 rows, every row a
+   *     12-char custom-key alias, long titles/destinations/placements at
+   *     their existing caps, PLUS long/realistic UTM source+medium values
+   *     this round specifically targets — `partner_newsletter_q3`,
+   *     `print_qr_poster`, `sponsored_content_native`,
+   *     `partner_co_marketing_newsletter`, `affiliate_network_referral`,
+   *     etc.) measured `.links-table` at `width: min-content`: **917.03px**
+   *     against the 926px container — **8.97px of real headroom** — at all
+   *     of 1024/1280/1440/1920px, `.table-scroll` reading `926 == 926` at
+   *     every one, with `.source-cell`/`.medium-cell` capped at 80px (see
+   *     that rule's own comment below for why 80px and for the truncation
+   *     direction chosen, and the `.bidi-ltr` rule below IT for a review-
+   *     round fix to a character-reordering bug the first version of this
+   *     cap introduced). Tighter than the 15.58px/24.28px margins earlier
+   *     rounds landed on, and past the ~5px floor a genuine fix needs FOR
+   *     THIS DATASET specifically — not an unconditional floor: `.num`
+   *     (Clicks/Share) is uncapped on `main` too, and a click count reaching
+   *     7 digits (`1234567`) pushes min-content to 927.45px against this
+   *     same 80px Source/Medium cap, i.e. headroom goes negative. That is a
+   *     pre-existing `.num`-width gap, not something this round's Source/
+   *     Medium caps introduced or could fix, and is out of scope here (see
+   *     the issue's own out-of-scope list); noted so a future round doesn't
+   *     re-derive it from scratch. 375px unaffected: `document.scrollWidth
+   *     == 375`, stacked cards still show every value in full.
    */
   .title-cell {
     max-width: 95px;
@@ -1201,6 +1226,143 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /*
+   * #0112: Source and Medium were the two remaining text columns in this
+   * table with NO cap at all — every other free-text column (.title-cell,
+   * .dest-cell, .placement-cell, .key-cell above) got one across #0103/
+   * #0106, but these two were added later (#0099/#0100) and never joined
+   * that pass. An ordinary UTM value blows past what the table has to give:
+   * `utm_source=partner_newsletter_q3` alone (no other adversarial content)
+   * widened the Source column enough to push `.table-scroll` into
+   * horizontal overflow — the exact #0103/#0106 invariant this table is
+   * supposed to hold. Fixed the same way as every other capped column: the
+   * SAME class on both <th> and <td> (the `.placement-cell` lesson from
+   * #0106's third round — a `<td>` max-width alone is inert under
+   * `table-layout: auto` whenever the uncapped `<th>`'s own text is wider;
+   * "Source"/"Medium" are short enough that this cap never actually
+   * truncates the HEADER, but the class still has to be on both cells so
+   * nothing upstream can widen the column past it).
+   *
+   * TRUNCATION DIRECTION: leading ellipsis, not trailing. UTM values in this
+   * app are conventionally prefixed and disambiguated at the END —
+   * `partner_newsletter` vs `partner_newsletter_q3`, `print_qr_poster` vs
+   * `print_qr_poster_v2` — so trailing truncation collapses exactly the
+   * pairs a reader most needs to tell apart down to an identical
+   * "partner_newsle…" for both. Truncating from the front instead
+   * (`direction: rtl` + `text-align: left` on the cell, a standard CSS-only
+   * front-ellipsis: the element's paragraph direction flips so the
+   * browser's own text-overflow clips from the visual left and places the
+   * "…" there) keeps the differentiating suffix on screen without any JS
+   * string-slicing, for exactly the shape of value the issue itself names.
+   *
+   * REVIEW FIX — `direction: rtl` on the cell does not just move the
+   * ellipsis, it runs the UNICODE BIDI ALGORITHM over the cell's actual
+   * content, and that algorithm reorders characters, not just the ellipsis
+   * position, whenever the content isn't a single uninterrupted run of
+   * strong-LTR characters. Caught by measuring rendered character order
+   * with `Range.getClientRects()` (sorted by screen x), not by eyeballing:
+   * a leading digit run, a leading/trailing neutral character (`-`, `.`,
+   * `!`), or mixed script all reorder — `2026_q3_2027` rendered
+   * `q3_2027_2026` (a value the string never contained), `promo_2026!`
+   * rendered `!promo_2026` (the `!` relocated to the far left, then clipped
+   * away by the ellipsis instead of the digits it was meant to punctuate).
+   * 0 of the first round's 24 plain-snake_case cells reordered, which is
+   * exactly why this shipped once already looking correct — UTM values are
+   * not guaranteed to be plain snake_case (a leading campaign-year prefix
+   * like `2026_spring_launch` is an entirely ordinary one). Fixed by
+   * wrapping the <td>'s value in `<span class="bidi-ltr">` (`direction:
+   * ltr; unicode-bidi: isolate`, see that rule below): the isolate makes
+   * the span's contents an opaque, independently-LTR-ordered unit as far as
+   * the surrounding rtl paragraph's bidi algorithm is concerned, so the
+   * PARENT cell's rtl-ness still controls where text-overflow clips from
+   * (the front) while the SPAN's own content always renders in the order it
+   * was written, regardless of digits/punctuation/script. Only the two
+   * <td>s need this — the <th>s' content is always the literal word
+   * "Source"/"Medium", never data, so there is nothing for the bidi
+   * algorithm to reorder there.
+   *
+   * NOT A COMPLETE GUARANTEE, stated plainly rather than glossed over: this
+   * round's own adversarial dataset also produced two pairs that render
+   * IDENTICALLY at 80px despite being genuinely different values —
+   * `partner_newsletter` and `partner_co_marketing_newsletter` both render
+   * "…sletter" (they share the literal 11-character suffix "_newsletter",
+   * so no amount of trailing text short of ~12+ characters — far more than
+   * an 80px cell holds — reaches back far enough to show where they
+   * diverge); `print_flyer_poster` and `print_qr_poster` both render
+   * "…poster" the same way. A head+tail "middle ellipsis" was considered to
+   * close this, but the same two pairs need ~9 leading AND ~7+ trailing
+   * characters simultaneously to disambiguate (`partner_` is an
+   * 8-character shared prefix; `_poster`/`_newsletter` are 7/11-character
+   * shared suffixes) — roughly 130–150px, which this table does not have
+   * to give without pulling another column back below a floor #0106 spent
+   * four review rounds establishing. This is the same class of limitation
+   * `.title-cell`/`.dest-cell`/`.placement-cell`/`.key-cell` above already
+   * accept for adversarial SHARED-PREFIX pairs (trailing ellipsis has no
+   * defense against those either) — front truncation trades that failure
+   * mode for a rarer shared-prefix-AND-suffix one, while fixing the
+   * common, issue-cited case (tail-differentiated values) outright.
+   *
+   * Recovery for the residual case is the same two-part story the rest of
+   * this table relies on: `title` on the <td> (kept below, secondary — not
+   * sufficient alone per the issue's own AC, but still a real desktop
+   * affordance), and — genuinely touch-reachable, unlike hover — tapping
+   * the row's own key opens LinkDetail, then tapping Edit there opens the
+   * UTM builder (`#edit-utm-source`/`#edit-utm-medium`), which shows the
+   * full, unclipped value (measured: 666px == 666px, no truncation).
+   * REVIEW FIX: this is three taps (key, then Edit), not one — LinkDetail's
+   * own READ view shows Destination/Placement/Campaign/Clicks/Created/
+   * Expires and a click-derived UTM breakdown, but not the raw
+   * utm_source/utm_medium fields themselves; an earlier version of this
+   * comment overstated that as a one-tap "read view" recovery. The AC
+   * ("recoverable some way that works on touch") still holds — it does not
+   * require the recovery to be one tap — but the affordance is the edit
+   * form specifically, not the page in general. The accessible name read by
+   * assistive tech is the cell's own text node either way (inside the
+   * `bidi-ltr` span, unaffected by the CSS clip, the direction flip, or the
+   * isolate — same reasoning as .placement-cell's <th> above) — a screen
+   * reader never sees only "…sletter" regardless of which of the two rows
+   * above it is announcing.
+   *
+   * The mobile stacked-card layout (<900px) shows the value in full
+   * regardless (`.links-table td`'s `max-width: none` below already lifts
+   * every column's cap there), so the front-ellipsis — and the residual
+   * collision risk above — is a desktop/tablet-width-only concern;
+   * `direction: ltr` is restored for these two cells in that breakpoint
+   * purely so the row's flex layout (`.links-table td { display: flex;
+   * ... }`) doesn't itself mirror right-to-left from the lingering
+   * `direction: rtl` once nothing is being truncated.
+   *
+   * Cap value and measured headroom: see the min-content accounting at the
+   * end of the .title-cell comment above for the running total this column
+   * budget was tuned against.
+   */
+  .source-cell,
+  .medium-cell {
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+  }
+  /*
+   * Review fix — see the "REVIEW FIX" paragraph in the comment above this
+   * rule's cell for the bug this closes: `direction: rtl` on the cell
+   * reorders the VALUE's own characters (digits, punctuation, mixed
+   * script), not just the ellipsis, whenever the value isn't pure
+   * strong-LTR text. `unicode-bidi: isolate` makes this span's content an
+   * independently-ordered unit the surrounding rtl paragraph cannot
+   * reorder; `direction: ltr` is redundant with the isolate for the actual
+   * character order but kept explicit so the span's own start/end (were
+   * anything inside it ever right-aligned) doesn't inherit the cell's rtl.
+   * Applies only inside .source-cell/.medium-cell's <td>s (see the markup)
+   * — the <th>s have no dynamic content to reorder.
+   */
+  .source-cell .bidi-ltr,
+  .medium-cell .bidi-ltr {
+    direction: ltr;
+    unicode-bidi: isolate;
   }
   .num {
     text-align: right;
@@ -1354,6 +1516,23 @@
       overflow-wrap: anywhere;
       white-space: normal;
       text-align: right;
+    }
+    /*
+     * #0112: .source-cell/.medium-cell's desktop `direction: rtl` (see that
+     * rule's comment above) is a front-truncation trick that only makes
+     * sense while the cell is actually clipped to a fixed max-width. Below
+     * this breakpoint `.links-table td` above already lifts `max-width` to
+     * `none` and wraps normally, so nothing truncates — but `direction` is
+     * a DIFFERENT property, untouched by that rule, and would otherwise keep
+     * flowing as rtl here too. Left alone, that flips which side of this
+     * flex row (`display: flex` a few lines up) counts as the main-axis
+     * start, mirroring the data-label/value pair right-to-left for exactly
+     * these two cells while every other stacked card reads left-to-right.
+     * Reset back to ltr here, scoped to the same two cells.
+     */
+    .source-cell,
+    .medium-cell {
+      direction: ltr;
     }
     .links-table td::before {
       content: attr(data-label);
