@@ -61,6 +61,27 @@ migrate -path migrations -database "$DATABASE_URL" down 1   # undo one version
 3. Create `migrations/0000NN_short_description.down.sql` that exactly reverses it.
 4. Apply with `migrate ... up` in development, commit both files together.
 
+### Never edit a migration that has already been applied
+
+golang-migrate tracks version **numbers**, not file **content**. Once a
+migration has run anywhere — production, a test database, a teammate's laptop —
+editing that file changes nothing on those databases while silently changing
+what a fresh replay produces. The two diverge permanently, and
+`schema_migrations` reports a version that the tables do not actually reflect.
+
+This is not hypothetical: commit `791e7d3` added `NOT NULL` constraints by
+editing the already-applied `000004` and `000005`, and both production and
+`shortlinks_test` kept the permissive tables for months
+([#0110](../issues/0110.md), [#0111](../issues/0111.md)). Repairing it took a
+new migration, `000013`.
+
+Corrections to an applied migration belong in a **new** migration. What "down"
+means for such a repair needs thought, too: a corrective migration is a no-op on
+any database created after the mistake was fixed in the file, so an
+unconditional reversal would *manufacture* the drift on those databases rather
+than undo anything. See the comments in
+`migrations/000013_enforce_session_passkey_not_null.down.sql`.
+
 ---
 
 ## Tables
@@ -212,12 +233,14 @@ the WebAuthn challenge because `webauthn_challenges` references this table's
 
 ---
 
-### `passkey_credentials` — `000004_create_auth_credentials.up.sql` + `000009_passkey_backup_flags.up.sql`
+### `passkey_credentials` — `000004_create_auth_credentials.up.sql` + `000009_passkey_backup_flags.up.sql` + `000013_enforce_session_passkey_not_null.up.sql`
 
 One row per registered WebAuthn (passkey) credential. Migration 4 creates the
 table; migration 9 adds the `backup_eligible` and `backup_state` flag columns
 required to correctly round-trip the WebAuthn Backup Eligible (BE) flag for
-synced credentials such as iCloud Keychain passkeys.
+synced credentials such as iCloud Keychain passkeys. Migration 13 enforces
+`user_id NOT NULL` on databases created before `791e7d3` edited migration 4 in
+place; on a clean replay it is a no-op (#0111).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -262,7 +285,7 @@ long-term data.
 
 ---
 
-### `sessions` — `000005_create_sessions.up.sql`
+### `sessions` — `000005_create_sessions.up.sql` + `000013_enforce_session_passkey_not_null.up.sql`
 
 Active authenticated sessions. The `token` value is issued as an
 `HttpOnly; Secure; SameSite=Strict` cookie and looked up on every authenticated
@@ -273,9 +296,15 @@ request.
 | `id` | `BIGSERIAL` | Primary key |
 | `user_id` | `BIGINT` | FK → `users(id)`, not null |
 | `token` | `TEXT` | Unique session token. UNIQUE constraint is the per-request lookup index. |
-| `created_at` | `TIMESTAMPTZ` | Default `now()` |
+| `created_at` | `TIMESTAMPTZ` | Not null, default `now()` |
 | `expires_at` | `TIMESTAMPTZ` | Not null; sessions past this timestamp are rejected |
 | `last_seen_at` | `TIMESTAMPTZ` | Not null; updated on activity |
+
+Migration 13 enforces the four `NOT NULL`s and the `created_at` default on
+databases created before `791e7d3` edited migration 5 in place; on a clean
+replay it is a no-op (#0111). It aborts without changing anything if any
+existing row would violate them — there is no honest value to backfill a
+session's `user_id` or `expires_at` with.
 
 ---
 

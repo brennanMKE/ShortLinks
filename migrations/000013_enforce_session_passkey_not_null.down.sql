@@ -1,0 +1,53 @@
+-- Deliberate no-op. Read this before "fixing" it — the empty body is the
+-- correct reversal of 000013, and the obvious implementation is actively
+-- harmful.
+--
+-- What a down migration owes the caller is the state a fresh replay to the
+-- previous version produces. A fresh replay to 12 runs today's 000004 and
+-- 000005, which already create passkey_credentials.user_id, sessions.user_id,
+-- sessions.created_at (NOT NULL DEFAULT now()), sessions.expires_at and
+-- sessions.last_seen_at as NOT NULL. So on any database created after commit
+-- 791e7d3, the 12 -> 13 step changes nothing, and its reversal must therefore
+-- also change nothing.
+--
+-- The tempting version of this file —
+--
+--     ALTER TABLE sessions
+--         ALTER COLUMN last_seen_at DROP NOT NULL,
+--         ALTER COLUMN expires_at   DROP NOT NULL,
+--         ALTER COLUMN created_at   DROP DEFAULT,
+--         ALTER COLUMN created_at   DROP NOT NULL,
+--         ALTER COLUMN user_id      DROP NOT NULL;
+--     ALTER TABLE passkey_credentials
+--         ALTER COLUMN user_id DROP NOT NULL;
+--
+-- was written first and then tested, which is how it was caught. Run against
+-- a database built by a clean replay, `migrate up` (a no-op) followed by
+-- `migrate down 1` left a schema byte-identical to the drifted one #0111
+-- exists to eliminate, and divergent from a fresh replay stopped at 12. An
+-- unconditional drop does not "restore the prior state"; on every database
+-- except a drifted one it *manufactures* the drift.
+--
+-- Nor can this file detect which case it is in. After 000013 has run, a
+-- repaired-drifted database and an always-clean one are indistinguishable —
+-- that is the whole point of the migration. Recording a flag in `up` to
+-- branch on here would mean carrying permanent bookkeeping state in the auth
+-- schema to preserve the ability to re-break it, which is a worse trade than
+-- the asymmetry.
+--
+-- The asymmetry is small and points the right way. Rolling 13 back on the
+-- drifted production database leaves the constraints in place while
+-- schema_migrations reads 12 — which is exactly the shape a fresh replay to
+-- 12 produces, i.e. the rollback converges the database instead of returning
+-- it to a state no migration path can generate. Keeping the constraints
+-- through a rollback is safe for older application versions too: every write
+-- path into these tables (auth.Store.CreateSession, auth.Store.InsertCredential)
+-- has always supplied all five columns, so no released build of this service
+-- depends on their being nullable.
+--
+-- If some future recovery genuinely needs the permissive shape back, the DDL
+-- is quoted above; run it by hand, knowingly. It is not something `migrate
+-- down` should do on your behalf.
+--
+-- (golang-migrate runs a comment-only body without error and records the
+-- version change, so `migrate down 1` still moves 13 -> 12 as expected.)

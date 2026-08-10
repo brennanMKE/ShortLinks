@@ -378,15 +378,51 @@ git diff --name-only <last-deployed-sha>..HEAD -- migrations/   # any output => 
 migrate -path migrations -database "$DATABASE_URL" version
 ```
 
-**The campaigns feature deploy needs this.** It ships three new migrations —
-`000010_create_campaigns`, `000011_links_campaign_and_utm`, and
-`000012_clicks_campaign_and_bot` (see `docs/database.md` for what each
-adds) — unlike the `v0.2.0` release, which changed no migration files and
-was a binary-plus-SPA-only deploy. Run
+**The campaigns feature deploy needs this.** It ships **four** new migrations —
+`000010_create_campaigns`, `000011_links_campaign_and_utm`,
+`000012_clicks_campaign_and_bot`, and
+`000013_enforce_session_passkey_not_null` (see `docs/database.md` for what
+each adds) — unlike the `v0.2.0` release, which changed no migration files
+and was a binary-plus-SPA-only deploy. Run
 
 ```bash
 migrate -path migrations -database "$DATABASE_URL" up
 ```
+
+> **`000013` can abort, and it is the only migration in this repo that can.**
+> It repairs five `NOT NULL` constraints missing from `sessions` and
+> `passkey_credentials` on any database created before commit `791e7d3`
+> (see [issues/0111.md](issues/0111.md)). Rather than guess a value for a
+> NULL `user_id` — a foreign key to an unknown user — it **checks first and
+> refuses to change anything** if it finds a row that would violate the new
+> constraints. Zero rows violated them when production was last inspected,
+> but that was a point-in-time check.
+>
+> If it aborts, the whole file is one transaction, so **the schema is
+> untouched** — but `golang-migrate` records version 13 as *dirty*, and a
+> plain re-run then fails with `Dirty database version 13`. The recovery,
+> tested end to end against the real 9 → 13 path:
+>
+> ```bash
+> # 1. The error names the offending row counts per table. Inspect them:
+> psql "$DATABASE_URL" -c "SELECT id, user_id, created_at, expires_at, last_seen_at
+>                            FROM sessions
+>                           WHERE user_id IS NULL OR created_at IS NULL
+>                              OR expires_at IS NULL OR last_seen_at IS NULL;"
+> psql "$DATABASE_URL" -c "SELECT id, user_id FROM passkey_credentials WHERE user_id IS NULL;"
+>
+> # 2. Resolve them by hand (a session row with a NULL user_id is unusable
+> #    and deleting it only signs that session out).
+>
+> # 3. Clear the dirty flag and reset the recorded version, then re-run.
+> #    Safe because step 1's transaction rolled back — force alters no tables.
+> migrate -path migrations -database "$DATABASE_URL" force 12
+> migrate -path migrations -database "$DATABASE_URL" up
+> ```
+>
+> Migrations `000010`–`000012` stay applied through all of this; only `13`
+> is retried. **Take a backup first** (`scripts/db/backup.sh`) — these are
+> the auth tables.
 
 **before** running `./scripts/deploy.sh` (or before confirming its `[y/N]`
 restart prompt, if you've already started it) on any host still at schema

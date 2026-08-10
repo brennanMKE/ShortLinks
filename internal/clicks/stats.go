@@ -87,9 +87,11 @@ func NewStatsStore(pool *pgxpool.Pool) *StatsStore {
 // Note for #0102 (campaign-scoped stats): idx_clicks_campaign_time
 // (migration 000012) is `(campaign_id, clicked_at) WHERE campaign_id IS NOT
 // NULL`. #0101 deliberately did NOT extend that predicate to
-// `AND is_bot = FALSE`, and did not add a migration 000013, even though
+// `AND is_bot = FALSE`, and added no follow-up migration for it, even though
 // every campaign query this store's methods will need filters is_bot =
-// FALSE.
+// FALSE. (A `migrations/000013_*` does now exist — #0111's session/passkey
+// NOT NULL repair. It is unrelated to this index; nothing has ever extended
+// this predicate.)
 //
 // The invariant this rests on, reproduced across every distribution tested
 // (30 campaigns x 5,000 clicks/campaign at 10% bot; 150k rows at 10% bot;
