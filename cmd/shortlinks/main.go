@@ -27,7 +27,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/web"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	// Subcommand routing: `shortlinks serve` starts the HTTP server;
