@@ -3,11 +3,12 @@
 // notice mapping (success/duplicate/422-denied/409/400). No DOM or network —
 // only the data shaping the view delegates to lib/links.ts.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ApiError } from './api';
+import { currentUser } from './stores';
 import type { Link } from './types';
 import {
-  SHORT_URL_BASE,
+  shortUrlBase,
   shortUrl,
   qrSvgUrl,
   qrPngUrl,
@@ -19,6 +20,22 @@ import {
   destinationDomain,
   DUPLICATE_NOTICE,
 } from './links';
+
+// #0117: the short-URL base is no longer a compiled-in constant — it comes
+// from the profile GET /api/me returns. Signing in a user with a known
+// base_url is therefore the setup every short-URL assertion below needs, and
+// TEST_BASE deliberately is NOT the production domain, so a regression that
+// reintroduced a hard-coded `go.sstools.co` would fail these tests rather than
+// pass them by coincidence.
+const TEST_BASE = 'https://example.test';
+
+beforeEach(() => {
+  currentUser.set({ id: 1, email: 'user@example.com', is_admin: false, base_url: TEST_BASE });
+});
+
+afterEach(() => {
+  currentUser.set(null);
+});
 
 function link(overrides: Partial<Link> = {}): Link {
   return {
@@ -44,20 +61,30 @@ function link(overrides: Partial<Link> = {}): Link {
 
 describe('shortUrl', () => {
   it('builds the branded /u/{key} URL from a key', () => {
-    expect(shortUrl('8d0d93')).toBe(`${SHORT_URL_BASE}/u/8d0d93`);
+    expect(shortUrl('8d0d93')).toBe(`${shortUrlBase()}/u/8d0d93`);
   });
 
-  it('uses the production base, not the dev origin', () => {
-    expect(shortUrl('abc')).toBe('https://go.sstools.co/u/abc');
+  it("uses the signed-in profile's base_url, not a compiled-in domain", () => {
+    expect(shortUrl('abc')).toBe('https://example.test/u/abc');
+  });
+
+  it('follows base_url when the deployment changes domain', () => {
+    currentUser.set({ id: 1, email: 'u@e.test', is_admin: false, base_url: 'https://links.other.test' });
+    expect(shortUrl('abc')).toBe('https://links.other.test/u/abc');
+  });
+
+  it('trims a trailing slash on base_url rather than doubling the separator', () => {
+    currentUser.set({ id: 1, email: 'u@e.test', is_admin: false, base_url: 'https://example.test/' });
+    expect(shortUrl('abc')).toBe('https://example.test/u/abc');
   });
 
   it('encodes an unusual key defensively', () => {
-    expect(shortUrl('a b')).toBe('https://go.sstools.co/u/a%20b');
+    expect(shortUrl('a b')).toBe('https://example.test/u/a%20b');
   });
 });
 
 // #0106: QR download URLs are same-origin API routes (the backend GENERATES
-// the code), deliberately NOT built on SHORT_URL_BASE like shortUrl() above —
+// the code), deliberately NOT built on the configured base like shortUrl() above —
 // that would point at the production redirect domain, not this app's own
 // API, and would 404 in dev.
 describe('qrSvgUrl / qrPngUrl', () => {
@@ -74,9 +101,9 @@ describe('qrSvgUrl / qrPngUrl', () => {
     expect(qrPngUrl('a b')).toBe('/api/links/a%20b/qr.png');
   });
 
-  it('does not use the production short-URL base', () => {
-    expect(qrSvgUrl('abc123')).not.toContain(SHORT_URL_BASE);
-    expect(qrPngUrl('abc123')).not.toContain(SHORT_URL_BASE);
+  it('does not use the configured short-URL base', () => {
+    expect(qrSvgUrl('abc123')).not.toContain(shortUrlBase());
+    expect(qrPngUrl('abc123')).not.toContain(shortUrlBase());
   });
 });
 
@@ -122,7 +149,7 @@ describe('noticeForCreated', () => {
     const n = noticeForCreated(link({ key: 'xyz789', duplicate: false }));
     expect(n.kind).toBe('created');
     if (n.kind === 'created') {
-      expect(n.shortUrl).toBe('https://go.sstools.co/u/xyz789');
+      expect(n.shortUrl).toBe('https://example.test/u/xyz789');
       expect(n.link.key).toBe('xyz789');
     }
   });
@@ -132,7 +159,7 @@ describe('noticeForCreated', () => {
     expect(n.kind).toBe('duplicate');
     if (n.kind === 'duplicate') {
       expect(n.message).toBe(DUPLICATE_NOTICE);
-      expect(n.shortUrl).toBe('https://go.sstools.co/u/dup111');
+      expect(n.shortUrl).toBe('https://example.test/u/dup111');
       // The returned link is still surfaced.
       expect(n.link.key).toBe('dup111');
     }

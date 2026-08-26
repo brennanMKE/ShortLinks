@@ -47,24 +47,19 @@ import (
 	skipqr "github.com/skip2/go-qrcode"
 )
 
-// ShortURLBase mirrors web/src/lib/links.ts's SHORT_URL_BASE. It is
-// deliberately the fixed PRODUCTION display base, not internal/config's
-// BaseURL (which is the AUTH-EMAIL base and is localhost in dev — see
-// config.Config.BaseURL's doc comment and NoOpMailer). The dashboard always
-// shows and copies `https://go.sstools.co/u/{key}` regardless of the
-// environment actually serving the request; a QR code that encoded a dev
-// localhost URL would scan to something the phone can't reach and would
-// silently disagree with the short URL the same page displays right next
-// to it. Keep this in sync with links.ts's SHORT_URL_BASE by hand — there
-// is no shared source of truth across the Go/TS boundary.
-const ShortURLBase = "https://go.sstools.co"
-
-// ShortURL builds the canonical shareable short URL for a key, matching
-// links.ts's shortUrl() byte-for-byte (including percent-encoding the key
-// defensively, even though generated keys and validated custom aliases are
+// ShortURL builds the canonical shareable short URL for a key under base,
+// matching links.ts's shortUrl() byte-for-byte (including percent-encoding the
+// key defensively, even though generated keys and validated custom aliases are
 // already URL-safe).
-func ShortURL(key string) string {
-	return ShortURLBase + "/u/" + url.PathEscape(key)
+//
+// base is the deployment's configured BASE_URL (internal/config), the same
+// value the SPA receives from GET /api/me and builds its displayed short URLs
+// from — so the QR payload and the URL printed next to it are derived from one
+// configured value rather than two hand-synced constants (#0117). A trailing
+// slash on base is trimmed so `https://x.co/` and `https://x.co` encode
+// identically.
+func ShortURL(base, key string) string {
+	return strings.TrimRight(base, "/") + "/u/" + url.PathEscape(key)
 }
 
 // Level is the error-correction level used for every generated code:
@@ -78,7 +73,7 @@ func ShortURL(key string) string {
 //
 // The size cost that normally motivates picking a lower level does not
 // apply here: the encoded payload is always a short URL under our own
-// domain (`https://go.sstools.co/u/{key}`), and at H that stays at QR
+// domain (`{BASE_URL}/u/{key}`), and at H that stays at QR
 // version 4 (41x41 modules including the quiet zone) for a typical 6-char
 // generated key (links.KeyLength), and no worse than version 5 (45x45) even
 // at links.key's VARCHAR(12) maximum length — see qr_test.go's

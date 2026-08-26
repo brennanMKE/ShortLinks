@@ -3,29 +3,48 @@
 // create-response → notice mapping here (rather than inline in the .svelte file)
 // makes them unit-testable without a DOM — see links.test.ts.
 
+import { get } from 'svelte/store';
+
 import type { Link } from './types';
 import { ApiError } from './api';
+import { currentUser } from './stores';
 
 /**
- * The public base under which every short link resolves. The redirect namespace
- * is the fixed `/u/` prefix (see PRD "URL Format"): `https://go.sstools.co/u/{key}`.
+ * The public base under which every short link resolves, for the deployment
+ * actually serving this page. It is the `base_url` field of GET /api/me —
+ * i.e. the Go service's configured `BASE_URL` — NOT a domain compiled into
+ * this bundle (#0117).
  *
- * This is intentionally the PRODUCTION display base, not the dev origin. The
- * dashboard shows users the URL they will share, which is always the branded
- * domain; the backend's BASE_URL differs in dev (localhost) but a copied
- * localhost link is useless to share. The AC fixes the displayed value to
- * `https://go.sstools.co/u/{key}`.
+ * Reading it from the store rather than caching it in a module-level constant
+ * is what makes one deployment's bundle correct under any domain: the same
+ * `dist/` embedded in the Go binary serves `go.sstools.co` in production and
+ * `localhost:8080` in dev, and each shows the URL that actually works there.
+ * `internal/qr`'s ShortURL builds its payload from the same configured value,
+ * so a scanned code and the URL printed beside it can no longer disagree.
+ *
+ * The read is deliberately untracked (`get`, not `$currentUser`): base_url is
+ * fixed for the lifetime of a session, arriving with the profile before any
+ * view that displays a short URL renders, so there is nothing for a reactive
+ * read to observe. The `location.origin` fallback covers only the window
+ * before the profile lands (and unit tests that never set a user); it is the
+ * origin the page was served from, which is the correct guess for a
+ * same-origin SPA.
  */
-export const SHORT_URL_BASE = 'https://go.sstools.co';
+export function shortUrlBase(): string {
+  const base = get(currentUser)?.base_url;
+  if (base) return base.replace(/\/+$/, '');
+  return typeof location !== 'undefined' ? location.origin : '';
+}
 
 /**
  * Build the shareable short URL for a link from its key, e.g.
- * `https://go.sstools.co/u/8d0d93`. The key is path-segment encoded defensively;
- * generated keys are base-62 and custom aliases are validated to a url-safe
- * alphabet server-side, so encoding is normally a no-op.
+ * `https://go.sstools.co/u/8d0d93` under a deployment configured with that
+ * BASE_URL. The key is path-segment encoded defensively; generated keys are
+ * base-62 and custom aliases are validated to a url-safe alphabet server-side,
+ * so encoding is normally a no-op.
  */
 export function shortUrl(key: string): string {
-  return `${SHORT_URL_BASE}/u/${encodeURIComponent(key)}`;
+  return `${shortUrlBase()}/u/${encodeURIComponent(key)}`;
 }
 
 /**

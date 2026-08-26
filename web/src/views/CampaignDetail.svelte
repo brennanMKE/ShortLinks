@@ -142,7 +142,7 @@
     campaignUtmDimensions,
     isEmptyCampaignChannelStats,
   } from '../lib/campaigns';
-  import { qrSvgUrl, qrPngUrl } from '../lib/links';
+  import { qrSvgUrl, qrPngUrl, shortUrlBase } from '../lib/links';
   import { formatDate } from '../lib/linkDetail';
   import type { CampaignDetail, LinkBucket, LinkSeries } from '../lib/types';
   import Button from '../lib/Button.svelte';
@@ -834,7 +834,7 @@
         <textarea
           id="assign-keys"
           rows="3"
-          placeholder={'abc123, https://go.sstools.co/u/def456'}
+          placeholder={`abc123, ${shortUrlBase()}/u/def456`}
           bind:value={assignInput}
           disabled={assigning}
         ></textarea>

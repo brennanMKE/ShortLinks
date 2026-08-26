@@ -20,7 +20,15 @@ const (
 // Config holds all runtime configuration loaded from the environment.
 type Config struct {
 	// Server
-	Port    int
+	Port int
+	// BaseURL is the deployment's public base URL (BASE_URL), required
+	// unconditionally by Load. It is the single source for every externally
+	// visible URL the app produces: the short links the SPA displays and
+	// copies (served to it via GET /api/me), the payload internal/qr encodes
+	// into QR codes, the short-URL column of the campaign CSV export, and the
+	// verification/recovery links in outgoing email (#0117). Callers should
+	// tolerate a trailing slash; the handlers that hand it out or build on it
+	// trim one.
 	BaseURL string
 
 	// Database

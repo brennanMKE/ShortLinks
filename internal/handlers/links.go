@@ -153,6 +153,11 @@ type LinksHandler struct {
 	// to an owned campaign (#0099). May be nil, in which case a request that
 	// supplies either field is rejected with a 400.
 	campaigns campaignLookup
+	// baseURL is the deployment's configured BASE_URL (#0117). QR codes are
+	// generated from it via qr.ShortURL, so a scanned code always points at
+	// the same origin the SPA displays and copies — see qr.ShortURL's doc
+	// comment for why this is configuration rather than a compiled-in domain.
+	baseURL string
 }
 
 // NewLinksHandler constructs a LinksHandler over the data layer, the redirect
@@ -163,9 +168,10 @@ type LinksHandler struct {
 // the #0026 SSE broadcast, a nil stats provider to omit the #0030 utm_stats
 // field, and a nil campaignLookup to reject campaign_id/campaign_slug on
 // create (e.g. in unit tests that do not exercise those paths); the handler
-// then skips the respective steps.
-func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger, broker eventPublisher, stats statsProvider, campLookup campaignLookup) *LinksHandler {
-	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor, broker: broker, stats: stats, campaigns: campLookup}
+// then skips the respective steps. baseURL is the configured BASE_URL the QR
+// endpoints encode (#0117).
+func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProvider, auditor *audit.Logger, broker eventPublisher, stats statsProvider, campLookup campaignLookup, baseURL string) *LinksHandler {
+	return &LinksHandler{store: store, cache: redirectCache, rules: rules, auditor: auditor, broker: broker, stats: stats, campaigns: campLookup, baseURL: baseURL}
 }
 
 // linkView is the JSON shape for a single link, shared by every endpoint. The
@@ -734,7 +740,7 @@ func (h *LinksHandler) QRSVG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bitmap, err := qr.Matrix(qr.ShortURL(link.Key))
+	bitmap, err := qr.Matrix(qr.ShortURL(h.baseURL, link.Key))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -777,7 +783,7 @@ func (h *LinksHandler) QRPNG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bitmap, err := qr.Matrix(qr.ShortURL(link.Key))
+	bitmap, err := qr.Matrix(qr.ShortURL(h.baseURL, link.Key))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

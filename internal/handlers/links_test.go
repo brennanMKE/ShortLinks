@@ -28,7 +28,7 @@ import (
 func linksMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewLinksHandler(links.NewStore(pool), nil, nil, nil, nil, clicks.NewStatsStore(pool), campaigns.NewStore(pool))
+	h := NewLinksHandler(links.NewStore(pool), nil, nil, nil, nil, clicks.NewStatsStore(pool), campaigns.NewStore(pool), testBaseURL)
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(h.Create)))

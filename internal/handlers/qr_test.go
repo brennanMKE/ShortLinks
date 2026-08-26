@@ -151,7 +151,7 @@ func TestLinksHandler_QRSVG_EncodesShortURLNotDestination(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 
-	wantShort := qr.ShortURL("qrs001")
+	wantShort := qr.ShortURL(testBaseURL, "qrs001")
 	got := decodeQRSVGBody(t, body)
 	if got != wantShort {
 		t.Fatalf("decoded %q, want short URL %q", got, wantShort)
@@ -187,7 +187,7 @@ func TestLinksHandler_QRPNG_EncodesShortURLNotDestination(t *testing.T) {
 		t.Fatalf("read body: %v", err)
 	}
 
-	wantShort := qr.ShortURL("qrp001")
+	wantShort := qr.ShortURL(testBaseURL, "qrp001")
 	got := decodeQRPNGBody(t, body)
 	if got != wantShort {
 		t.Fatalf("decoded %q, want short URL %q", got, wantShort)
@@ -390,7 +390,7 @@ func TestCampaignsHandler_QRZip_ContainsOneSVGAndPNGPerLink(t *testing.T) {
 		if strings.HasPrefix(name, "zipb") {
 			wantKey = "zipb"
 		}
-		wantShort := qr.ShortURL(wantKey)
+		wantShort := qr.ShortURL(testBaseURL, wantKey)
 		if decoded != wantShort {
 			t.Errorf("%s decoded to %q, want %q", name, decoded, wantShort)
 		}

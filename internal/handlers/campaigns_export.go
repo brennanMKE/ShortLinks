@@ -213,7 +213,7 @@ type campaignExportRow struct {
 // (key order) — same rows, same numbers, different order. Matching the
 // screen's own tiebreak (rather than documenting a divergence) is what
 // TestBuildCampaignExportRows_TiesPreserveLinkRowsOrder pins.
-func buildCampaignExportRows(linkRows []links.Link, byLink []clicks.LinkBucket) []campaignExportRow {
+func buildCampaignExportRows(baseURL string, linkRows []links.Link, byLink []clicks.LinkBucket) []campaignExportRow {
 	counts := make(map[string]int64, len(byLink))
 	for _, b := range byLink {
 		if b.Key != "" {
@@ -228,7 +228,7 @@ func buildCampaignExportRows(linkRows []links.Link, byLink []clicks.LinkBucket) 
 		total += c
 		rows = append(rows, campaignExportRow{
 			Key:            l.Key,
-			ShortURL:       qr.ShortURL(l.Key),
+			ShortURL:       qr.ShortURL(baseURL, l.Key),
 			Title:          l.Title,
 			DestinationURL: l.DestinationURL,
 			UTMSource:      l.UTMSource,
@@ -453,7 +453,7 @@ func (h *CampaignsHandler) Export(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows := buildCampaignExportRows(linkRows, rollup.ByLink)
+	rows := buildCampaignExportRows(h.baseURL, linkRows, rollup.ByLink)
 
 	var buf bytes.Buffer
 	buf.Write(utf8BOM)

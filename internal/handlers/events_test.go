@@ -188,7 +188,7 @@ func broadcastLinksMux(t *testing.T, pool *pgxpool.Pool, broker eventPublisher, 
 	if ruleCache != nil {
 		rules = ruleCache
 	}
-	h := NewLinksHandler(links.NewStore(pool), nil, rules, nil, broker, nil, nil)
+	h := NewLinksHandler(links.NewStore(pool), nil, rules, nil, broker, nil, nil, testBaseURL)
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(h.Create)))

@@ -7,6 +7,14 @@ export interface User {
   id: number;
   email: string;
   is_admin: boolean;
+  /**
+   * The deployment's public base URL — the Go service's configured `BASE_URL`
+   * (#0117), already trailing-slash-normalized by the server. Every short URL
+   * the UI displays or copies is built from it (see lib/links.ts's shortUrl),
+   * so the bundle carries no compiled-in domain and the same build is correct
+   * under any host.
+   */
+  base_url: string;
 }
 
 /**

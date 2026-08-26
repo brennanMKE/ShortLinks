@@ -8,8 +8,11 @@ The service listens on `127.0.0.1:8080`; Apache terminates TLS for
 `go.sstools.co` and reverse-proxies to it.
 
 If you are running your own instance under a different domain, substitute your
-domain wherever `go.sstools.co` appears and set `BASE_URL`, `WEBAUTHN_RP_ID`, and
-`WEBAUTHN_RP_ORIGIN` in the config accordingly — no code change is required.
+domain wherever `go.sstools.co` appears in these instructions (vhost, certificate
+paths) and set `BASE_URL`, `WEBAUTHN_RP_ID`, and `WEBAUTHN_RP_ORIGIN` in the
+config accordingly — no code change is required. `BASE_URL` alone determines the
+short links the app shows, copies, exports, and encodes into QR codes; nothing
+in the Go binary or the SPA bundle carries a compiled-in domain.
 
 ---
 
@@ -150,7 +153,7 @@ Fill in every value. The variables present in `.env.example` are:
 | Variable | Notes |
 |----------|-------|
 | `PORT` | Local port the Go service listens on. Keep `8080` to match the Apache vhost. |
-| `BASE_URL` | Public base URL, e.g. `https://go.sstools.co`. |
+| `BASE_URL` | Public base URL, e.g. `https://go.sstools.co`. This is the base of every short link the app displays, copies, exports to CSV, and encodes into a QR code, as well as the base of the verification/recovery links in outgoing email — set it to the domain users will actually visit. A trailing slash is trimmed. |
 | `DATABASE_URL` | `postgres://shortlinks:<your-password>@localhost:5432/shortlinks?sslmode=disable` — the password **must** match the one you set in `scripts/db/create.sql`. |
 | `WEBAUTHN_RP_ID` | The bare domain the browser is on, e.g. `go.sstools.co`. Must match exactly. |
 | `WEBAUTHN_RP_ORIGIN` | Full origin, e.g. `https://go.sstools.co`. |

@@ -155,6 +155,10 @@ type CampaignsHandler struct {
 	// wired), in which case the filter check is skipped entirely, matching
 	// LinksHandler's degradation.
 	rules ruleProvider
+	// baseURL is the deployment's configured BASE_URL (#0117), used by the
+	// bulk QR archive and the CSV export so a campaign's printed codes and
+	// exported short URLs resolve to the same origin the SPA displays.
+	baseURL string
 }
 
 // NewCampaignsHandler constructs a CampaignsHandler over the data layer, the
@@ -164,8 +168,8 @@ type CampaignsHandler struct {
 // nil auditor to disable audit writes, a nil statsProvider to omit the
 // stats/timeseries fields, and a nil ruleProvider to disable the batch-create
 // filter check (e.g. in unit tests that do not exercise those paths).
-func NewCampaignsHandler(store campaignStore, linkLookup campaignLinksProvider, auditor *audit.Logger, statsProvider campaignStatsProvider, rules ruleProvider) *CampaignsHandler {
-	return &CampaignsHandler{store: store, links: linkLookup, auditor: auditor, stats: statsProvider, rules: rules}
+func NewCampaignsHandler(store campaignStore, linkLookup campaignLinksProvider, auditor *audit.Logger, statsProvider campaignStatsProvider, rules ruleProvider, baseURL string) *CampaignsHandler {
+	return &CampaignsHandler{store: store, links: linkLookup, auditor: auditor, stats: statsProvider, rules: rules, baseURL: baseURL}
 }
 
 // campaignView is the JSON shape for a single campaign, shared by every
@@ -1504,7 +1508,7 @@ func (h *CampaignsHandler) QRZip(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for _, l := range rows {
-		bitmap, err := qr.Matrix(qr.ShortURL(l.Key))
+		bitmap, err := qr.Matrix(qr.ShortURL(h.baseURL, l.Key))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return

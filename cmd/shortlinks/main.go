@@ -171,7 +171,7 @@ func servePostgres(cfg *config.Config) error {
 	// the stats store so GET /api/links/{key} returns the #0030 utm_stats, and
 	// the campaign store so POST /api/links can resolve an optional
 	// campaign_id/campaign_slug (#0099).
-	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore, campaignStore)
+	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore, campaignStore, cfg.BaseURL)
 
 	// Campaign CRUD + link-membership + batch-create API (#0098, #0099,
 	// #0105). Link membership (assign/unassign/list) and batch-create both
@@ -187,12 +187,12 @@ func servePostgres(cfg *config.Config) error {
 	// for linksH's #0024 filter check) is wired again here so
 	// BatchCreateLinks (#0105) runs the SAME filter check single-create does,
 	// before inserting anything.
-	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger, statsStore, ruleCache)
+	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger, statsStore, ruleCache, cfg.BaseURL)
 
 	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
 	// read straight off the RequireSession-attached context, so the Svelte SPA
 	// can gate the admin view. Stateless — no data-layer dependency.
-	meH := handlers.NewMeHandler()
+	meH := handlers.NewMeHandler(cfg.BaseURL)
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
@@ -260,9 +260,9 @@ func serveDevMode(cfg *config.Config) error {
 	// NoCacheEvictor), ruleProvider (ds.Rules), statsProvider, and (#0099)
 	// campaignLookup (GetCampaignByID/GetCampaignBySlug) — all on the same
 	// *devstore.Store.
-	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds, ds)
+	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds, ds, cfg.BaseURL)
 
-	meH := handlers.NewMeHandler()
+	meH := handlers.NewMeHandler(cfg.BaseURL)
 
 	// Session middleware backed by the dev store.
 	requireSession := middleware.RequireSession(ds)
@@ -288,7 +288,7 @@ func serveDevMode(cfg *config.Config) error {
 	// responses to build against. ds also satisfies ruleProvider (already
 	// wired into linksH above), reused here so BatchCreateLinks runs the same
 	// (empty, in dev) filter check.
-	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil, ds, ds)
+	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil, ds, ds, cfg.BaseURL)
 
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,

@@ -1,7 +1,8 @@
 // Unit tests for the campaigns list/detail data-shaping helpers (#0103).
 // No DOM or Svelte — pure function tests only.
 
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { currentUser } from './stores';
 import type { CampaignStats, CampaignWithCounts, Link, LinkBucket } from './types';
 import {
   visibleCampaigns,
@@ -35,6 +36,18 @@ import {
   MAX_BATCH_CREATE_ROWS_PER_REQUEST,
   type BatchChannelRow,
 } from './campaigns';
+
+// #0117: copyAllShortUrlsText builds its URLs from the signed-in profile's
+// base_url rather than a compiled-in domain, so these tests sign a user in.
+// The base deliberately is not the production domain — a regression that
+// reintroduced a hard-coded one would fail here rather than pass by accident.
+beforeEach(() => {
+  currentUser.set({ id: 1, email: 'user@example.com', is_admin: false, base_url: 'https://example.test' });
+});
+
+afterEach(() => {
+  currentUser.set(null);
+});
 
 function campaign(overrides: Partial<CampaignWithCounts> = {}): CampaignWithCounts {
   return {
@@ -650,11 +663,11 @@ describe('parseKeysInput', () => {
   });
 
   it('extracts the key from a full short URL', () => {
-    expect(parseKeysInput('https://go.sstools.co/u/abc123')).toEqual(['abc123']);
+    expect(parseKeysInput('https://example.test/u/abc123')).toEqual(['abc123']);
   });
 
   it('handles a mix of bare keys and short URLs', () => {
-    expect(parseKeysInput('abc123, https://go.sstools.co/u/def456')).toEqual(['abc123', 'def456']);
+    expect(parseKeysInput('abc123, https://example.test/u/def456')).toEqual(['abc123', 'def456']);
   });
 
   it('de-duplicates while preserving first-seen order', () => {
@@ -674,17 +687,17 @@ describe('parseKeysInput', () => {
     // A pasted short URL that still has its UTM params attached — the
     // ordinary case for this whole feature — must still resolve to the key,
     // not fall through to treating the entire URL as the key.
-    expect(parseKeysInput('https://go.sstools.co/u/abc123?utm_source=newsletter')).toEqual([
+    expect(parseKeysInput('https://example.test/u/abc123?utm_source=newsletter')).toEqual([
       'abc123',
     ]);
   });
 
   it('extracts the key from a short URL carrying a fragment', () => {
-    expect(parseKeysInput('https://go.sstools.co/u/abc123#section')).toEqual(['abc123']);
+    expect(parseKeysInput('https://example.test/u/abc123#section')).toEqual(['abc123']);
   });
 
   it('extracts the key from a short URL with a trailing slash and a query string', () => {
-    expect(parseKeysInput('https://go.sstools.co/u/abc123/?utm_source=newsletter')).toEqual([
+    expect(parseKeysInput('https://example.test/u/abc123/?utm_source=newsletter')).toEqual([
       'abc123',
     ]);
   });
@@ -700,8 +713,8 @@ describe('copyAllShortUrlsText', () => {
   it('builds one short URL per line', () => {
     const text = copyAllShortUrlsText([{ key: 'abc' }, { key: 'def' }]);
     expect(text.split('\n')).toEqual([
-      'https://go.sstools.co/u/abc',
-      'https://go.sstools.co/u/def',
+      'https://example.test/u/abc',
+      'https://example.test/u/def',
     ]);
   });
 

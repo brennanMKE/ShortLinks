@@ -16,6 +16,12 @@ import (
 	skipqr "github.com/skip2/go-qrcode"
 )
 
+// testBase is a stand-in for the deployment's configured BASE_URL (#0117).
+// The value no longer lives in the package — ShortURL takes it as an
+// argument — so the tests supply their own rather than asserting against a
+// compiled-in domain.
+const testBase = "https://example.test"
+
 // tryDecodePNG is decodePNG's non-fatal twin: it reports whether the
 // independent decoder succeeded rather than failing the test on an error,
 // for tests that expect (and want to assert) a decode FAILURE.
@@ -157,7 +163,7 @@ func decodeSVG(t *testing.T, svgBytes []byte) string {
 // ── Core round trip: encode → (independently) decode ────────────────────
 
 func TestMatrixRenderPNG_DecodesToExactShortURL(t *testing.T) {
-	want := ShortURL("abc123")
+	want := ShortURL(testBase, "abc123")
 	bitmap, err := Matrix(want)
 	if err != nil {
 		t.Fatalf("Matrix: %v", err)
@@ -173,7 +179,7 @@ func TestMatrixRenderPNG_DecodesToExactShortURL(t *testing.T) {
 }
 
 func TestMatrixRenderSVG_DecodesToExactShortURL(t *testing.T) {
-	want := ShortURL("def456")
+	want := ShortURL(testBase, "def456")
 	bitmap, err := Matrix(want)
 	if err != nil {
 		t.Fatalf("Matrix: %v", err)
@@ -191,13 +197,13 @@ func TestMatrixRenderSVG_DecodesToExactShortURL(t *testing.T) {
 // plausible destination URL (different host, different path shape) and
 // decodes it back, asserting the result is byte-identical to the short URL
 // and explicitly NOT equal to the destination. A future change that swaps
-// ShortURL(key) for a link's DestinationURL at a call site would still pass
+// ShortURL(testBase, key) for a link's DestinationURL at a call site would still pass
 // a weaker "decodes to SOME url" test; this one fails specifically because
 // the decoded text stops matching either string it's compared against in
 // the way the test expects.
 func TestShortURL_IsNotDestinationURL(t *testing.T) {
 	key := "campaign7"
-	short := ShortURL(key)
+	short := ShortURL(testBase, key)
 	destination := "https://example.com/really/long/landing/page?utm_source=flyer"
 
 	if short == destination {
@@ -222,12 +228,27 @@ func TestShortURL_IsNotDestinationURL(t *testing.T) {
 }
 
 func TestShortURL_Format(t *testing.T) {
-	if got, want := ShortURL("abc123"), "https://go.sstools.co/u/abc123"; got != want {
+	if got, want := ShortURL(testBase, "abc123"), "https://example.test/u/abc123"; got != want {
 		t.Fatalf("ShortURL = %q, want %q", got, want)
 	}
 	// Defensive percent-encoding, mirroring links.ts's shortUrl().
-	if got, want := ShortURL("a b"), "https://go.sstools.co/u/a%20b"; got != want {
-		t.Fatalf("ShortURL(\"a b\") = %q, want %q", got, want)
+	if got, want := ShortURL(testBase, "a b"), "https://example.test/u/a%20b"; got != want {
+		t.Fatalf("ShortURL(testBase, \"a b\") = %q, want %q", got, want)
+	}
+}
+
+// A BASE_URL written with a trailing slash is as valid as one without, and
+// operators write both. Both must yield the same short URL — not a doubled
+// separator that would make the QR payload disagree with the SPA's displayed
+// URL for the very same link (#0117).
+func TestShortURL_TrailingSlashOnBase(t *testing.T) {
+	with := ShortURL("https://example.test/", "abc123")
+	without := ShortURL("https://example.test", "abc123")
+	if with != without {
+		t.Fatalf("trailing slash changed the result: %q vs %q", with, without)
+	}
+	if want := "https://example.test/u/abc123"; with != want {
+		t.Fatalf("ShortURL = %q, want %q", with, want)
 	}
 }
 
@@ -250,7 +271,7 @@ func TestLevel_IsHighest(t *testing.T) {
 func TestLevel_TypicalShortURLStaysSmall(t *testing.T) {
 	// 12 chars: links.key's VARCHAR(12) maximum, i.e. the longest key this
 	// package could ever be asked to encode.
-	bitmap, err := Matrix(ShortURL("abcdEFGH1234"))
+	bitmap, err := Matrix(ShortURL(testBase, "abcdEFGH1234"))
 	if err != nil {
 		t.Fatalf("Matrix: %v", err)
 	}
@@ -269,7 +290,7 @@ func TestLevel_TypicalShortURLStaysSmall(t *testing.T) {
 // because nothing was encoded). A regression that flipped
 // skip2/go-qrcode's DisableBorder to true would fail this test.
 func TestMatrix_QuietZonePreserved(t *testing.T) {
-	bitmap, err := Matrix(ShortURL("qz1"))
+	bitmap, err := Matrix(ShortURL(testBase, "qz1"))
 	if err != nil {
 		t.Fatalf("Matrix: %v", err)
 	}
@@ -317,7 +338,7 @@ const quietZoneModules = 4
 // TestRenderPNG_BlackenedQuietZoneBreaksDecode below for the test that
 // exercises the decoder meaningfully.
 func TestRenderPNG_QuietZoneIsBlankWhenCropped(t *testing.T) {
-	bitmap, err := Matrix(ShortURL("qz2"))
+	bitmap, err := Matrix(ShortURL(testBase, "qz2"))
 	if err != nil {
 		t.Fatalf("Matrix: %v", err)
 	}
@@ -368,7 +389,7 @@ func TestRenderPNG_QuietZoneIsBlankWhenCropped(t *testing.T) {
 // meaningful complement to the pixel-level check above, which only proves
 // the margin is blank as rendered, not that a scanner actually needs it.
 func TestRenderPNG_BlackenedQuietZoneBreaksDecode(t *testing.T) {
-	want := ShortURL("qz4")
+	want := ShortURL(testBase, "qz4")
 	bitmap, err := Matrix(want)
 	if err != nil {
 		t.Fatalf("Matrix: %v", err)
@@ -421,7 +442,7 @@ func TestRenderPNG_BlackenedQuietZoneBreaksDecode(t *testing.T) {
 // would be caught here even though the file would still open and even still
 // decode.
 func TestRenderSVG_NoEmbeddedRaster(t *testing.T) {
-	bitmap, err := Matrix(ShortURL("vec1"))
+	bitmap, err := Matrix(ShortURL(testBase, "vec1"))
 	if err != nil {
 		t.Fatalf("Matrix: %v", err)
 	}
@@ -450,7 +471,7 @@ func TestRenderSVG_NoEmbeddedRaster(t *testing.T) {
 // at a different resolution would not "scale to poster size without
 // artifacts" as the acceptance criterion requires.
 func TestRenderSVG_ScalesWithoutChangingContent(t *testing.T) {
-	bitmap, err := Matrix(ShortURL("scale1"))
+	bitmap, err := Matrix(ShortURL(testBase, "scale1"))
 	if err != nil {
 		t.Fatalf("Matrix: %v", err)
 	}

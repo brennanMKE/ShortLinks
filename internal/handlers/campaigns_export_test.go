@@ -77,7 +77,7 @@ func TestBuildCampaignExportRows_MatchesClicksAndComputesShare(t *testing.T) {
 		// ccc333 has no entry — zero clicks in window.
 	}
 
-	rows := buildCampaignExportRows(linkRows, byLink)
+	rows := buildCampaignExportRows(testBaseURL, linkRows, byLink)
 	if len(rows) != 3 {
 		t.Fatalf("len(rows) = %d, want 3", len(rows))
 	}
@@ -126,7 +126,7 @@ func TestBuildCampaignExportRows_NonExactShareIsRounded(t *testing.T) {
 		{Key: "two", Count: 2},
 		{Key: "one", Count: 1},
 	}
-	rows := buildCampaignExportRows(linkRows, byLink)
+	rows := buildCampaignExportRows(testBaseURL, linkRows, byLink)
 	if len(rows) != 2 {
 		t.Fatalf("len(rows) = %d, want 2", len(rows))
 	}
@@ -161,7 +161,7 @@ func TestBuildCampaignExportRows_TiesPreserveLinkRowsOrder(t *testing.T) {
 		{Key: "expb", Title: "B", DestinationURL: "https://b.example.com"},
 		{Key: "expa", Title: "A", DestinationURL: "https://a.example.com"}, // oldest (arrives last)
 	}
-	rows := buildCampaignExportRows(linkRows, nil) // every row ties at 0 clicks
+	rows := buildCampaignExportRows(testBaseURL, linkRows, nil) // every row ties at 0 clicks
 	if len(rows) != 3 {
 		t.Fatalf("len(rows) = %d, want 3", len(rows))
 	}
@@ -184,7 +184,7 @@ func TestBuildCampaignExportRows_ZeroTotalClicksYieldsZeroSharesNotDivideByZero(
 		{Key: "z1", Title: "One", DestinationURL: "https://one.example.com"},
 		{Key: "z2", Title: "Two", DestinationURL: "https://two.example.com"},
 	}
-	rows := buildCampaignExportRows(linkRows, nil)
+	rows := buildCampaignExportRows(testBaseURL, linkRows, nil)
 	if len(rows) != 2 {
 		t.Fatalf("len(rows) = %d, want 2", len(rows))
 	}
@@ -209,7 +209,7 @@ func TestBuildCampaignExportRows_UnassignedLinkClicksExcludedFromDenominator(t *
 		{Key: "listed", Count: 5},
 		{Key: "since-unassigned", Count: 95}, // not in linkRows
 	}
-	rows := buildCampaignExportRows(linkRows, byLink)
+	rows := buildCampaignExportRows(testBaseURL, linkRows, byLink)
 	if len(rows) != 1 {
 		t.Fatalf("len(rows) = %d, want 1 (only currently-assigned links get a row)", len(rows))
 	}
@@ -229,7 +229,7 @@ func TestBuildCampaignExportRows_UnassignedLinkClicksExcludedFromDenominator(t *
 // the handler-level equivalent (asserting the actual CSV body) lives in
 // TestCampaignsExport_EmptyCampaignHasHeaderOnly.
 func TestBuildCampaignExportRows_EmptyCampaignReturnsNoRows(t *testing.T) {
-	rows := buildCampaignExportRows(nil, nil)
+	rows := buildCampaignExportRows(testBaseURL, nil, nil)
 	if len(rows) != 0 {
 		t.Errorf("len(rows) = %d, want 0", len(rows))
 	}
@@ -535,7 +535,7 @@ func TestSubtractOneUTCDate(t *testing.T) {
 func campaignsMuxNoStats(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), nil, nil, nil)
+	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), nil, nil, nil, testBaseURL)
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/campaigns", requireSession(http.HandlerFunc(h.Create)))

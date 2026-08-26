@@ -39,7 +39,7 @@ func campaignsMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 func campaignsMuxWithRules(t *testing.T, pool *pgxpool.Pool, rules ruleProvider) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), nil, clicks.NewStatsStore(pool), rules)
+	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), nil, clicks.NewStatsStore(pool), rules, testBaseURL)
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/campaigns", requireSession(http.HandlerFunc(h.List)))
@@ -1892,7 +1892,7 @@ func TestCampaignsBatchCreate_FilterDeniedRowRejectsWholeBatch(t *testing.T) {
 func campaignsAuditBatchMux(t *testing.T, pool *pgxpool.Pool, ruleCache *cache.RuleCache) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
-	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), audit.New(pool), clicks.NewStatsStore(pool), ruleCache)
+	h := NewCampaignsHandler(campaigns.NewStore(pool), links.NewStore(pool), audit.New(pool), clicks.NewStatsStore(pool), ruleCache, testBaseURL)
 	requireSession := middleware.RequireSession(authStore)
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/campaigns", requireSession(http.HandlerFunc(h.Create)))

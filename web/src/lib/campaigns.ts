@@ -352,7 +352,7 @@ export function chunkKeys(keys: string[], size = MAX_ASSIGN_KEYS_PER_REQUEST): s
 /**
  * Parses the assign form's free-text input into a de-duplicated, ordered
  * list of link keys. Accepts bare keys, full short URLs
- * (https://go.sstools.co/u/{key}), or a mix, separated by commas,
+ * ({BASE_URL}/u/{key}), or a mix, separated by commas,
  * whitespace, or newlines — so a user can paste several copied short URLs
  * at once. Blank entries are dropped.
  */
