@@ -68,6 +68,32 @@ export function qrPngUrl(key: string): string {
 }
 
 /**
+ * The maximum length of a custom alias, mirroring the server's `validKey`
+ * (internal/handlers/links.go) and the `links.key VARCHAR(12)` column it
+ * guards. Exported so the form's hint can name the number rather than
+ * restating it in a second place that could drift from this one.
+ */
+export const MAX_KEY_LENGTH = 12;
+
+/**
+ * Client-side pre-validation of a custom alias, mirroring the server's
+ * `validKey`: 1-{@link MAX_KEY_LENGTH} characters from the url-safe alphabet
+ * `[A-Za-z0-9_-]`. An empty alias is not invalid — it means "generate one".
+ *
+ * The destination URL field has had a live gate since #0033; the alias field
+ * had none, so its one real constraint was invisible until a round trip failed
+ * — and that failure was then reported on the URL field (#0118). Gating here
+ * makes the common case (an alias a couple of characters too long) a hint the
+ * user sees while typing instead of a misdirected error after submitting.
+ */
+export function isValidKey(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (trimmed === '') return true;
+  if (trimmed.length > MAX_KEY_LENGTH) return false;
+  return /^[A-Za-z0-9_-]+$/.test(trimmed);
+}
+
+/**
  * Client-side pre-validation of a destination URL, mirroring the server's
  * `validDestinationURL` (internal/handlers/links.go): a syntactically valid
  * absolute URL with an http or https scheme and a non-empty host. This is a
@@ -146,12 +172,57 @@ interface UrlDeniedBody {
 }
 
 /**
+ * The server's own error text for a failed request, or '' when the body did
+ * not carry one. `ApiError.message` is already built from the JSON envelope's
+ * `error` field (see api.ts's request), falling back to "HTTP <status>" — a
+ * string worth suppressing in favor of our own wording, since it tells the
+ * user nothing.
+ */
+function serverMessage(err: ApiError): string {
+  const m = err.message.trim();
+  if (m === '' || /^HTTP \d+$/.test(m)) return '';
+  return m;
+}
+
+/**
+ * Which form field a 400's message is about. POST /api/links
+ * (internal/handlers/links.go Create) has four distinct 400s and only two are
+ * about a field the create form shows:
+ *
+ *   "custom key must be 1-12 url-safe characters" → the alias input
+ *   "destination_url must be a valid absolute http(s) URL" → the URL input
+ *   "invalid request body" / "campaigns are not available" → neither; these
+ *     are client/server-wiring faults with no field to point at, so they
+ *     surface as a banner (field: null) rather than blaming an input.
+ *
+ * Matching on the message text rather than a machine-readable code is
+ * deliberate: the API's error envelope is `{error: "<prose>"}` everywhere, and
+ * introducing codes for this one endpoint would be a wider API change. The
+ * match is on a distinctive substring, so rewording the tail of a server
+ * message does not break it — and an unrecognized 400 degrades to a banner
+ * carrying the server's exact words, which is still informative.
+ */
+function fieldFor400(message: string): 'key' | 'destination_url' | null {
+  const m = message.toLowerCase();
+  if (m.includes('custom key')) return 'key';
+  if (m.includes('destination_url')) return 'destination_url';
+  return null;
+}
+
+/**
  * Map an ApiError thrown by `createLink` to the notice to display:
  *  - 422 url_denied → the denial reason label (from the body's `label`, falling
  *    back to the code → label table, then a generic message).
  *  - 409 → an inline error on the custom alias field (key already taken).
- *  - 400 → an inline error on the destination URL field (bad URL).
+ *  - 400 → the SERVER's own message, on whichever field that message is about
+ *    (see fieldFor400 below) — never a fixed sentence of our own.
  *  - anything else → a generic error banner.
+ *
+ * The 400 branch used to return a hard-coded "Enter a valid absolute http(s)
+ * URL." on the destination field for every 400, which sent users to edit the
+ * one field that was correct while the real problem (usually an over-long
+ * custom alias) went unmarked (#0118). POST /api/links has four distinct 400s
+ * and only one of them is about the URL.
  */
 export function noticeForError(err: unknown): CreateNotice {
   if (err instanceof ApiError) {
@@ -174,11 +245,12 @@ export function noticeForError(err: unknown): CreateNotice {
       };
     }
     if (err.status === 400) {
-      return {
-        kind: 'error',
-        field: 'destination_url',
-        message: 'Enter a valid absolute http(s) URL.',
-      };
+      // A 400 whose body carried no message is unattributable — naming a field
+      // would be a guess, and guessing wrong is the whole of #0118. Say what is
+      // known and point at both inputs the user can act on.
+      const message =
+        serverMessage(err) || 'Could not create the link — check the URL and the custom alias.';
+      return { kind: 'error', field: fieldFor400(message), message };
     }
     if (err.status === 401) {
       return { kind: 'error', field: null, message: 'Your session expired. Please sign in again.' };

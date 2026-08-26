@@ -13,6 +13,8 @@ import {
   qrSvgUrl,
   qrPngUrl,
   isValidHttpUrl,
+  isValidKey,
+  MAX_KEY_LENGTH,
   deniedReasonLabel,
   noticeForCreated,
   noticeForError,
@@ -196,10 +198,59 @@ describe('noticeForError', () => {
     if (n.kind === 'error') expect(n.field).toBe('key');
   });
 
-  it('maps 400 to an inline error on the destination_url field', () => {
-    const n = noticeForError(new ApiError(400, 'bad url', { error: 'bad url' }));
+  // #0118 — POST /api/links has four distinct 400s (internal/handlers/links.go
+  // Create). Every one of them used to be reported as "Enter a valid absolute
+  // http(s) URL." on the destination field, which sent users to edit the one
+  // input that was correct. Each shape below is the server's literal message.
+
+  it("maps the 400 about the URL to the destination_url field, using the server's words", () => {
+    const msg = 'destination_url must be a valid absolute http(s) URL';
+    const n = noticeForError(new ApiError(400, msg, { error: msg }));
     expect(n.kind).toBe('error');
-    if (n.kind === 'error') expect(n.field).toBe('destination_url');
+    if (n.kind === 'error') {
+      expect(n.field).toBe('destination_url');
+      expect(n.message).toBe(msg);
+    }
+  });
+
+  it('maps the 400 about the custom alias to the key field, not the URL field', () => {
+    const msg = 'custom key must be 1-12 url-safe characters';
+    const n = noticeForError(new ApiError(400, msg, { error: msg }));
+    expect(n.kind).toBe('error');
+    if (n.kind === 'error') {
+      expect(n.field).toBe('key');
+      expect(n.message).toBe(msg);
+    }
+  });
+
+  it('maps an "invalid request body" 400 to a banner, blaming no field', () => {
+    const msg = 'invalid request body';
+    const n = noticeForError(new ApiError(400, msg, { error: msg }));
+    expect(n.kind).toBe('error');
+    if (n.kind === 'error') {
+      expect(n.field).toBeNull();
+      expect(n.message).toBe(msg);
+    }
+  });
+
+  it('maps a "campaigns are not available" 400 to a banner, blaming no field', () => {
+    const msg = 'campaigns are not available';
+    const n = noticeForError(new ApiError(400, msg, { error: msg }));
+    expect(n.kind).toBe('error');
+    if (n.kind === 'error') {
+      expect(n.field).toBeNull();
+      expect(n.message).toBe(msg);
+    }
+  });
+
+  it('falls back to a banner naming both inputs when a 400 carries no message', () => {
+    const n = noticeForError(new ApiError(400, 'HTTP 400', undefined));
+    expect(n.kind).toBe('error');
+    if (n.kind === 'error') {
+      // Unattributable: naming one field would be the guess #0118 is about.
+      expect(n.field).toBeNull();
+      expect(n.message).toMatch(/alias/i);
+    }
   });
 
   it('maps a non-ApiError to a generic connection error', () => {
@@ -233,5 +284,32 @@ describe('destinationDomain', () => {
 
   it('falls back to the raw string for an unparseable value', () => {
     expect(destinationDomain('not a url')).toBe('not a url');
+  });
+});
+
+describe('isValidKey', () => {
+  it('treats an empty alias as valid — it means "generate one"', () => {
+    expect(isValidKey('')).toBe(true);
+    expect(isValidKey('   ')).toBe(true);
+  });
+
+  it('accepts letters, digits, hyphen and underscore up to the cap', () => {
+    expect(isValidKey('launch')).toBe(true);
+    expect(isValidKey('a-b_C9')).toBe(true);
+    expect(isValidKey('a'.repeat(MAX_KEY_LENGTH))).toBe(true);
+  });
+
+  // The reported case (#0118): both aliases the user tried were over the cap
+  // by one and two characters, and the failure was reported on the URL field.
+  it('rejects an alias past the 12-character cap', () => {
+    expect(isValidKey('soldering0903')).toBe(false); // 13
+    expect(isValidKey('soldering-0903')).toBe(false); // 14
+    expect(isValidKey('a'.repeat(MAX_KEY_LENGTH + 1))).toBe(false);
+  });
+
+  it('rejects characters outside the server\'s url-safe alphabet', () => {
+    expect(isValidKey('has space')).toBe(false);
+    expect(isValidKey('dot.dot')).toBe(false);
+    expect(isValidKey('sla/sh')).toBe(false);
   });
 });

@@ -45,6 +45,8 @@
   import {
     shortUrl,
     isValidHttpUrl,
+    isValidKey,
+    MAX_KEY_LENGTH,
     noticeForCreated,
     noticeForError,
     linkStatus,
@@ -164,7 +166,13 @@
   let urlError = $state<string | null>(null);
 
   const urlInvalid = $derived(destinationUrl.trim() !== '' && !isValidHttpUrl(destinationUrl));
-  const canSubmit = $derived(!submitting && destinationUrl.trim() !== '' && !urlInvalid);
+  // #0118: the alias has a real server-side constraint (1-12 url-safe chars)
+  // that used to surface only as a failed create reported on the URL field.
+  // Gate it here the same way the destination URL has been gated since #0033.
+  const keyInvalid = $derived(!isValidKey(customKey));
+  const canSubmit = $derived(
+    !submitting && destinationUrl.trim() !== '' && !urlInvalid && !keyInvalid,
+  );
 
   // ── List state ──────────────────────────────────────────────────────────────
   let loading = $state(true);
@@ -413,9 +421,14 @@
             keyError = null;
           }}
           disabled={submitting}
-          aria-invalid={keyError !== null}
-          class:input-error={keyError !== null}
+          aria-invalid={keyInvalid || keyError !== null}
+          class:input-error={keyInvalid || keyError !== null}
         />
+        {#if keyInvalid}
+          <p class="text-warn" role="status">
+            Up to {MAX_KEY_LENGTH} characters, letters and numbers plus - and _.
+          </p>
+        {/if}
         {#if keyError}
           <p class="text-error" role="alert">{keyError}</p>
         {/if}
