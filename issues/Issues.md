@@ -65,9 +65,23 @@ cd web && npm run build && cd .. && go build ./cmd/shortlinks
 
 `issues/` is tracked in this repo. Each lifecycle event produces a commit per the skill's conventions.
 
+## Phases
+
+Work the open issues in this order. Finish a phase before starting the next unless an issue says otherwise. Each issue's `## Relation` section names its phase. File new issues into the phase they fit, or add a phase.
+
+| Phase | Issues | Rationale |
+|---|---|---|
+| **1. Green test baseline** | [#0116](0116.md), [#0110](0110.md) | `go test ./...` must pass on a clean checkout, and the test DB must match a clean migration replay, before any later issue can be verified. |
+| **2. Backend correctness** | [#0109](0109.md), [#0119](0119.md) | Editing a link skips the URL filter (a security gap), and every click chart hides today. Both are small, server-side, and independent of the SPA work. |
+| **3. SPA routing** | [#0120](0120.md) | Replaces store-based navigation in every view with hash routes and `<a>` Links. Goes before the table and E2E work so neither is built around navigation that is about to be replaced. |
+| **4. Links table layout** | [#0113](0113.md), [#0114](0114.md), [#0115](0115.md) | Same tables, same zero-horizontal-scroll invariant ([#0103](0103.md)). Goes after #0120, whose row navigation becomes anchors. |
+| **5. E2E harness** | [#0080](0080.md) | Blocks every E2E coverage issue. Hash URLs from #0120 let page objects deep-link. |
+| **6. E2E coverage** | [#0081](0081.md)–[#0091](0091.md), then umbrella [#0079](0079.md) | Can run in any order once #0080 lands. #0084 covers the `/u/{key}` redirect check. #0079 closes when its sub-issues do. |
+| **Ops (owner)** | [#0045](0045.md) | SES sandbox and domain verification is done in the AWS console, not in code. It blocks nothing above. |
+
 ## Resolution workflow (review-gated subagents)
 
-Issues are worked **one at a time, in ascending order**, each on its own branch `issue/NNNN` cut from `main`, and nothing reaches `main` until an independent review approves. Three roles:
+Issues are worked **one at a time, in phase order (see [Phases](#phases)), ascending by number within a phase**, each on its own branch `issue/NNNN` cut from `main`, and nothing reaches `main` until an independent review approves. Three roles:
 
 - **Implementer subagent — model `claude-sonnet-4-6`.** Implements and verifies on the issue branch, committing checkpoints prefixed `#NNNN`. Flips the issue to `in-progress`. Never touches `main`, never edits resolution sections.
 - **Reviewer subagent — model `claude-opus-4-8`.** Reviews `git diff main...issue/NNNN` against the issue's acceptance criteria. Returns **Approve** or **Request changes** with a specific list. Never edits code, commits, or changes status.
