@@ -14,9 +14,10 @@
   2. A LIST of the user's links, loaded on mount via listLinks (REST). Each row
      shows the short URL (with copy), destination domain, title, created date,
      click count, and an active/denied/inactive badge; clicking a row opens the
-     link-detail view (#0035) by setting selectedLinkKey + currentView; a
-     deactivate action calls deactivateLink and updates the row in place.
-     Pagination via ?page=/?per_page= (the server's params).
+     link-detail view (#0035) by navigating to /links/{key} (#0120 — the key
+     is now a route param, not a store); a deactivate action calls
+     deactivateLink and updates the row in place. Pagination via
+     ?page=/?per_page= (the server's params).
 
   The list is kept in the shared `links` store; on mount we subscribe to the
   /api/events SSE stream (#0034) and prepend live link.created events to it
@@ -27,12 +28,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import {
-    currentView,
-    currentUser,
-    links,
-    selectedLinkKey,
-  } from '../lib/stores';
+  import { currentUser, links } from '../lib/stores';
   import {
     listLinks,
     createLink,
@@ -42,6 +38,8 @@
     ApiError,
     type CreateLinkInput,
   } from '../lib/api';
+  import { navigate, replace } from '../lib/hashRouter.svelte';
+  import Link from '../lib/Link.svelte';
   import {
     shortUrl,
     isValidHttpUrl,
@@ -55,7 +53,7 @@
     type CreateNotice,
   } from '../lib/links';
   import { subscribeLinks, prependUniqueByKey } from '../lib/events';
-  import type { Link, Campaign } from '../lib/types';
+  import type { Campaign } from '../lib/types';
   import { emptyUtmParams, composeUtmUrl, isUtmEmpty, fillBlankUtmParams } from '../lib/utm';
   import type { UtmParams } from '../lib/utm';
   import Button from '../lib/Button.svelte';
@@ -199,8 +197,10 @@
       total = res.total;
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
+        // App.svelte's guard effect reacts to currentUser going null and
+        // bounces to /login, preserving this route as the redirect target
+        // (#0120) — no navigation call needed here.
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       loadError = 'Could not load your links. Please try again.';
@@ -269,7 +269,6 @@
         else if (n.field === 'destination_url') urlError = n.message;
         else if (err instanceof ApiError && err.status === 401) {
           currentUser.set(null);
-          currentView.set('login');
         }
       }
     } finally {
@@ -293,8 +292,7 @@
 
   // ── Row interactions ────────────────────────────────────────────────────────
   function openDetail(key: string) {
-    selectedLinkKey.set(key);
-    currentView.set('link-detail');
+    navigate('/links/' + encodeURIComponent(key));
   }
 
   async function handleDeactivate(key: string) {
@@ -307,7 +305,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
       }
     } finally {
       const { [key]: _removed, ...rest } = deactivating;
@@ -323,11 +320,11 @@
     }
     currentUser.set(null);
     links.set([]);
-    currentView.set('login');
-  }
-
-  function go(view: 'campaigns' | 'account' | 'admin') {
-    currentView.set(view);
+    // Explicit sign-out: replace straight to a bare /login, with no redirect
+    // target — distinct from the involuntary 401 case above, where clearing
+    // currentUser lets App.svelte's guard effect preserve the current route
+    // to return to after signing back in.
+    replace('/login');
   }
 
   function formatDate(iso: string): string {
@@ -358,11 +355,11 @@
   <header class="app-header">
     <h1 class="app-title">{APP_NAME}</h1>
     <nav class="nav-tabs" aria-label="Primary">
-      <button type="button" class="nav-tab active" aria-current="page">Dashboard</button>
-      <button type="button" class="nav-tab" onclick={() => go('campaigns')}>Campaigns</button>
-      <button type="button" class="nav-tab" onclick={() => go('account')}>Account</button>
+      <Link to="/" class="nav-tab">Dashboard</Link>
+      <Link to="/campaigns" class="nav-tab">Campaigns</Link>
+      <Link to="/account" class="nav-tab">Account</Link>
       {#if $currentUser?.is_admin}
-        <button type="button" class="nav-tab" onclick={() => go('admin')}>Admin</button>
+        <Link to="/admin" class="nav-tab">Admin</Link>
       {/if}
     </nav>
     <Button variant="default" onclick={handleSignOut}>Sign out</Button>
@@ -635,9 +632,15 @@
           <tbody>
             {#each $links as link (link.key)}
               {@const status = linkStatus(link)}
-              <tr class="link-row" onclick={() => openDetail(link.key)}>
+              <tr
+                class="link-row"
+                onclick={(e) => {
+                  if ((e.target as Element).closest('a')) return;
+                  openDetail(link.key);
+                }}
+              >
                 <td class="short-cell">
-                  <span class="mono">/u/{link.key}</span>
+                  <Link to={'/links/' + encodeURIComponent(link.key)} class="mono short-key-link">/u/{link.key}</Link>
                   <Button
                     variant="subtle"
                     onclick={(e) => {
@@ -702,59 +705,30 @@
 </div>
 
 <style>
-  .nav-tabs {
-    display: flex;
-    gap: var(--space-1);
-    flex: 1;
-    padding: 0 var(--space-2);
-  }
-  .nav-tab {
-    background: none;
-    border: none;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius);
-    cursor: pointer;
-    color: var(--text-muted);
-    font-size: var(--fs-md);
-    font-family: var(--font);
-    /* Ensure a comfortable tap target on mobile */
-    min-height: 40px;
-    display: inline-flex;
-    align-items: center;
-  }
-  .nav-tab.active {
-    background: var(--accent-subtle);
-    color: var(--accent);
-    font-weight: 600;
-  }
-  .nav-tab:hover:not(.active) {
-    background: var(--bg-subtle);
-    color: var(--text);
-  }
+  /* .nav-tabs/.nav-tab are global — see app.css (#0120). */
 
-  @media (max-width: 480px) {
-    /* On narrow screens, let the nav-tabs row wrap below the title.
-       The sign-out button stays on the same row as the title via order. */
-    .nav-tabs {
-      order: 3;          /* push below title + sign-out */
-      flex: 0 0 100%;    /* take full width on its own line */
-      padding: 0;
-      flex-wrap: wrap;
-    }
-    .nav-tab {
-      font-size: var(--fs-base);
-      padding: var(--space-1) var(--space-3);
-    }
-  }
   .short-cell {
     display: flex;
     align-items: center;
     gap: var(--space-2);
     white-space: nowrap;
   }
-  .mono {
+  /*
+   * No local `.mono` rule here: Dashboard's only monospace text is the
+   * Link below, and a scoped rule can never reach an element Link.svelte
+   * renders in ITS OWN template (see app.css's ".nav-tab" comment) — Svelte
+   * would flag it "unused CSS" since nothing in THIS file's own markup
+   * carries a bare "mono" class. Styling instead lives entirely on
+   * :global(.short-key-link), a name unique to this one Link so it can
+   * never leak onto another file's own (separately scoped) ".mono" text —
+   * e.g. CampaignDetail's slug/key cells, which must stay plain monospace,
+   * not link-colored.
+   */
+  :global(.short-key-link) {
     font-family: var(--font-mono);
     font-size: var(--fs-sm);
+    color: var(--accent);
+    text-decoration: underline;
   }
   .dest-cell {
     max-width: 200px;

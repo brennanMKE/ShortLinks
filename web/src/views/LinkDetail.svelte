@@ -1,7 +1,9 @@
 <!--
-  Link Detail view (#0035, #0049). Shows the full stats for a single link, read
-  by key from the shared `selectedLinkKey` store (the Dashboard sets it when a
-  row is clicked — there is no URL router, so the key lives in a store).
+  Link Detail view (#0035, #0049). Shows the full stats for a single link,
+  read by the `key` route param (#0120 — Dashboard/CampaignDetail navigate to
+  /links/{key}; this component fetches its own record by that param on
+  mount, a cold load, since Router.svelte remounts it whenever the path
+  changes).
 
   On mount it loads GET /api/links/{key} via getLink, surfacing loading / error
   states (a 404 maps to a "not found" message with a Back action). It displays
@@ -11,7 +13,7 @@
   (by_source / by_medium / by_campaign, now as horizontal bar charts with
   proportional widths). A Deactivate action calls deactivateLink and reflects the
   new status here and in the shared `links` store; it is hidden once the link is
-  inactive/denied. A Back action returns to the dashboard via a store write.
+  inactive/denied. A Back action returns to the dashboard via a real Link.
 
   An Edit action (#0099) opens a form that REPOPULATES the UTM builder from the
   link's discrete utm_*/placement columns via utmParamsFromLink (lib/utm.ts) —
@@ -28,7 +30,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentView, currentUser, links, selectedLinkKey } from '../lib/stores';
+  import { currentUser, links } from '../lib/stores';
   import { getLink, updateLink, deactivateLink, ApiError } from '../lib/api';
   import { shortUrl, qrSvgUrl, qrPngUrl, linkStatus, isValidHttpUrl } from '../lib/links';
   import {
@@ -42,10 +44,18 @@
   import type { LinkDetail } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import Link from '../lib/Link.svelte';
   import ClicksChart from '../lib/ClicksChart.svelte';
   import UTMBarChart from '../lib/UTMBarChart.svelte';
   import UtmField from '../lib/UtmField.svelte';
   import UtmConventions from '../lib/UtmConventions.svelte';
+
+  interface Props {
+    /** The link key — a route param from /links/:key (#0120). */
+    key: string;
+  }
+
+  let { key }: Props = $props();
 
   let loading = $state(true);
   let notFound = $state(false);
@@ -134,7 +144,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       saveError = 'Could not save changes. Please try again.';
@@ -153,7 +162,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       if (err instanceof ApiError && err.status === 404) {
@@ -190,7 +198,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       loadError = 'Could not deactivate this link. Please try again.';
@@ -199,25 +206,14 @@
     }
   }
 
-  function goDashboard() {
-    selectedLinkKey.set(null);
-    currentView.set('dashboard');
-  }
-
   onMount(() => {
-    const key = $selectedLinkKey;
-    if (!key) {
-      loading = false;
-      notFound = true;
-      return;
-    }
     load(key);
   });
 </script>
 
 <div class="app-shell detail-shell">
   <header class="app-header">
-    <Button onclick={goDashboard}>&larr; Dashboard</Button>
+    <Link to="/" class="btn-link">&larr; Dashboard</Link>
     <h1 class="app-title">Link detail</h1>
   </header>
 
@@ -226,14 +222,12 @@
   {:else if notFound}
     <Panel title="Link not found">
       <p class="text-muted">This link no longer exists, or you don't have access to it.</p>
-      <Button variant="primary" onclick={goDashboard}>Back to dashboard</Button>
+      <Link to="/" class="btn-link btn-link-primary">Back to dashboard</Link>
     </Panel>
   {:else if loadError && !detail}
     <Panel>
       <p class="text-error" role="alert">{loadError}</p>
-      {#if $selectedLinkKey}
-        <Button variant="primary" onclick={() => load($selectedLinkKey!)}>Retry</Button>
-      {/if}
+      <Button variant="primary" onclick={() => load(key)}>Retry</Button>
     </Panel>
   {:else if detail}
     <Panel>

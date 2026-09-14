@@ -20,9 +20,13 @@ web/
 └── src/
     ├── main.ts             # Entry point: imports app.css, mounts App
     ├── app.css             # Design tokens, global styles, responsive + dark-mode overrides
-    ├── App.svelte          # Root: view selection / routing logic
+    ├── App.svelte          # Root: route table, boot/auth-guard logic
     └── lib/
-    │   ├── stores.ts       # Svelte writable stores: currentView, currentUser, links, …
+    │   ├── stores.ts       # Svelte writable stores: currentUser, links, pendingVerifyToken
+    │   ├── routing.ts      # Pure hash parse/match/active-link/redirect-target logic (tested)
+    │   ├── hashRouter.svelte.ts # Svelte 5 runes router state: initRouter/getRoute/navigate/replace
+    │   ├── Link.svelte     # `<a href="#...">` — all in-app navigation goes through this
+    │   ├── Router.svelte   # Renders the component for the current route
     │   ├── api.ts          # Typed fetch wrapper + all endpoint helpers
     │   ├── types.ts        # TypeScript interfaces mirroring Go JSON shapes
     │   ├── branding.ts     # APP_NAME constant ("Short Links")
@@ -41,8 +45,11 @@ web/
         ├── Login.svelte         # Passkey auth: conditional UI autofill + explicit sign-in
         ├── Dashboard.svelte     # Link create form + paginated link list + SSE updates
         ├── LinkDetail.svelte    # Single-link stats: clicks chart, UTM breakdown, edit/deactivate
+        ├── CampaignsList.svelte   # Campaign create form + paginated campaign list
+        ├── CampaignDetail.svelte  # Single-campaign stats, links table, batch create, assign/unassign
         ├── Account.svelte       # Passkey management: list, rename, revoke
         ├── Admin.svelte         # Admin tabs: settings, URL filters, users, audit log
+        ├── NotFound.svelte      # Catch-all route — an unknown hash renders this
         ├── RegisterVerify.svelte  # Magic-link registration landing → passkey creation
         └── RecoverVerify.svelte   # Magic-link recovery landing → passkey creation
 ```
@@ -65,24 +72,37 @@ const app = mount(App, { target: document.getElementById('app')! });
 
 ---
 
-## View selection (App.svelte)
+## Routing (App.svelte + lib/hashRouter.svelte.ts, lib/routing.ts, lib/Router.svelte)
 
-`App.svelte` is the router. There is no URL-based router library: the active view is a write to the `currentView` Svelte store, and `App.svelte` renders the matching component in a chain of `{#if}` / `{:else if}` blocks.
+There is no URL-based router library — hash routing (`#/…`) is hand-rolled across three pieces (#0120):
 
-On mount it does the following, in order:
+- **`lib/routing.ts`** — pure functions with no DOM or Svelte dependency, unit-tested in `routing.test.ts`: `parseHash` (splits `location.hash` into a path + `URLSearchParams` query), `matchRoute` (matches a path against a route table, extracting `:param` segments — a malformed percent-encoded segment is treated as no match rather than thrown), `isActiveLink` (the `Link.svelte` active rule: exact match for `/`, prefix match otherwise), and `loginPathWithRedirect`/`redirectTargetFrom` (encode/decode the `?redirect=` target carried on the `/login` route).
+- **`lib/hashRouter.svelte.ts`** — the Svelte 5 runes state around it: `initRouter(routes)` wires the route table (declared in App.svelte, since it needs the actual view components) and listens for `hashchange`; `getRoute()` is the reactive accessor; `navigate(path)` sets `location.hash` (pushes history); `replace(path)` uses `location.replace('#' + path)` (no history entry) for redirects/normalization.
+- **`lib/Router.svelte`** — renders the component for the current route inside `{#key route.path}`, so a path change (not a query-only change) always destroys and remounts the view, guaranteeing a cold-load fetch by route param and a clean unmount of anything the previous view's `onMount` set up (e.g. Dashboard's SSE subscription).
 
-1. **Magic-link detection** — if `window.location.pathname` is `/register/verify` or `/recover/verify`, it reads the `?token=` query param, saves it to the `pendingVerifyToken` store, strips the token from the URL with `history.replaceState`, and sets the view to `register-verify` or `recover-verify` without calling the API. This ensures a user who opens an email link without an active session is routed to the passkey-creation flow rather than bounced to login.
-
-2. **Session check** — for all other paths it calls `GET /api/me`. A successful response sets `currentUser` and navigates to `'dashboard'`; a 401 (or any other error) navigates to `'login'`.
-
-The full set of view identifiers is typed in `web/src/lib/stores.ts` as the `View` union:
+The route table (in `App.svelte`) is matched in declaration order, first match wins, with `*` (NotFound) last:
 
 ```ts
-export type View =
-  | 'login' | 'dashboard' | 'link-detail'
-  | 'account' | 'admin'
-  | 'register-verify' | 'recover-verify';
+const routes = [
+  { path: '/',                component: Dashboard },
+  { path: '/login',           component: Login },
+  { path: '/links/:key',      component: LinkDetail },
+  { path: '/campaigns',       component: CampaignsList },
+  { path: '/campaigns/:slug', component: CampaignDetail },
+  { path: '/account',         component: Account },
+  { path: '/admin',           component: Admin },
+  { path: '*',                component: NotFound },
+];
 ```
+
+All in-app navigation goes through **`lib/Link.svelte`**, never a bare `<a>` or a `<button onclick>`: it renders a real `<a href={'#' + to}>` (so middle-click, cmd-click, and "copy link address" all work with no special-casing) and adds an `active` class plus `aria-current="page"` when `isActiveLink` matches.
+
+On mount, `App.svelte` does the following, in order:
+
+1. **Magic-link detection** — if `window.location.pathname` is `/register/verify` or `/recover/verify`, it reads the `?token=` query param, saves it to the `pendingVerifyToken` store, strips the token from the URL with `history.replaceState`, and renders `RegisterVerify`/`RecoverVerify` directly, standalone, outside the hash router — these stay real paths (not hash routes) since they're landing targets for emailed links. Each view hands control back via an `onverified`/`ongotologin` callback prop once its ceremony finishes.
+2. **Session check** — for all other paths it calls `GET /api/me`, sets `currentUser`, then calls `enterApp()`, which wires up the router and — **before** flipping into routed mode — redirects if needed: signed-out on any route but `/login` bounces to `/login?redirect=<path>` (preserving the intended destination), and signed-in on `/login` bounces onward to that target. Doing this check before the router "goes live" means a protected view is never even mounted (and never fires its own API call) for a signed-out deep link. The same check re-runs in a reactive `$effect` on every later hash change, covering a session that expires mid-visit or a signed-in user hash-navigating to `/login` by hand.
+
+An unmatched hash renders `NotFound` via the catch-all route.
 
 ---
 
@@ -90,11 +110,14 @@ export type View =
 
 | View | File | Purpose |
 |---|---|---|
-| Login | `views/Login.svelte` | Two-path WebAuthn auth: conditional-UI (passkey autofill) fires in background on mount; explicit "Sign in" button calls `/auth/login/start` then `/auth/login/finish`. Registration and recovery sub-forms POST to `/auth/register/start` and `/auth/recover`. |
-| Dashboard | `views/Dashboard.svelte` | Link create form (destination URL, optional title/key/expiry, UTM builder) + paginated link list. Opens an SSE connection to `/api/events` on mount and prepends `link.created` events to the `links` store in real time. |
-| LinkDetail | `views/LinkDetail.svelte` | Full stats for a link selected via the `selectedLinkKey` store. Shows the short URL, destination, status, dates, total click count, a `ClicksChart` (30-day timeseries), and `UTMBarChart` breakdowns by source/medium/campaign. Inline edit and deactivate actions. |
+| Login | `views/Login.svelte` | Two-path WebAuthn auth: conditional-UI (passkey autofill) fires in background on mount; explicit "Sign in" button calls `/auth/login/start` then `/auth/login/finish`. On success, replaces to the `redirect` target from the route's query (or `/`). Registration and recovery sub-forms POST to `/auth/register/start` and `/auth/recover`. |
+| Dashboard | `views/Dashboard.svelte` | Link create form (destination URL, optional title/key/expiry, UTM builder) + paginated link list. Opens an SSE connection to `/api/events` on mount and prepends `link.created` events to the `links` store in real time; the subscription is closed on unmount (see Routing above). |
+| LinkDetail | `views/LinkDetail.svelte` | Full stats for the link named by the `key` route param (`/links/:key`), fetched fresh on every mount. Shows the short URL, destination, status, dates, total click count, a `ClicksChart` (30-day timeseries), and `UTMBarChart` breakdowns by source/medium/campaign. Inline edit and deactivate actions. |
+| CampaignsList | `views/CampaignsList.svelte` | Campaign create form + paginated campaign list; a row's name is a `Link` to `/campaigns/:slug`. |
+| CampaignDetail | `views/CampaignDetail.svelte` | Full stats for the campaign named by the `slug` route param (`/campaigns/:slug`), fetched fresh on every mount: summary, clicks-over-time chart, channel breakdown, links table (each key a `Link` to `/links/:key`), batch create, and assign/unassign. |
 | Account | `views/Account.svelte` | Lists the user's registered passkeys; supports inline rename and revoke with a guard against revoking the last credential. |
-| Admin | `views/Admin.svelte` | Admin-only (gated on `currentUser.is_admin`). Four tabs: Settings (registrations toggle), URL filters (CRUD + dry-run test), Users (list, deactivate, reactivate), Audit log (paginated, filterable by user id). |
+| Admin | `views/Admin.svelte` | Admin-only (gated on `currentUser.is_admin`). Four tabs: Settings (registrations toggle), URL filters (CRUD + dry-run test), Users (list, deactivate, reactivate), Audit log (paginated, filterable by user id). The tab itself is local component state, not a route. |
+| NotFound | `views/NotFound.svelte` | Rendered by the router's `*` catch-all for any hash that doesn't match a declared route. |
 | RegisterVerify | `views/RegisterVerify.svelte` | Landing view for the registration magic-link. Reads `pendingVerifyToken`, calls `/auth/register/verify?token=…` to get `PublicKeyCredentialCreationOptions`, invokes `navigator.credentials.create()`, then posts the attestation to `/auth/register/finish`. |
 | RecoverVerify | `views/RecoverVerify.svelte` | Same flow as RegisterVerify but targets `/auth/recover/verify` and `/auth/recover/finish`. Adds a credential to the existing account rather than creating a new one. |
 
@@ -102,14 +125,12 @@ export type View =
 
 ## Shared state (stores.ts)
 
-`web/src/lib/stores.ts` holds all global reactive state as Svelte `writable` stores. No store mutation happens in `lib/`-layer helpers — only views write to stores.
+`web/src/lib/stores.ts` holds global reactive state that is NOT part of the URL, as Svelte `writable` stores — which screen is showing lives entirely in the hash router (see Routing above). No store mutation happens in `lib/`-layer helpers — only views write to stores.
 
 | Store | Type | Purpose |
 |---|---|---|
-| `currentView` | `View` | Active view; write to navigate |
 | `currentUser` | `User \| null` | Authenticated user profile from `/api/me`; `null` = signed out |
 | `links` | `Link[]` | Dashboard link list; populated by REST and extended by SSE |
-| `selectedLinkKey` | `string \| null` | Key of the link currently open in LinkDetail |
 | `pendingVerifyToken` | `string \| null` | Magic-link token captured by App.svelte on landing |
 
 ---

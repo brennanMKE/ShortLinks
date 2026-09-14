@@ -212,20 +212,21 @@ The same `RequireSession → handler` pattern applies to every authenticated rou
 ### (c) SPA catch-all — serving `index.html`
 
 ```
-Browser GET /dashboard  (or any SPA deep link)
+Browser GET /  (any SPA deep link is a hash, e.g. /#/campaigns/spring-sale —
+                the fragment never reaches the server)
   │
   ▼ handlers.SPAHandler.ServeHTTP (internal/handlers/static.go)
   │   registered as "GET /" — least-specific pattern under Go 1.22 mux,
   │   so every explicit route above wins over it
   │
-  ├─ fs.Stat(dist, "dashboard") → not found (no such embedded file)
+  ├─ fs.Stat(dist, "index.html") → found
   │
   └─ serve dist/index.html (Content-Type: text/html)
         │
         ▼ Browser loads Svelte SPA
-            onMount: GET /api/me
-              200 → currentView = 'dashboard'
-              401 → currentView = 'login'
+            onMount: GET /api/me, then enterApp() wires up the hash router
+              200 → renders the route the hash names (e.g. CampaignDetail)
+              401 → replace()s to /login?redirect=<path>, preserving it
 ```
 
 Hashed static assets (e.g. `/assets/index-abc123.js`) are served directly by `http.FileServerFS` because `fs.Stat` finds them in the embedded FS. Only unknown paths fall back to `index.html`.

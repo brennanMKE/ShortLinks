@@ -17,18 +17,20 @@
      reachable via an explicit "Show archived" checkbox — nothing is ever
      deleted from this list, so the checkbox is the only thing that changes.
 
-  Clicking a row opens the campaign detail view via selectedCampaignSlug +
-  currentView, mirroring Dashboard's openDetail(key).
+  Clicking a row opens the campaign detail view by navigating to
+  /campaigns/{slug} (#0120 — the slug is now a route param, not a store).
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentView, currentUser, selectedCampaignSlug } from '../lib/stores';
+  import { currentUser } from '../lib/stores';
   import { listCampaigns, createCampaign, logout, ApiError, type CreateCampaignInput } from '../lib/api';
   import { visibleCampaigns, campaignDateRangeLabel, toIsoDate } from '../lib/campaigns';
   import type { CampaignWithCounts } from '../lib/types';
+  import { replace } from '../lib/hashRouter.svelte';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import UtmField from '../lib/UtmField.svelte';
+  import Link from '../lib/Link.svelte';
   import { APP_NAME } from '../lib/branding';
 
   const MAX_NAME_LENGTH = 255; // mirrors maxCampaignNameLength (internal/handlers/campaigns.go), counted in code points to match utf8.RuneCountInString.
@@ -51,7 +53,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       loadError = 'Could not load your campaigns. Please try again.';
@@ -124,7 +125,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       createError =
@@ -134,16 +134,6 @@
     }
   }
 
-  // ── Navigation ─────────────────────────────────────────────────────────
-  function openDetail(slug: string) {
-    selectedCampaignSlug.set(slug);
-    currentView.set('campaign-detail');
-  }
-
-  function go(view: 'dashboard' | 'account' | 'admin') {
-    currentView.set(view);
-  }
-
   async function handleSignOut() {
     try {
       await logout();
@@ -151,7 +141,10 @@
       // Drop local state and return to login even on failure.
     }
     currentUser.set(null);
-    currentView.set('login');
+    // Explicit sign-out: replace straight to a bare /login — see
+    // Dashboard.svelte's handleSignOut for why this differs from a bare
+    // currentUser.set(null) on an involuntary 401.
+    replace('/login');
   }
 
   onMount(load);
@@ -161,11 +154,11 @@
   <header class="app-header">
     <h1 class="app-title">{APP_NAME}</h1>
     <nav class="nav-tabs" aria-label="Primary">
-      <button type="button" class="nav-tab" onclick={() => go('dashboard')}>Dashboard</button>
-      <button type="button" class="nav-tab active" aria-current="page">Campaigns</button>
-      <button type="button" class="nav-tab" onclick={() => go('account')}>Account</button>
+      <Link to="/" class="nav-tab">Dashboard</Link>
+      <Link to="/campaigns" class="nav-tab">Campaigns</Link>
+      <Link to="/account" class="nav-tab">Account</Link>
       {#if $currentUser?.is_admin}
-        <button type="button" class="nav-tab" onclick={() => go('admin')}>Admin</button>
+        <Link to="/admin" class="nav-tab">Admin</Link>
       {/if}
     </nav>
     <Button variant="default" onclick={handleSignOut}>Sign out</Button>
@@ -297,9 +290,9 @@
               {#each visible as c (c.id)}
                 <tr>
                   <td>
-                    <button type="button" class="row-link campaign-name" onclick={() => openDetail(c.slug)}>
+                    <Link to={'/campaigns/' + encodeURIComponent(c.slug)} class="row-link campaign-name">
                       {c.name}
-                    </button>
+                    </Link>
                     {#if c.archived}<span class="badge badge-muted">Archived</span>{/if}
                   </td>
                   <td class="text-muted">{campaignDateRangeLabel(c)}</td>
@@ -317,47 +310,7 @@
 </div>
 
 <style>
-  .nav-tabs {
-    display: flex;
-    gap: var(--space-1);
-    flex: 1;
-    padding: 0 var(--space-2);
-  }
-  .nav-tab {
-    background: none;
-    border: none;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius);
-    cursor: pointer;
-    color: var(--text-muted);
-    font-size: var(--fs-md);
-    font-family: var(--font);
-    min-height: 40px;
-    display: inline-flex;
-    align-items: center;
-  }
-  .nav-tab.active {
-    background: var(--accent-subtle);
-    color: var(--accent);
-    font-weight: 600;
-  }
-  .nav-tab:hover:not(.active) {
-    background: var(--bg-subtle);
-    color: var(--text);
-  }
-
-  @media (max-width: 480px) {
-    .nav-tabs {
-      order: 3;
-      flex: 0 0 100%;
-      padding: 0;
-      flex-wrap: wrap;
-    }
-    .nav-tab {
-      font-size: var(--fs-base);
-      padding: var(--space-1) var(--space-3);
-    }
-  }
+  /* .nav-tabs/.nav-tab are global — see app.css (#0120). */
 
   .date-row {
     display: grid;
@@ -438,13 +391,12 @@
   }
 
   /*
-   * The row itself is no longer the click target (#0103 fix 5 — a bare
-   * `<tr onclick>` with no tabindex/role/key handler was never reachable by
-   * keyboard; 16 tab stops in the reviewer's run never landed on a row).
-   * The name cell's button IS the click target, natively focusable and
-   * Enter/Space-activated with no extra ARIA plumbing needed.
+   * The name cell's Link (#0120, replacing a <button onclick> — #0103 fix 5)
+   * is the click target: natively focusable, Enter-activated, and a genuine
+   * anchor. :global() because Link.svelte renders the <a> itself; see
+   * app.css's ".nav-tab" comment for why a scoped rule here can't reach it.
    */
-  .row-link {
+  :global(.row-link) {
     background: none;
     border: none;
     padding: 0;
@@ -454,9 +406,11 @@
     color: inherit;
     cursor: pointer;
     text-align: left;
+    text-decoration: none;
+    display: inline-block;
   }
-  .row-link:hover,
-  .row-link:focus-visible {
+  :global(.row-link):hover,
+  :global(.row-link):focus-visible {
     color: var(--accent);
     text-decoration: underline;
   }

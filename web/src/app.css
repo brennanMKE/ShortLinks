@@ -142,6 +142,102 @@ body {
   margin: 0;
 }
 
+/*
+ * Primary nav tabs in .app-header (#0120). GLOBAL, not per-view scoped
+ * styles, on purpose: every top-level view now renders these via
+ * lib/Link.svelte, and Svelte scopes a component's <style> block to
+ * elements IT writes in its own template — an element rendered by a CHILD
+ * component (Link.svelte) never carries the PARENT view's scoping class, so
+ * a view-local `.nav-tab { … }` rule could never match it (see
+ * CampaignDetail.svelte's `.qr-zip-link` comment for the same constraint hit
+ * from the button/anchor-duplication side). Previously this exact block was
+ * hand-duplicated, byte-for-byte, in Dashboard/CampaignsList/Account/Admin's
+ * own scoped <style> blocks; moving it here once is strictly less code, not
+ * just a routing-migration necessity.
+ */
+.nav-tabs {
+  display: flex;
+  gap: var(--space-1);
+  flex: 1;
+  padding: 0 var(--space-2);
+}
+.nav-tab {
+  background: none;
+  border: none;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  font-family: var(--font);
+  text-decoration: none;
+  /* Ensure a comfortable tap target on mobile */
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+}
+.nav-tab.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 600;
+}
+.nav-tab:hover:not(.active) {
+  background: var(--bg-subtle);
+  color: var(--text);
+}
+
+@media (max-width: 480px) {
+  .nav-tabs {
+    order: 3;
+    flex: 0 0 100%;
+    padding: 0;
+    flex-wrap: wrap;
+  }
+  .nav-tab {
+    font-size: var(--fs-base);
+    padding: var(--space-1) var(--space-3);
+  }
+}
+
+/*
+ * A Link.svelte that should look like Button.svelte's default/primary
+ * variants (#0120) — used for "Back to X" navigation that used to be a
+ * <button onclick> and must become a real anchor. Duplicated from
+ * Button.svelte's `.btn`/`.btn-primary` rather than shared, for the same
+ * Svelte-scoping reason as the `.nav-tab` comment above: Button.svelte's
+ * scoped styles only ever apply to the <button> IT renders.
+ */
+.btn-link {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font);
+  font-size: var(--fs-base);
+  line-height: 1;
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-w) solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+}
+.btn-link:hover { background: var(--bg-header); }
+.btn-link.btn-link-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.btn-link.btn-link-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+@media (max-width: 480px) {
+  /* Matches Button.svelte's own mobile tap-target rule. */
+  .btn-link {
+    padding: var(--space-3) var(--space-3);
+    min-height: 40px;
+  }
+}
+
 /* Two-column portal layout (optional) */
 .app-columns {
   display: grid;
@@ -327,9 +423,9 @@ tbody tr:last-child td { border-bottom: none; }
   }
 
   /*
-   * Stack the app-header so title / nav-tabs / sign-out don't fight for space.
-   * Consumers (Dashboard, Account, Admin) each define .nav-tabs and .nav-tab
-   * as scoped Svelte styles; the shared header layout change is done here.
+   * Stack the app-header so title / nav-tabs / sign-out don't fight for
+   * space. .nav-tabs/.nav-tab are themselves global (see the rules above,
+   * #0120) — this block only adds the header's own wrap/gap layout.
    */
   .app-header {
     flex-wrap: wrap;

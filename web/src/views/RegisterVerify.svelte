@@ -11,11 +11,18 @@
     2. Call navigator.credentials.create() with the decoded options.
     3. POST the serialized attestation to /auth/register/finish?token=….
     4. On success: call GET /api/me to confirm the session, set currentUser,
-       clear pendingVerifyToken, and navigate to "dashboard".
+       clear pendingVerifyToken, and call `onverified` (#0120) so App.svelte
+       hands control from this standalone view over to the hash router.
+
+  This view renders OUTSIDE the hash router (#0120 Notes: /register/verify is
+  a real path, a landing target for an emailed link, not a hash route), so it
+  cannot call the router's own navigate()/replace() directly — App.svelte
+  hasn't wired the router up yet while this is showing. `onverified` and
+  `ongotologin` are the two ways control hands back to App.svelte.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { pendingVerifyToken, currentView, currentUser } from '../lib/stores';
+  import { pendingVerifyToken, currentUser } from '../lib/stores';
   import { registerVerify, registerFinish, getMe, ApiError } from '../lib/api';
   import {
     toPublicKeyCreationOptions,
@@ -25,6 +32,15 @@
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import { APP_NAME } from '../lib/branding';
+
+  interface Props {
+    /** Called once the session is confirmed — hands control to App.svelte, which enters the hash router at '/'. */
+    onverified: () => void;
+    /** Called from the error state's "Back to sign in" action. */
+    ongotologin: () => void;
+  }
+
+  let { onverified, ongotologin }: Props = $props();
 
   type Status = 'verifying' | 'creating' | 'finishing' | 'error';
 
@@ -111,13 +127,16 @@
       return;
     }
 
-    // Step 4 — confirm session, set user, navigate.
+    // Step 4 — confirm session, set user, hand off to the hash router.
     try {
       const user = await getMe();
       currentUser.set(user);
       pendingVerifyToken.set(null);
+      // Fixes the PATHNAME back to '/' — separate from the hash router's own
+      // '/' that enterApp() will set next, since this is still a real path
+      // (/register/verify), not a hash route (#0120 Notes).
       history.replaceState({}, '', '/');
-      currentView.set('dashboard');
+      onverified();
     } catch {
       status = 'error';
       errorMessage =
@@ -127,7 +146,10 @@
 
   function goToLogin() {
     pendingVerifyToken.set(null);
-    currentView.set('login');
+    // Fixes the pathname back to '/' first, so the address bar doesn't end up
+    // '/register/verify#/login' once ongotologin() sets the hash.
+    history.replaceState({}, '', '/');
+    ongotologin();
   }
 </script>
 

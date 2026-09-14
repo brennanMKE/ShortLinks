@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentView, currentUser, links } from '../lib/stores';
+  import { currentUser, links } from '../lib/stores';
   import {
     listCredentials,
     renameCredential,
@@ -24,8 +24,10 @@
     revokeErrorMessage,
   } from '../lib/account';
   import type { Credential } from '../lib/types';
+  import { replace } from '../lib/hashRouter.svelte';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import Link from '../lib/Link.svelte';
   import { APP_NAME } from '../lib/branding';
 
   let loading = $state(true);
@@ -57,8 +59,10 @@
 
   function handleAuthError(err: unknown): boolean {
     if (err instanceof ApiError && err.status === 401) {
+      // App.svelte's guard effect reacts to currentUser going null and
+      // bounces to /login, preserving this route as the redirect target
+      // (#0120) — no navigation call needed here.
       currentUser.set(null);
-      currentView.set('login');
       return true;
     }
     return false;
@@ -126,10 +130,6 @@
     }
   }
 
-  function go(view: 'dashboard' | 'campaigns' | 'admin') {
-    currentView.set(view);
-  }
-
   async function handleSignOut() {
     try {
       await logout();
@@ -138,7 +138,10 @@
     }
     currentUser.set(null);
     links.set([]);
-    currentView.set('login');
+    // Explicit sign-out: replace straight to a bare /login — see
+    // Dashboard.svelte's handleSignOut for why this differs from a bare
+    // currentUser.set(null) on an involuntary 401.
+    replace('/login');
   }
 
   let signingOutAll = $state(false);
@@ -178,7 +181,7 @@
     }
     currentUser.set(null);
     links.set([]);
-    currentView.set('login');
+    replace('/login');
   }
 
   onMount(load);
@@ -188,11 +191,11 @@
   <header class="app-header">
     <h1 class="app-title">{APP_NAME}</h1>
     <nav class="nav-tabs" aria-label="Primary">
-      <button type="button" class="nav-tab" onclick={() => go('dashboard')}>Dashboard</button>
-      <button type="button" class="nav-tab" onclick={() => go('campaigns')}>Campaigns</button>
-      <button type="button" class="nav-tab active" aria-current="page">Account</button>
+      <Link to="/" class="nav-tab">Dashboard</Link>
+      <Link to="/campaigns" class="nav-tab">Campaigns</Link>
+      <Link to="/account" class="nav-tab">Account</Link>
       {#if $currentUser?.is_admin}
-        <button type="button" class="nav-tab" onclick={() => go('admin')}>Admin</button>
+        <Link to="/admin" class="nav-tab">Admin</Link>
       {/if}
     </nav>
     <Button variant="default" onclick={handleSignOut}>Sign out</Button>
@@ -312,48 +315,9 @@
   .account-shell {
     max-width: 760px;
   }
-  .nav-tabs {
-    display: flex;
-    gap: var(--space-1);
-    flex: 1;
-    padding: 0 var(--space-2);
-  }
-  .nav-tab {
-    background: none;
-    border: none;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius);
-    cursor: pointer;
-    color: var(--text-muted);
-    font-size: var(--fs-md);
-    font-family: var(--font);
-    /* Comfortable tap target on mobile */
-    min-height: 40px;
-    display: inline-flex;
-    align-items: center;
-  }
-  .nav-tab.active {
-    background: var(--accent-subtle);
-    color: var(--accent);
-    font-weight: 600;
-  }
-  .nav-tab:hover:not(.active) {
-    background: var(--bg-subtle);
-    color: var(--text);
-  }
+  /* .nav-tabs/.nav-tab are global — see app.css (#0120). */
 
   @media (max-width: 480px) {
-    /* Stack nav-tabs below the title/sign-out row */
-    .nav-tabs {
-      order: 3;
-      flex: 0 0 100%;
-      padding: 0;
-      flex-wrap: wrap;
-    }
-    .nav-tab {
-      font-size: var(--fs-base);
-      padding: var(--space-1) var(--space-3);
-    }
     /* Credential cards: stack the main content and revoke button vertically */
     .cred {
       flex-direction: column;

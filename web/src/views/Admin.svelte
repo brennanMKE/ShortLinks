@@ -16,7 +16,9 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentView, currentUser, links } from '../lib/stores';
+  import { currentUser, links } from '../lib/stores';
+  import { replace } from '../lib/hashRouter.svelte';
+  import Link from '../lib/Link.svelte';
   import {
     getSettings,
     updateSetting,
@@ -395,15 +397,13 @@
   // ── Shared ──────────────────────────────────────────────────────────────────
   function handleAuthError(err: unknown): boolean {
     if (err instanceof ApiError && err.status === 401) {
+      // App.svelte's guard effect reacts to currentUser going null and
+      // bounces to /login, preserving this route as the redirect target
+      // (#0120) — no navigation call needed here.
       currentUser.set(null);
-      currentView.set('login');
       return true;
     }
     return false;
-  }
-
-  function go(view: 'dashboard' | 'campaigns' | 'account') {
-    currentView.set(view);
   }
 
   async function handleSignOut() {
@@ -414,7 +414,10 @@
     }
     currentUser.set(null);
     links.set([]);
-    currentView.set('login');
+    // Explicit sign-out: replace straight to a bare /login — see
+    // Dashboard.svelte's handleSignOut for why this differs from a bare
+    // currentUser.set(null) on an involuntary 401.
+    replace('/login');
   }
 
   onMount(() => {
@@ -429,10 +432,10 @@
   <header class="app-header">
     <h1 class="app-title">{APP_NAME}</h1>
     <nav class="nav-tabs" aria-label="Primary">
-      <button type="button" class="nav-tab" onclick={() => go('dashboard')}>Dashboard</button>
-      <button type="button" class="nav-tab" onclick={() => go('campaigns')}>Campaigns</button>
-      <button type="button" class="nav-tab" onclick={() => go('account')}>Account</button>
-      <button type="button" class="nav-tab active" aria-current="page">Admin</button>
+      <Link to="/" class="nav-tab">Dashboard</Link>
+      <Link to="/campaigns" class="nav-tab">Campaigns</Link>
+      <Link to="/account" class="nav-tab">Account</Link>
+      <Link to="/admin" class="nav-tab">Admin</Link>
     </nav>
     <Button variant="default" onclick={handleSignOut}>Sign out</Button>
   </header>
@@ -857,35 +860,8 @@
 </div>
 
 <style>
-  .nav-tabs {
-    display: flex;
-    gap: var(--space-1);
-    flex: 1;
-    padding: 0 var(--space-2);
-  }
-  .nav-tab {
-    background: none;
-    border: none;
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius);
-    cursor: pointer;
-    color: var(--text-muted);
-    font-size: var(--fs-md);
-    font-family: var(--font);
-    /* Comfortable tap target on mobile */
-    min-height: 40px;
-    display: inline-flex;
-    align-items: center;
-  }
-  .nav-tab.active {
-    background: var(--accent-subtle);
-    color: var(--accent);
-    font-weight: 600;
-  }
-  .nav-tab:hover:not(.active) {
-    background: var(--bg-subtle);
-    color: var(--text);
-  }
+  /* .nav-tabs/.nav-tab are global — see app.css (#0120). .subtabs/.subtab
+     stay local component state (not routes — out of scope per #0120). */
   .subtabs {
     display: flex;
     gap: var(--space-2);
@@ -918,17 +894,6 @@
   }
 
   @media (max-width: 480px) {
-    /* Stack nav-tabs below title on narrow screens */
-    .nav-tabs {
-      order: 3;
-      flex: 0 0 100%;
-      padding: 0;
-      flex-wrap: wrap;
-    }
-    .nav-tab {
-      font-size: var(--fs-base);
-      padding: var(--space-1) var(--space-3);
-    }
     /* Sub-tabs: already flex-wrap:wrap; reduce padding so 4 fit on 2 rows */
     .subtab {
       font-size: var(--fs-base);

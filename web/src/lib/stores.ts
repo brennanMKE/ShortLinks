@@ -1,26 +1,11 @@
-// Shared application state. The SPA has no client-side router: navigation is a
-// write to the `currentView` store, and App.svelte renders the matching view.
+// Shared application state that is NOT part of the URL. Which screen is
+// showing now lives entirely in the hash router (lib/hashRouter.svelte.ts,
+// lib/routing.ts — #0120); this file holds everything else: the
+// authenticated user, the dashboard's link list, and the magic-link token
+// captured before the hash router is even wired up.
 
 import { writable } from 'svelte/store';
 import type { User, Link } from './types';
-
-/** The set of top-level views App.svelte can render. */
-export type View =
-  | 'login'
-  | 'dashboard'
-  | 'link-detail'
-  | 'campaigns'        // campaigns list (#0103)
-  | 'campaign-detail'  // single campaign: summary + links table (#0103)
-  | 'account'
-  | 'admin'
-  | 'register-verify'  // magic-link registration landing (#0041)
-  | 'recover-verify';  // magic-link recovery landing (#0041)
-
-/**
- * The active view. Default is "login"; App.svelte flips it to "dashboard" once
- * GET /api/me confirms a session. Navigation between sections is a store write.
- */
-export const currentView = writable<View>('login');
 
 /** The authenticated user (from GET /api/me), or null when signed out. */
 export const currentUser = writable<User | null>(null);
@@ -32,22 +17,11 @@ export const currentUser = writable<User | null>(null);
 export const links = writable<Link[]>([]);
 
 /**
- * The key of the link currently shown in the link-detail view, or null. Because
- * there is no URL routing, the detail view reads which link to load from here.
- */
-export const selectedLinkKey = writable<string | null>(null);
-
-/**
- * The slug of the campaign currently shown in the campaign-detail view, or
- * null (#0103). Set by CampaignsList.svelte when a row is opened; read by
- * CampaignDetail.svelte on mount, mirroring selectedLinkKey above.
- */
-export const selectedCampaignSlug = writable<string | null>(null);
-
-/**
  * The magic-link token parsed from the landing URL (/register/verify or
  * /recover/verify). App.svelte sets this on load when it detects one of those
- * paths; the register-verify and recover-verify views read it on mount (#0041).
- * Cleared after the ceremony completes or fails.
+ * paths — before the hash router is initialized, since these stay real paths
+ * rather than becoming hash routes (#0120 Notes: they are landing targets for
+ * emailed links) — and the register-verify/recover-verify views read it on
+ * mount (#0041). Cleared after the ceremony completes or fails.
  */
 export const pendingVerifyToken = writable<string | null>(null);

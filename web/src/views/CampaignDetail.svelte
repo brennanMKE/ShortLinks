@@ -1,7 +1,8 @@
 <!--
-  Campaign Detail view (#0103). Reads which campaign to show from the shared
-  `selectedCampaignSlug` store (CampaignsList sets it when a row is opened —
-  there is no URL router, mirroring LinkDetail/selectedLinkKey).
+  Campaign Detail view (#0103). Reads which campaign to show from the `slug`
+  route param (#0120 — CampaignsList navigates to /campaigns/{slug}; this
+  component fetches its own record by that param on mount, a cold load, since
+  Router.svelte remounts it whenever the path changes).
 
   Two API calls back this view, on purpose:
     - GET /api/campaigns/{slug}       (getCampaign)      — metadata, the
@@ -114,7 +115,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentView, currentUser, selectedCampaignSlug, selectedLinkKey } from '../lib/stores';
+  import { currentUser } from '../lib/stores';
   import {
     getCampaign,
     getCampaignStats,
@@ -147,9 +148,17 @@
   import type { CampaignDetail, LinkBucket, LinkSeries } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import Link from '../lib/Link.svelte';
   import CampaignClicksChart from '../lib/CampaignClicksChart.svelte';
   import UTMBarChart from '../lib/UTMBarChart.svelte';
   import BatchCreateLinks from '../lib/BatchCreateLinks.svelte';
+
+  interface Props {
+    /** The campaign slug — a route param from /campaigns/:slug (#0120). */
+    slug: string;
+  }
+
+  let { slug }: Props = $props();
 
   const MAX_NAME_LENGTH = 255;
 
@@ -194,11 +203,6 @@
     }
   }
 
-  function openLink(key: string) {
-    selectedLinkKey.set(key);
-    currentView.set('link-detail');
-  }
-
   // ── Load ───────────────────────────────────────────────────────────────
   // load() also runs as a REFRESH after assign/unassign, not just on first
   // mount. `loading` — which swaps the whole view for "Loading campaign…" —
@@ -216,7 +220,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       if (err instanceof ApiError && err.status === 404) {
@@ -242,11 +245,6 @@
     }
 
     if (initial) loading = false;
-  }
-
-  function goList() {
-    selectedCampaignSlug.set(null);
-    currentView.set('campaigns');
   }
 
   // ── Edit ───────────────────────────────────────────────────────────────
@@ -298,7 +296,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       saveError = err instanceof ApiError ? err.message : 'Could not save changes. Please try again.';
@@ -318,7 +315,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       loadError = 'Could not update the campaign. Please try again.';
@@ -336,7 +332,7 @@
 
   async function handleAssign() {
     if (!detail || parsedKeys.length === 0) return;
-    const slug = detail.slug;
+    const campaignSlug = detail.slug;
     assigning = true;
     assignError = null;
     assignNotice = null;
@@ -348,7 +344,7 @@
         // Count success from the RESPONSE's links array, not chunk.length —
         // the server's own record of what actually landed, rather than an
         // assumption that a non-throwing request assigned every key it sent.
-        const res = await assignLinksToCampaign(slug, chunk);
+        const res = await assignLinksToCampaign(campaignSlug, chunk);
         succeeded += res.links.length;
       }
       assignNotice = `Assigned ${succeeded} link${succeeded === 1 ? '' : 's'}.`;
@@ -356,7 +352,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         redirected = true;
       } else {
         const reason = err instanceof ApiError ? err.message : 'Could not reach the server.';
@@ -398,7 +393,7 @@
     // 2; previously gated on succeeded > 0, so this exact partial-failure
     // case reported "0 links" and never refreshed).
     if (!redirected) {
-      await load(slug);
+      await load(campaignSlug);
     }
   }
 
@@ -408,16 +403,15 @@
 
   async function handleUnassign(key: string) {
     if (!detail) return;
-    const slug = detail.slug;
+    const campaignSlug = detail.slug;
     unassigning = { ...unassigning, [key]: true };
     unassignError = null;
     try {
-      await unassignLinkFromCampaign(slug, key);
-      await load(slug);
+      await unassignLinkFromCampaign(campaignSlug, key);
+      await load(campaignSlug);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       unassignError = 'Could not remove this link. Please try again.';
@@ -428,19 +422,13 @@
   }
 
   onMount(() => {
-    const slug = $selectedCampaignSlug;
-    if (!slug) {
-      loading = false;
-      notFound = true;
-      return;
-    }
     load(slug);
   });
 </script>
 
 <div class="app-shell detail-shell">
   <header class="app-header">
-    <Button onclick={goList}>&larr; Campaigns</Button>
+    <Link to="/campaigns" class="btn-link">&larr; Campaigns</Link>
     <h1 class="app-title">Campaign detail</h1>
   </header>
 
@@ -449,14 +437,12 @@
   {:else if notFound}
     <Panel title="Campaign not found">
       <p class="text-muted">This campaign no longer exists, or you don't have access to it.</p>
-      <Button variant="primary" onclick={goList}>Back to campaigns</Button>
+      <Link to="/campaigns" class="btn-link btn-link-primary">Back to campaigns</Link>
     </Panel>
   {:else if loadError && !detail}
     <Panel>
       <p class="text-error" role="alert">{loadError}</p>
-      {#if $selectedCampaignSlug}
-        <Button variant="primary" onclick={() => load($selectedCampaignSlug!)}>Retry</Button>
-      {/if}
+      <Button variant="primary" onclick={() => load(slug)}>Retry</Button>
     </Panel>
   {:else if detail}
     <!-- Header -->
@@ -772,14 +758,9 @@
               {#each sortedRows as row (row.key)}
                 <tr>
                   <td class="mono key-cell" data-label="Short key">
-                    <button
-                      type="button"
-                      class="link-key-btn"
-                      onclick={() => openLink(row.key)}
-                      title={row.key}
-                    >
+                    <Link to={'/links/' + encodeURIComponent(row.key)} class="link-key-btn" title={row.key}>
                       {row.key}
-                    </button>
+                    </Link>
                   </td>
                   <td class="title-cell" data-label="Title" title={row.title}>{row.title || '—'}</td>
                   <td class="dest-cell" data-label="Destination" title={row.destination_url}>{row.destination_url}</td>
@@ -1051,7 +1032,9 @@
     color: inherit;
     cursor: pointer;
   }
-  .link-key-btn {
+  /* :global() (#0120 — was a <button onclick>, now a Link.svelte anchor);
+     see app.css's ".nav-tab" comment for why a scoped rule can't reach it. */
+  :global(.link-key-btn) {
     background: none;
     border: none;
     padding: 0;

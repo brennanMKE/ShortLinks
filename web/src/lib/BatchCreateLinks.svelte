@@ -54,7 +54,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentUser, currentView } from './stores';
+  import { currentUser } from './stores';
   import { batchCreateLinksForCampaign, ApiError } from './api';
   import {
     emptyBatchChannelRow,
@@ -165,7 +165,6 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
-        currentView.set('login');
         return;
       }
       error = err instanceof ApiError ? err.message : 'Could not create links. Please try again.';

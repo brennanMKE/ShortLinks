@@ -13,8 +13,11 @@
      return a scoped allowCredentials list, then a modal get(), then post the
      assertion to /auth/login/finish.
 
-  On success we confirm the session via getMe(), set currentUser, and switch the
-  currentView store to "dashboard" (no router — navigation is a store write).
+  On success we confirm the session via getMe(), set currentUser, and replace()
+  to whatever route brought the user here signed-out — the `redirect` query
+  param on this very route (#0120: an unauthenticated deep hash bounces to
+  /login?redirect=…, and signing in returns there — see routing.ts's
+  redirectTargetFrom).
 
   The "Register" affordance opens a sub-form that POSTs the email to
   /auth/register/start and shows a generic "check your email" confirmation
@@ -22,7 +25,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { currentView, currentUser } from '../lib/stores';
+  import { currentUser } from '../lib/stores';
   import {
     getMe,
     loginStart,
@@ -36,6 +39,8 @@
     serializeAssertion,
     conditionalMediationAvailable,
   } from '../lib/webauthn';
+  import { getRoute, replace } from '../lib/hashRouter.svelte';
+  import { redirectTargetFrom } from '../lib/routing';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import { APP_NAME } from '../lib/branding';
@@ -86,7 +91,7 @@
     await loginFinish(serializeAssertion(credential));
     const user = await getMe();
     currentUser.set(user);
-    currentView.set('dashboard');
+    replace(redirectTargetFrom(getRoute().query));
     return true;
   }
 
@@ -123,7 +128,12 @@
       if (msg) loginError = msg;
     } finally {
       signingIn = false;
-      if ($currentView === 'login') startConditional();
+      // Only restart the background conditional-UI ceremony if we're still
+      // ON the login route — a successful sign-in already called replace()
+      // above (synchronously updating the router's route, see
+      // hashRouter.svelte.ts), which would otherwise race a background get()
+      // against a component about to be destroyed.
+      if (getRoute().path === '/login') startConditional();
     }
   }
 
