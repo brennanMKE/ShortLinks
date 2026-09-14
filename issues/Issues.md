@@ -67,10 +67,11 @@ cd web && npm run build && cd .. && go build ./cmd/shortlinks
 
 ## Phases
 
-Work the open issues in this order. Finish a phase before starting the next unless an issue says otherwise. Each issue carries a `**Phase**` row in its metadata table (e.g. `| **Phase** | 3 — SPA routing |`) matching this table. File new issues with a `**Phase**` row for the phase they fit, or add a phase.
+Work the open issues in this order. Finish a phase before starting the next unless an issue says otherwise. Every issue, finished ones included, carries a `**Phase**` row in its metadata table (e.g. `| **Phase** | 3 — SPA routing |`) matching this table. `list-recent-issues` only groups by phase when at least 40% of all issues have the row, so never leave it off. File new issues with a `**Phase**` row for the phase they fit, or add a phase.
 
 | Phase | Issues | Rationale |
 |---|---|---|
+| **0 — Shipped** | Every issue settled before phases were introduced (#0001–#0118) | Already done. Keeps the whole tracker phased so the listing groups by phase. |
 | **1 — Green test baseline** | [#0116](0116.md), [#0110](0110.md) | `go test ./...` must pass on a clean checkout, and the test DB must match a clean migration replay, before any later issue can be verified. |
 | **2 — Backend correctness** | [#0109](0109.md), [#0119](0119.md) | Editing a link skips the URL filter (a security gap), and every click chart hides today. Both are small, server-side, and independent of the SPA work. |
 | **3 — SPA routing** | [#0120](0120.md) | Replaces store-based navigation in every view with hash routes and `<a>` Links. Goes before the table and E2E work so neither is built around navigation that is about to be replaced. |
