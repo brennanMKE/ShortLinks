@@ -67,17 +67,21 @@ cd web && npm run build && cd .. && go build ./cmd/shortlinks
 
 ## Phases
 
-Work the open issues in this order. Finish a phase before starting the next unless an issue says otherwise. Each issue's `## Relation` section names its phase. File new issues into the phase they fit, or add a phase.
+Work the open issues in this order. Finish a phase before starting the next unless an issue says otherwise. Each issue carries a `**Phase**` row in its metadata table (e.g. `| **Phase** | 3 — SPA routing |`) matching this table. File new issues with a `**Phase**` row for the phase they fit, or add a phase.
 
 | Phase | Issues | Rationale |
 |---|---|---|
-| **1. Green test baseline** | [#0116](0116.md), [#0110](0110.md) | `go test ./...` must pass on a clean checkout, and the test DB must match a clean migration replay, before any later issue can be verified. |
-| **2. Backend correctness** | [#0109](0109.md), [#0119](0119.md) | Editing a link skips the URL filter (a security gap), and every click chart hides today. Both are small, server-side, and independent of the SPA work. |
-| **3. SPA routing** | [#0120](0120.md) | Replaces store-based navigation in every view with hash routes and `<a>` Links. Goes before the table and E2E work so neither is built around navigation that is about to be replaced. |
-| **4. Links table layout** | [#0113](0113.md), [#0114](0114.md), [#0115](0115.md) | Same tables, same zero-horizontal-scroll invariant ([#0103](0103.md)). Goes after #0120, whose row navigation becomes anchors. |
-| **5. E2E harness** | [#0080](0080.md) | Blocks every E2E coverage issue. Hash URLs from #0120 let page objects deep-link. |
-| **6. E2E coverage** | [#0081](0081.md)–[#0091](0091.md), then umbrella [#0079](0079.md) | Can run in any order once #0080 lands. #0084 covers the `/u/{key}` redirect check. #0079 closes when its sub-issues do. |
-| **Ops (owner)** | [#0045](0045.md) | SES sandbox and domain verification is done in the AWS console, not in code. It blocks nothing above. |
+| **1 — Green test baseline** | [#0116](0116.md), [#0110](0110.md) | `go test ./...` must pass on a clean checkout, and the test DB must match a clean migration replay, before any later issue can be verified. |
+| **2 — Backend correctness** | [#0109](0109.md), [#0119](0119.md) | Editing a link skips the URL filter (a security gap), and every click chart hides today. Both are small, server-side, and independent of the SPA work. |
+| **3 — SPA routing** | [#0120](0120.md) | Replaces store-based navigation in every view with hash routes and `<a>` Links. Goes before the table and E2E work so neither is built around navigation that is about to be replaced. |
+| **4 — Links table layout** | [#0113](0113.md), [#0114](0114.md), [#0115](0115.md) | Same tables, same zero-horizontal-scroll invariant ([#0103](0103.md)). Goes after #0120, whose row navigation becomes anchors. |
+| **5 — E2E harness** | [#0080](0080.md) | Blocks every E2E coverage issue. Hash URLs from #0120 let page objects deep-link. |
+| **6 — E2E auth and account** | [#0081](0081.md), [#0086](0086.md) | Every later E2E test depends on a working signed-in session, so sign-in and passkey flows are proven first. |
+| **7 — E2E links core** | [#0082](0082.md), [#0083](0083.md), [#0084](0084.md) | Create, list, edit, delete, and the `/u/{key}` redirect. Analytics, SSE, filters, and audit all need links to exist. |
+| **8 — E2E analytics and live updates** | [#0085](0085.md), [#0091](0091.md) | Both need links with clicks, and both check that the screen reflects changed data. |
+| **9 — E2E admin users and settings** | [#0087](0087.md), [#0088](0088.md) | Registration gate and user management share the admin role and account screens. |
+| **10 — E2E filters, audit, and umbrella** | [#0090](0090.md), [#0089](0089.md), then [#0079](0079.md) | Work in the listed order, not by number: filter rules tie back to #0109; the audit log checks entries produced by earlier phases; umbrella #0079 closes when its sub-issues do. |
+| **Ops — Owner** | [#0045](0045.md) | SES sandbox and domain verification is done in the AWS console, not in code. It blocks nothing above. |
 
 ## Resolution workflow (review-gated subagents)
 
