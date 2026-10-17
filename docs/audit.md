@@ -55,6 +55,8 @@ Constants are defined in `internal/audit/actions.go`. Every call site references
 |---|---|---|---|---|
 | `credential.added` | `ActionCredentialAdded` | First passkey registered (finish-registration) or replacement passkey enrolled (finish-recovery) | user | Written inside the ceremony transaction via `WriteTx`; emitted once per ceremony alongside the account event |
 | `credential.revoked` | `ActionCredentialRevoked` | User deletes one of their passkeys | user | Fire-and-forget |
+| `api_token.created` | `ActionAPITokenCreated` | User mints an API token | api_token | In-band (WriteTx) |
+| `api_token.revoked` | `ActionAPITokenRevoked` | User revokes an API token | api_token | In-band (WriteTx) |
 
 ### Link lifecycle
 
@@ -128,6 +130,9 @@ The policy is: **an audit write must never break the user's request**. The `Writ
 | `account.reactivated` | `note` |
 | `credential.added` | `device_name`, `aaguid` |
 | `credential.revoked` | `device_name` |
+| `api_token.created` | `name`, `read_only`, `expires_at` |
+| `api_token.revoked` | `name`, `prefix` |
+| *any action taken with an API token* | adds `via: "api_token"`, `api_token_id`, `api_token_name` — see [api-tokens.md](api-tokens.md#audit) |
 | `link.created` | `key`, `destination_url`, `title`, `duplicate` |
 | `link.deactivated` | `key`, `destination_url` |
 | `link.reactivated` | `key`, `destination_url` |

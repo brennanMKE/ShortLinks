@@ -308,6 +308,38 @@ session's `user_id` or `expires_at` with.
 
 ---
 
+### `api_tokens` — `000014_create_api_tokens.up.sql`
+
+Named, long-lived bearer tokens a user mints in the web UI for scripts and
+agents ([api-tokens.md](api-tokens.md)). The plaintext token is **never
+stored**: only its SHA-256 digest.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `BIGSERIAL` | Primary key |
+| `user_id` | `BIGINT` | FK → `users(id)`, not null; the token acts as this user |
+| `name` | `TEXT` | Not null; unique per user among live tokens |
+| `token_prefix` | `TEXT` | Not null; first 12 chars (`slk_` + 8) for display only |
+| `token_hash` | `BYTEA` | Not null, UNIQUE; `sha256(token)` — the per-request lookup index |
+| `read_only` | `BOOLEAN` | Not null, default `FALSE`; read-only tokens may only `GET`/`HEAD` |
+| `created_at` | `TIMESTAMPTZ` | Not null, default `now()` |
+| `expires_at` | `TIMESTAMPTZ` | Nullable; `NULL` = never expires. Fixed at creation (no sliding window) |
+| `last_used_at` | `TIMESTAMPTZ` | Nullable; written at most once a minute per token |
+| `last_used_ip` | `INET` | Nullable |
+| `revoked_at` | `TIMESTAMPTZ` | Nullable; soft delete, so audit rows that reference the token keep their meaning |
+
+Indexes: `idx_api_tokens_user_name_live` — `UNIQUE (user_id, name) WHERE
+revoked_at IS NULL`; `idx_api_tokens_user_id`.
+
+`auth.Store.DeactivateUser` sets `revoked_at` on all of a user's live tokens
+in the same transaction that deletes their sessions.
+
+Rolling back (`000014_create_api_tokens.down.sql`) **drops the table**, so
+every issued token stops working permanently and can't be recovered (only
+digests were stored). Clients would need new tokens after re-applying it.
+
+---
+
 ### `settings` — `000006_create_settings.up.sql`
 
 Runtime configuration values that can be changed without a service restart.
@@ -426,6 +458,7 @@ users ──< links ──< clicks
   │  └──< campaigns (campaigns.user_id — campaigns are owned per user, #0098)
   │
   ├──< sessions
+  ├──< api_tokens (user_id; soft-revoked, never deleted)
   ├──< passkey_credentials
   ├──< pending_registrations ──< webauthn_challenges
   ├──< webauthn_challenges (via user_id)

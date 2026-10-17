@@ -303,6 +303,17 @@ IP address.
 
 ---
 
+## API tokens
+
+Scripts and agents authenticate with long-lived, named API tokens instead of a
+session. The `/api/*` routes are mounted behind
+`middleware.RequireSessionOrAPIToken`; every other protected route keeps
+`RequireSession`, which refuses an `slk_` token with `403
+api_token_not_permitted`. Token management is browser-cookie only. See
+[api-tokens.md](api-tokens.md).
+
+---
+
 ## Admin authorization
 
 ### Who is an admin

@@ -26,6 +26,8 @@ with the architecture overview, then dive into the subsystem you need.
 
 - [Authentication & sessions](auth.md) — sessions, the guard middleware, the registration gate, admin authorization
 - [Passkeys / WebAuthn](passkeys.md) — the registration, login, and recovery ceremonies
+- [Using API tokens](using-api-tokens.md) — how-to for scripts and agents: create a token, call the API, examples, errors, rotation
+- [API tokens: design](api-tokens.md) — schema, middleware, rate limits, security and audit design
 
 ## Frontend
 

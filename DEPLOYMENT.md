@@ -471,6 +471,40 @@ deactivation succeeds on an un-migrated host **while silently losing its
 `link.deactivated` audit row** — a quiet integrity gap worth knowing about
 before you decide to "just leave it until morning."
 
+**The API tokens deploy (v0.4.0) needs one more:** `000014_create_api_tokens`
+(see `docs/database.md`). It only creates a new table and its indexes and
+touches no existing table, so it can't abort on existing data, and the
+running v0.3.0 binary ignores the table. Run it **before** deploying, while
+the old binary is still serving:
+
+```bash
+scripts/db/backup.sh
+migrate -path migrations -database "$DATABASE_URL" version   # expect 13
+migrate -path migrations -database "$DATABASE_URL" up        # 13 → 14
+./scripts/deploy.sh
+```
+
+If you skip it, the damage is narrow but includes an admin action:
+
+- **`POST /admin/users/{id}/deactivate` returns 500 and does not deactivate
+  the user.** Deactivation now revokes the user's API tokens in the same
+  transaction, so a missing table rolls back the whole thing. *This is the
+  one that matters:* you'd find out while trying to lock someone out.
+- The Account page's **API tokens** panel shows a load error, and
+  `/account/api-tokens` returns 500.
+- A request carrying an `slk_` bearer token gets `500 internal_error` instead
+  of `401` (no such tokens can exist yet).
+
+Everything else (sign-in, sessions, links, campaigns, redirects, click
+recording) touches nothing in `000014` and keeps working.
+
+Apache needs no change: `mod_proxy` forwards the `Authorization` header to
+the service, and the default `combined` log format doesn't record it.
+
+Rolling back (`migrate ... down 1`) drops `api_tokens` and every issued
+token with it. Roll back the binary first if you need to; the v0.3.0 binary
+runs fine on a v14 schema.
+
 ### Manual steps (what the script automates)
 
 To deploy a new version by hand after pulling code changes:
