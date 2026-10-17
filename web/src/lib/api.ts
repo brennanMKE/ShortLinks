@@ -9,6 +9,8 @@ import type {
   LinkList,
   LinkDetail,
   Credential,
+  ApiToken,
+  CreatedApiToken,
   AuditEntry,
   FilterRule,
   AdminUser,
@@ -478,6 +480,32 @@ export function renameCredential(id: number, deviceName: string): Promise<Creden
 /** DELETE /account/credentials/{id} — revoke a passkey. */
 export function revokeCredential(id: number): Promise<{ message: string }> {
   return apiDelete<{ message: string }>(`/account/credentials/${id}`);
+}
+
+// ── Account (API tokens) ────────────────────────────────────────────────────
+// Browser-session only: the server refuses these routes for any request with
+// an Authorization header, so they can't be driven by a token.
+
+/** GET /account/api-tokens — the caller's API tokens (never their secrets). */
+export function listApiTokens(): Promise<ApiToken[]> {
+  return apiGet<ApiToken[]>('/account/api-tokens');
+}
+
+/** Body accepted by POST /account/api-tokens. expires_at null = never expires. */
+export interface CreateApiTokenInput {
+  name: string;
+  read_only: boolean;
+  expires_at: string | null;
+}
+
+/** POST /account/api-tokens — mint a token. The response's `token` is shown once. */
+export function createApiToken(input: CreateApiTokenInput): Promise<CreatedApiToken> {
+  return apiPost<CreatedApiToken>('/account/api-tokens', input);
+}
+
+/** DELETE /account/api-tokens/{id} — revoke a token immediately. */
+export function revokeApiToken(id: number): Promise<ApiToken> {
+  return apiDelete<ApiToken>(`/account/api-tokens/${id}`);
 }
 
 // ── Admin ───────────────────────────────────────────────────────────────────

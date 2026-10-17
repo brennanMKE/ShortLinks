@@ -1,8 +1,10 @@
 package middleware
 
 import (
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -18,6 +20,9 @@ import (
 // installed via Middleware. Each distinct client IP gets its own
 // *rate.Limiter created lazily on first sight and reused thereafter; the map is
 // guarded by a mutex so the middleware is safe for concurrent use.
+//
+// The bucket key is normally the client IP, but limiterFor takes any string:
+// the API-token guard (apitoken.go) keys one limiter by token id instead.
 //
 // Memory note: limiters are never evicted. For this single-instance service
 // behind Apache, the set of distinct client IPs is bounded enough that the
@@ -46,18 +51,27 @@ func NewRateLimiter(r rate.Limit, burst int) *RateLimiter {
 	}
 }
 
-// limiterFor returns the *rate.Limiter for the given IP, creating it on first
-// sight. The lock is held only for the map lookup/insert.
-func (rl *RateLimiter) limiterFor(ip string) *rate.Limiter {
+// limiterFor returns the *rate.Limiter for the given key (usually an IP),
+// creating it on first sight. The lock is held only for the map lookup/insert.
+func (rl *RateLimiter) limiterFor(key string) *rate.Limiter {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	lim, ok := rl.byIP[ip]
+	lim, ok := rl.byIP[key]
 	if !ok {
 		lim = rate.NewLimiter(rl.rate, rl.burst)
-		rl.byIP[ip] = lim
+		rl.byIP[key] = lim
 	}
 	return lim
+}
+
+// retryAfterSeconds is the Retry-After value for a 429 from this limiter: the
+// time for one token to refill, rounded up to a whole second.
+func (rl *RateLimiter) retryAfterSeconds() string {
+	if rl.rate <= 0 {
+		return "60"
+	}
+	return strconv.Itoa(int(math.Ceil(1 / float64(rl.rate))))
 }
 
 // Middleware returns an http middleware that rejects requests from a client IP

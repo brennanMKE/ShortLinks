@@ -54,6 +54,7 @@ type Store struct {
 	audit     []audit.Record
 	sessions  map[string]sessionEntry // token → session
 	settings  []auth.Setting
+	apiTokens []apiTokenEntry
 	// nextLinkID is the auto-increment counter for link IDs.
 	nextLinkID int64
 	// nextRuleID is the auto-increment counter for filter rule IDs.
@@ -62,6 +63,8 @@ type Store struct {
 	nextCampaignID int64
 	// nextAuditID is the auto-increment counter for audit record IDs.
 	nextAuditID int64
+	// nextAPITokenID is the auto-increment counter for API token IDs.
+	nextAPITokenID int64
 }
 
 type sessionEntry struct {

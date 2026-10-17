@@ -28,6 +28,7 @@
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
+  import ApiTokens from '../lib/ApiTokens.svelte';
   import { APP_NAME } from '../lib/branding';
 
   let loading = $state(true);
@@ -309,6 +310,8 @@
       </ul>
     {/if}
   </Panel>
+
+  <ApiTokens />
 </div>
 
 <style>

@@ -204,11 +204,17 @@ func servePostgres(cfg *config.Config) error {
 	requireAdmin := func(next http.Handler) http.Handler {
 		return requireSession(middleware.RequireAdmin(next))
 	}
+	// API tokens: the /api/* data routes additionally accept an "slk_" bearer
+	// token (requireAPI), while minting/revoking tokens is browser-cookie only
+	// (requireCookie) so a token can never be used to create more tokens.
+	apiTokensH := handlers.NewAPITokensHandler(store, auditLogger)
+	requireAPI := middleware.RequireSessionOrAPIToken(store, store, middleware.DefaultAPITokenLimits())
+	requireCookie := middleware.RequireCookieSession(store)
 
 	return mountAndServe(cfg, pool,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
-		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH,
-		requireSession, requireAdmin, nil /* no outer middleware in production */)
+		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH, apiTokensH,
+		requireSession, requireAdmin, requireAPI, requireCookie, nil /* no outer middleware in production */)
 }
 
 // serveDevMode boots the app without PostgreSQL using the in-memory dev store.
@@ -290,10 +296,14 @@ func serveDevMode(cfg *config.Config) error {
 	// (empty, in dev) filter check.
 	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil, ds, ds, cfg.BaseURL)
 
+	apiTokensH := handlers.NewAPITokensHandler(ds, nil)
+	requireAPI := middleware.RequireSessionOrAPIToken(ds, ds, middleware.DefaultAPITokenLimits())
+	requireCookie := middleware.RequireCookieSession(ds)
+
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
-		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH,
-		requireSession, requireAdmin, devAutoLogin)
+		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH, apiTokensH,
+		requireSession, requireAdmin, requireAPI, requireCookie, devAutoLogin)
 }
 
 // mountAndServe registers all routes on a new ServeMux and starts listening.
@@ -319,8 +329,11 @@ func mountAndServe(
 	linksH *handlers.LinksHandler,
 	campaignsH *handlers.CampaignsHandler,
 	meH *handlers.MeHandler,
+	apiTokensH *handlers.APITokensHandler,
 	requireSession func(http.Handler) http.Handler,
 	requireAdmin func(http.Handler) http.Handler,
+	requireAPI func(http.Handler) http.Handler,
+	requireCookie func(http.Handler) http.Handler,
 	outerMiddleware func(http.Handler) http.Handler,
 ) error {
 	// Per-IP rate limiters for the abuse-prone public auth endpoints (PRD Phase
@@ -359,6 +372,13 @@ func mountAndServe(
 	mux.Handle("PATCH /account/credentials/{id}", requireSession(http.HandlerFunc(credsH.Rename)))
 	mux.Handle("DELETE /account/credentials/{id}", requireSession(http.HandlerFunc(credsH.Revoke)))
 
+	// API token management — browser-cookie sessions only (RequireCookieSession
+	// refuses any Authorization header), so neither an API token nor a bearer
+	// session can mint or revoke tokens. The secret is returned once, by POST.
+	mux.Handle("GET /account/api-tokens", requireCookie(http.HandlerFunc(apiTokensH.List)))
+	mux.Handle("POST /account/api-tokens", requireCookie(http.HandlerFunc(apiTokensH.Create)))
+	mux.Handle("DELETE /account/api-tokens/{id}", requireCookie(http.HandlerFunc(apiTokensH.Revoke)))
+
 	// Admin-only runtime settings (#0021): read all settings and update one.
 	// Both behind RequireSession + RequireAdmin. The registration gate
 	// (registrations_enabled) is read fresh from the DB on each
@@ -394,57 +414,57 @@ func mountAndServe(
 	// Link CRUD API (#0022) — all behind RequireSession and scoped to the
 	// authenticated user in the store. Dedup (#0023), URL filtering (#0024), audit
 	// (#0025), and the #0026 SSE broadcast all layer onto the create path.
-	mux.Handle("POST /api/links", requireSession(http.HandlerFunc(linksH.Create)))
-	mux.Handle("GET /api/links", requireSession(http.HandlerFunc(linksH.List)))
-	mux.Handle("GET /api/links/{key}", requireSession(http.HandlerFunc(linksH.Get)))
-	mux.Handle("PATCH /api/links/{key}", requireSession(http.HandlerFunc(linksH.Patch)))
-	mux.Handle("DELETE /api/links/{key}", requireSession(http.HandlerFunc(linksH.Delete)))
+	mux.Handle("POST /api/links", requireAPI(http.HandlerFunc(linksH.Create)))
+	mux.Handle("GET /api/links", requireAPI(http.HandlerFunc(linksH.List)))
+	mux.Handle("GET /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Get)))
+	mux.Handle("PATCH /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Patch)))
+	mux.Handle("DELETE /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Delete)))
 	// QR codes (#0106): vector SVG and print-resolution PNG, each encoding
 	// the link's SHORT URL (never the destination) so a scan is recorded as
 	// a click like any other visit — see internal/qr's package doc comment.
-	mux.Handle("GET /api/links/{key}/qr.svg", requireSession(http.HandlerFunc(linksH.QRSVG)))
-	mux.Handle("GET /api/links/{key}/qr.png", requireSession(http.HandlerFunc(linksH.QRPNG)))
+	mux.Handle("GET /api/links/{key}/qr.svg", requireAPI(http.HandlerFunc(linksH.QRSVG)))
+	mux.Handle("GET /api/links/{key}/qr.png", requireAPI(http.HandlerFunc(linksH.QRPNG)))
 
 	// Campaign CRUD + link-membership + stats API (#0098, #0099, #0102) — all
 	// behind RequireSession and scoped to the authenticated user in the
 	// store. Not mounted when campaignsH is nil (dev mode has no dev-store
 	// backing for campaigns).
 	if campaignsH != nil {
-		mux.Handle("GET /api/campaigns", requireSession(http.HandlerFunc(campaignsH.List)))
-		mux.Handle("POST /api/campaigns", requireSession(http.HandlerFunc(campaignsH.Create)))
-		mux.Handle("GET /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Get)))
-		mux.Handle("PATCH /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Patch)))
-		mux.Handle("DELETE /api/campaigns/{slug}", requireSession(http.HandlerFunc(campaignsH.Delete)))
+		mux.Handle("GET /api/campaigns", requireAPI(http.HandlerFunc(campaignsH.List)))
+		mux.Handle("POST /api/campaigns", requireAPI(http.HandlerFunc(campaignsH.Create)))
+		mux.Handle("GET /api/campaigns/{slug}", requireAPI(http.HandlerFunc(campaignsH.Get)))
+		mux.Handle("PATCH /api/campaigns/{slug}", requireAPI(http.HandlerFunc(campaignsH.Patch)))
+		mux.Handle("DELETE /api/campaigns/{slug}", requireAPI(http.HandlerFunc(campaignsH.Delete)))
 		// Campaign rollups (#0102): total/over-time/per-link/channel stats,
 		// optionally windowed via ?from=/?to=.
-		mux.Handle("GET /api/campaigns/{slug}/stats", requireSession(http.HandlerFunc(campaignsH.Stats)))
+		mux.Handle("GET /api/campaigns/{slug}/stats", requireAPI(http.HandlerFunc(campaignsH.Stats)))
 		// Link membership (#0099): list, assign, and unassign the links that
 		// belong to a campaign.
-		mux.Handle("GET /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(campaignsH.ListLinks)))
-		mux.Handle("POST /api/campaigns/{slug}/links", requireSession(http.HandlerFunc(campaignsH.AssignLinks)))
-		mux.Handle("DELETE /api/campaigns/{slug}/links/{key}", requireSession(http.HandlerFunc(campaignsH.UnassignLink)))
+		mux.Handle("GET /api/campaigns/{slug}/links", requireAPI(http.HandlerFunc(campaignsH.ListLinks)))
+		mux.Handle("POST /api/campaigns/{slug}/links", requireAPI(http.HandlerFunc(campaignsH.AssignLinks)))
+		mux.Handle("DELETE /api/campaigns/{slug}/links/{key}", requireAPI(http.HandlerFunc(campaignsH.UnassignLink)))
 		// Batch create (#0105): one destination URL, a row per channel, one
 		// short link per non-blank row, all assigned to this campaign in a
 		// single atomic request.
-		mux.Handle("POST /api/campaigns/{slug}/links/batch", requireSession(http.HandlerFunc(campaignsH.BatchCreateLinks)))
+		mux.Handle("POST /api/campaigns/{slug}/links/batch", requireAPI(http.HandlerFunc(campaignsH.BatchCreateLinks)))
 		// Bulk QR download (#0106): a zip archive of every assigned link's
 		// SVG + PNG QR codes, named so printed sheets can be matched back to
 		// their placements.
-		mux.Handle("GET /api/campaigns/{slug}/qr.zip", requireSession(http.HandlerFunc(campaignsH.QRZip)))
+		mux.Handle("GET /api/campaigns/{slug}/qr.zip", requireAPI(http.HandlerFunc(campaignsH.QRZip)))
 		// Per-link CSV export (#0107): the campaign's rollup as a downloadable
 		// CSV, over the same optional ?from=/?to= window and defaults as
 		// /stats above, reusing that same clicks.StatsStore.CampaignRollup
 		// call so the two can never disagree.
-		mux.Handle("GET /api/campaigns/{slug}/export.csv", requireSession(http.HandlerFunc(campaignsH.Export)))
+		mux.Handle("GET /api/campaigns/{slug}/export.csv", requireAPI(http.HandlerFunc(campaignsH.Export)))
 	}
 
 	// Current user profile (#0027) — behind RequireSession; returns the caller's
 	// {id, email, is_admin} for the SPA to gate the admin view.
-	mux.Handle("GET /api/me", requireSession(http.HandlerFunc(meH.Me)))
+	mux.Handle("GET /api/me", requireAPI(http.HandlerFunc(meH.Me)))
 
 	// SSE stream (#0026) — behind RequireSession; pushes link.created events to
 	// the authenticated user's connected dashboard clients.
-	mux.Handle("GET /api/events", requireSession(http.HandlerFunc(eventsH.Stream)))
+	mux.Handle("GET /api/events", requireAPI(http.HandlerFunc(eventsH.Stream)))
 
 	// Svelte SPA (#0038) — the catch-all served LAST. Under the Go 1.22 mux this
 	// "GET /" pattern is the least specific, so every explicit route above wins

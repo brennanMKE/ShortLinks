@@ -133,6 +133,13 @@ func insert(ctx context.Context, q querier, e Entry) error {
 		}
 		metaJSON = b
 	}
+	if tok, ok := apiTokenFrom(ctx); ok {
+		b, err := withAPITokenMetadata(metaJSON, tok)
+		if err != nil {
+			return fmt.Errorf("audit: annotating metadata for %q: %w", e.Action, err)
+		}
+		metaJSON = b
+	}
 
 	// An empty IP string would be rejected by the INET column, so map it to NULL.
 	var ip any
@@ -166,4 +173,49 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// apiTokenKey is the context key under which WithAPIToken stores the token a
+// request authenticated with.
+type apiTokenKey struct{}
+
+// APITokenRef identifies the API token behind a request, for attribution.
+type APITokenRef struct {
+	ID   int64
+	Name string
+}
+
+// WithAPIToken marks ctx as belonging to a request authenticated by an API
+// token. Every audit row written under that context — by any handler or store,
+// through Write, WriteTx, or Record — gets {"via":"api_token",
+// "api_token_id":…, "api_token_name":…} merged into its metadata, so the log
+// answers "what did the agent do?" without every call site having to know.
+// The auth middleware sets this; nothing else should.
+func WithAPIToken(ctx context.Context, ref APITokenRef) context.Context {
+	return context.WithValue(ctx, apiTokenKey{}, ref)
+}
+
+func apiTokenFrom(ctx context.Context) (APITokenRef, bool) {
+	ref, ok := ctx.Value(apiTokenKey{}).(APITokenRef)
+	return ref, ok
+}
+
+// withAPITokenMetadata merges the token attribution into a marshalled metadata
+// object (nil means no metadata yet). Metadata that is not a JSON object — no
+// call site writes one today — is nested under "metadata" rather than dropped.
+func withAPITokenMetadata(metaJSON []byte, ref APITokenRef) ([]byte, error) {
+	m := map[string]any{}
+	if metaJSON != nil {
+		if err := json.Unmarshal(metaJSON, &m); err != nil {
+			var v any
+			if err := json.Unmarshal(metaJSON, &v); err != nil {
+				return nil, err
+			}
+			m = map[string]any{"metadata": v}
+		}
+	}
+	m["via"] = "api_token"
+	m["api_token_id"] = ref.ID
+	m["api_token_name"] = ref.Name
+	return json.Marshal(m)
 }

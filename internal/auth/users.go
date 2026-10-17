@@ -160,6 +160,14 @@ func (s *Store) DeactivateUser(ctx context.Context, id int64, auditor *audit.Log
 	if _, err := tx.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1`, id); err != nil {
 		return ManagedUser{}, fmt.Errorf("auth: deleting sessions for user %d: %w", id, err)
 	}
+	// Revoke every API token too. ResolveAPIToken already refuses tokens of an
+	// inactive owner, but revoking (rather than relying on that check) means a
+	// later reactivation does not silently bring old agent credentials back.
+	if _, err := tx.Exec(ctx,
+		`UPDATE api_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, id,
+	); err != nil {
+		return ManagedUser{}, fmt.Errorf("auth: revoking api tokens for user %d: %w", id, err)
+	}
 
 	// account.deactivated audit, in-band so it commits with the change.
 	if auditor != nil {

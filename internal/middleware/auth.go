@@ -21,14 +21,21 @@ const bearerPrefix = "bearer "
 // token) falls through to the cookie so the browser SPA is never affected.
 // Returns "" when neither source carries a token.
 func sessionToken(r *http.Request) string {
-	if h := r.Header.Get("Authorization"); len(h) > len(bearerPrefix) &&
-		strings.EqualFold(h[:len(bearerPrefix)], bearerPrefix) {
-		if tok := strings.TrimSpace(h[len(bearerPrefix):]); tok != "" {
-			return tok
-		}
+	if tok := bearerToken(r); tok != "" {
+		return tok
 	}
 	if c, err := r.Cookie(auth.SessionCookieName); err == nil {
 		return c.Value
+	}
+	return ""
+}
+
+// bearerToken returns the token from a well-formed "Authorization: Bearer
+// <token>" header, or "" when the header is absent or malformed.
+func bearerToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); len(h) > len(bearerPrefix) &&
+		strings.EqualFold(h[:len(bearerPrefix)], bearerPrefix) {
+		return strings.TrimSpace(h[len(bearerPrefix):])
 	}
 	return ""
 }
@@ -45,7 +52,17 @@ type AuthUser struct {
 	ID      int64
 	Email   string
 	IsAdmin bool
+
+	// APITokenID is non-zero when the request authenticated with an API token
+	// rather than a session (RequireSessionOrAPIToken); APITokenName and
+	// ReadOnly describe that token. IsAdmin is always false in that case.
+	APITokenID   int64
+	APITokenName string
+	ReadOnly     bool
 }
+
+// ViaAPIToken reports whether the request authenticated with an API token.
+func (u *AuthUser) ViaAPIToken() bool { return u.APITokenID != 0 }
 
 // SessionResolver validates a raw session cookie value and returns the
 // authenticated user, applying the sliding-window bump as a side effect. It is
@@ -91,6 +108,10 @@ func withUser(ctx context.Context, u *AuthUser) context.Context {
 // calling next. The validation also applies the 30-day sliding window (bumps
 // last_seen_at and extends expires_at) per the PRD's Session Security rules.
 //
+// RequireSession never accepts an API token ("slk_…" bearer): those answer 403
+// api_token_not_permitted. Routes that scripts may use are mounted behind
+// RequireSessionOrAPIToken instead.
+//
 // It writes a 401 JSON response and stops the chain when:
 //   - no session token is present (neither header nor cookie),
 //   - the token is unknown or the session has expired (the expired row is
@@ -104,6 +125,13 @@ func RequireSession(resolver SessionResolver) func(http.Handler) http.Handler {
 			token := sessionToken(r)
 			if token == "" {
 				writeUnauthenticated(w)
+				return
+			}
+			// An API token on a session-only route (account, admin, token
+			// management) is refused outright — without a lookup, so the
+			// response says nothing about whether the token is valid.
+			if auth.IsAPIToken(token) {
+				writeJSONError(w, http.StatusForbidden, "api_token_not_permitted")
 				return
 			}
 

@@ -29,6 +29,12 @@ const (
 	// any passkey_credentials row, only sessions.
 	ActionSessionsRevokedAll = "session.revoked_all"
 
+	// API token lifecycle. Tokens are minted and revoked only from a browser
+	// session (never by another token); actions taken WITH a token carry
+	// via/api_token_id/api_token_name in their metadata (see WithAPIToken).
+	ActionAPITokenCreated = "api_token.created"
+	ActionAPITokenRevoked = "api_token.revoked"
+
 	// Link lifecycle.
 	ActionLinkCreated     = "link.created"
 	ActionLinkDeactivated = "link.deactivated"
@@ -66,4 +72,5 @@ const (
 	TargetSettings   = "settings"
 	TargetURLFilter  = "url_filter"
 	TargetCampaign   = "campaign"
+	TargetAPIToken   = "api_token"
 )

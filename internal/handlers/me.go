@@ -44,6 +44,15 @@ type meResponse struct {
 	// every displayed short URL from it (web/src/lib/links.ts's shortUrl), so
 	// it matches what internal/qr encodes into the QR codes for the same link.
 	BaseURL string `json:"base_url"`
+	// APIToken is present only when the request authenticated with an API
+	// token, so a script or agent can confirm which token it is using.
+	APIToken *meAPIToken `json:"api_token,omitempty"`
+}
+
+type meAPIToken struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	ReadOnly bool   `json:"read_only"`
 }
 
 // Me handles GET /api/me. It returns 200 with the authenticated user's profile.
@@ -56,10 +65,14 @@ func (h *MeHandler) Me(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
-	writeJSON(w, http.StatusOK, meResponse{
+	resp := meResponse{
 		ID:      u.ID,
 		Email:   u.Email,
 		IsAdmin: u.IsAdmin,
 		BaseURL: strings.TrimRight(h.baseURL, "/"),
-	})
+	}
+	if u.ViaAPIToken() {
+		resp.APIToken = &meAPIToken{ID: u.APITokenID, Name: u.APITokenName, ReadOnly: u.ReadOnly}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

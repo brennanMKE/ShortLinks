@@ -259,6 +259,32 @@ export interface CampaignRollup extends CampaignStats {
  * A registered passkey (GET /account/credentials item). Matches
  * internal/handlers/credentials.go `credentialView`.
  */
+/**
+ * One API token (GET /account/api-tokens item). Matches
+ * internal/handlers/apitokens.go `apiTokenView`. Never carries the secret —
+ * that is returned once, by createApiToken, as CreatedApiToken.token.
+ */
+export interface ApiToken {
+  id: number;
+  name: string;
+  /** Short display stub of the secret, e.g. "slk_AbCdEfGh". */
+  prefix: string;
+  read_only: boolean;
+  status: 'active' | 'expired' | 'revoked';
+  created_at: string;
+  /** null = never expires. */
+  expires_at: string | null;
+  last_used_at: string | null;
+  last_used_ip?: string;
+  revoked_at: string | null;
+}
+
+/** POST /account/api-tokens response: the only time the secret is sent. */
+export interface CreatedApiToken {
+  token: string;
+  api_token: ApiToken;
+}
+
 export interface Credential {
   id: number;
   device_name: string;
