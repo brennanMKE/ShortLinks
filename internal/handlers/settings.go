@@ -221,7 +221,7 @@ func validHomeRedirectURL(value, baseURL string) error {
 	// Never loop back to this instance's own home page. Hostname only: anything
 	// on the instance's host is pointless as a primary site.
 	if base, perr := url.Parse(baseURL); perr == nil && base.Hostname() != "" &&
-		strings.EqualFold(u.Hostname(), base.Hostname()) {
+		strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), strings.TrimSuffix(base.Hostname(), ".")) {
 		return fmt.Errorf("%s must not point at this instance", settingHomeRedirectURL)
 	}
 	return nil
