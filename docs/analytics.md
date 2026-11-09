@@ -426,7 +426,8 @@ func (s *StatsStore) CampaignRollup(ctx, campaignID int64, from, to time.Time) (
 ```
 
 `CampaignSummary` (stats + timeseries) backs `GET /api/campaigns/{slug}`;
-`CampaignRollup` (+ by-link + series-by-link) backs
+`CampaignRollup` (+ by-link + series-by-link + by-placement,
+`campaignClicksByPlacementQuery`, #0122) backs
 `GET /api/campaigns/{slug}/stats` and the CSV export
 (`docs/campaigns.md`'s "CSV export" section). Assembling a response from the
 four standalone methods directly — each against its own snapshot — is
@@ -600,7 +601,7 @@ When `buckets` is empty or null, the component renders "No data." in faint text.
 | `internal/clicks/retention.go` | `Sweeper`, `DetailRetention`: strips `ip_hash`/`user_agent` after 90 days (#0121) |
 | `internal/clicks/recorder.go` | `Click` type, `Recorder`, `RecordClick` (fire-and-forget), `Record` (the #0100 UTM fallback + campaign_id resolution + #0101 bot classification) |
 | `internal/clicks/botdetect.go` | `IsBot`, `BotUserAgentSubstrings` (#0101) |
-| `internal/clicks/stats.go` | `StatsStore`; per-link `UTMStatsForLink`/`ClicksOverTime`; campaign `CampaignStats`/`CampaignSummary`/`CampaignRollup`/`CampaignClicksOverTime`/`CampaignClicksByLink`/`CampaignSeriesByLink` (#0102); `Bucket`, `UTMStats`, `DayBucket`, `TimeseriesResult`, `LinkBucket`, `LinkSeries` |
+| `internal/clicks/stats.go` | `StatsStore`; per-link `UTMStatsForLink`/`ClicksOverTime`; campaign `CampaignStats`/`CampaignSummary`/`CampaignRollup`/`CampaignClicksOverTime`/`CampaignClicksByLink`/`CampaignSeriesByLink` (#0102); `Bucket`, `UTMStats`, `DayBucket`, `TimeseriesResult`, `LinkBucket`, `PlacementBucket`, `LinkSeries` |
 | `internal/clicks/stats_test.go` | DB integration tests for `ClicksOverTime` (BasicBuckets, NoClicks, ZeroDefaults) and the campaign queries |
 | `internal/handlers/links.go` | Link-detail handler; owns the `statsProvider` interface and populates `linkDetailView.Timeseries` |
 | `internal/handlers/campaigns.go` | Campaign endpoints, including `GET /api/campaigns/{slug}/stats` |
@@ -611,4 +612,4 @@ When `buckets` is empty or null, the component renders "No data." in faint text.
 | `web/src/lib/UTMBarChart.svelte` | Inline-SVG proportional bar chart (per UTM dimension), reused for both per-link and per-campaign breakdowns |
 | `web/src/views/LinkDetail.svelte` | Renders both per-link chart panels; sources data from `GET /api/links/{key}` |
 | `web/src/views/CampaignDetail.svelte` | Renders the campaign summary, charts, and links table; sources data from `GET /api/campaigns/{slug}` and `.../stats` |
-| `web/src/lib/types.ts` | TypeScript types: `DayBucket`, `TimeseriesResult`, `UTMBucket`, `LinkDetail`, `CampaignStats`, `LinkBucket`, `LinkSeries` |
+| `web/src/lib/types.ts` | TypeScript types: `DayBucket`, `TimeseriesResult`, `UTMBucket`, `LinkDetail`, `CampaignStats`, `LinkBucket`, `PlacementBucket`, `LinkSeries` |

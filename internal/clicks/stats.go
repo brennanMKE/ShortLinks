@@ -287,6 +287,8 @@ type CampaignRollup struct {
 	Timeseries   TimeseriesResult `json:"timeseries"`
 	ByLink       []LinkBucket     `json:"by_link"`
 	SeriesByLink []LinkSeries     `json:"series_by_link"`
+	// ByPlacement is the clicks-by-placement rollup (#0122).
+	ByPlacement []PlacementBucket `json:"by_placement"`
 }
 
 // beginCampaignReadTx opens the REPEATABLE READ, read-only transaction every
@@ -409,7 +411,11 @@ func (s *StatsStore) CampaignRollup(ctx context.Context, campaignID int64, from,
 	if err != nil {
 		return CampaignRollup{}, err
 	}
-	return CampaignRollup{Stats: stats, Timeseries: ts, ByLink: byLink, SeriesByLink: seriesByLink}, nil
+	byPlacement, err := campaignClicksByPlacementQuery(ctx, tx, campaignID, resolvedFrom, resolvedTo)
+	if err != nil {
+		return CampaignRollup{}, err
+	}
+	return CampaignRollup{Stats: stats, Timeseries: ts, ByLink: byLink, SeriesByLink: seriesByLink, ByPlacement: byPlacement}, nil
 }
 
 // campaignStatsQuery is CampaignStats's read logic with the window already
@@ -671,6 +677,94 @@ func campaignClicksByLinkQuery(ctx context.Context, q rowQuerier, campaignID int
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("clicks: iterating campaign link rows: %w", err)
+	}
+	return out, nil
+}
+
+// PlacementBucket is one row of the campaign's clicks-by-placement rollup
+// (#0122). Placement is the display spelling or NoneBucket. LinkCount is
+// current membership (links.campaign_id); Count is windowed, bot-excluded
+// clicks attributed to the campaign (clicks.campaign_id), so the two columns
+// are on different time scales, like link_count vs stats.click_count on the
+// campaign detail page. Aggregates only: no per-click detail is returned.
+type PlacementBucket struct {
+	Placement string `json:"placement"`
+	LinkCount int64  `json:"link_count"`
+	Count     int64  `json:"count"`
+}
+
+// campaignClicksByPlacementQuery groups the campaign by normalized placement
+// (lower(btrim(COALESCE(placement, ”)))). NULL, empty and whitespace-only
+// placements all fold into one NoneBucket row.
+//
+// The links CTE uses links.campaign_id (current membership) for link_count;
+// the clicks CTE uses clicks.campaign_id (attribution, #0100) for the click
+// count, so a since-unassigned link's clicks still count. Hence the sum
+// properties: sum(Count) == CampaignStats.ClickCount and sum(LinkCount) ==
+// the campaign's current link count. A link with no clicks in the window
+// still gets a row (count 0). The display spelling is the most common
+// btrim(placement) among current links, ties broken by byte order; a group
+// with clicks but no current link falls back to the normalized key.
+//
+// Limit: lower() is per-character simple case mapping under the database's
+// LC_CTYPE, not full Unicode case folding; a C-locale database folds ASCII
+// only. Internal whitespace is not normalized.
+//
+// Not exposed as a standalone store method: read it through CampaignRollup so
+// it shares the REPEATABLE READ snapshot.
+func campaignClicksByPlacementQuery(ctx context.Context, q rowQuerier, campaignID int64, from, to time.Time) ([]PlacementBucket, error) {
+	rows, err := q.Query(ctx,
+		`WITH members AS (
+		   SELECT btrim(COALESCE(placement, ''))        AS spelling,
+		          lower(btrim(COALESCE(placement, ''))) AS grp
+		     FROM links WHERE campaign_id = $1
+		 ),
+		 link_groups AS (
+		   SELECT grp, COUNT(*) AS link_count FROM members GROUP BY grp
+		 ),
+		 click_groups AS (
+		   SELECT lower(btrim(COALESCE(l.placement, ''))) AS grp, COUNT(*) AS click_count
+		     FROM clicks k LEFT JOIN links l ON l.id = k.link_id
+		    WHERE k.campaign_id = $1 AND k.clicked_at >= $2 AND k.clicked_at < $3 AND k.is_bot = FALSE
+		    GROUP BY 1
+		 ),
+		 spellings AS (
+		   SELECT DISTINCT ON (grp) grp, spelling
+		     FROM (SELECT grp, spelling, COUNT(*) AS votes FROM members GROUP BY grp, spelling) v
+		    ORDER BY grp, votes DESC, spelling COLLATE "C" ASC
+		 )
+		 SELECT g.grp, COALESCE(sp.spelling, ''), COALESCE(lg.link_count, 0), COALESCE(cg.click_count, 0)
+		   FROM (SELECT grp FROM link_groups UNION SELECT grp FROM click_groups) g
+		   LEFT JOIN link_groups  lg ON lg.grp = g.grp
+		   LEFT JOIN click_groups cg ON cg.grp = g.grp
+		   LEFT JOIN spellings    sp ON sp.grp = g.grp
+		  ORDER BY 4 DESC, 3 DESC, g.grp COLLATE "C" ASC`,
+		campaignID, from, to,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("clicks: querying campaign clicks by placement: %w", err)
+	}
+	defer rows.Close()
+
+	out := []PlacementBucket{}
+	for rows.Next() {
+		var grp, spelling string
+		var b PlacementBucket
+		if err := rows.Scan(&grp, &spelling, &b.LinkCount, &b.Count); err != nil {
+			return nil, fmt.Errorf("clicks: scanning campaign placement bucket: %w", err)
+		}
+		switch {
+		case grp == "":
+			b.Placement = NoneBucket
+		case spelling == "":
+			b.Placement = grp
+		default:
+			b.Placement = spelling
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("clicks: iterating campaign placement rows: %w", err)
 	}
 	return out, nil
 }

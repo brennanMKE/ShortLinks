@@ -471,9 +471,10 @@ func (h *CampaignsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // see CampaignRollup's doc comment for why that matters.
 type campaignStatsResponse struct {
 	clicks.CampaignStats
-	Timeseries   clicks.TimeseriesResult `json:"timeseries"`
-	ByLink       []clicks.LinkBucket     `json:"by_link"`
-	SeriesByLink []clicks.LinkSeries     `json:"series_by_link"`
+	Timeseries   clicks.TimeseriesResult  `json:"timeseries"`
+	ByLink       []clicks.LinkBucket      `json:"by_link"`
+	SeriesByLink []clicks.LinkSeries      `json:"series_by_link"`
+	ByPlacement  []clicks.PlacementBucket `json:"by_placement"`
 }
 
 // parseStatsWindow parses the optional ?from=/?to= query parameters GET
@@ -567,6 +568,7 @@ func (h *CampaignsHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		Timeseries:    rollup.Timeseries,
 		ByLink:        rollup.ByLink,
 		SeriesByLink:  rollup.SeriesByLink,
+		ByPlacement:   rollup.ByPlacement,
 	})
 }
 

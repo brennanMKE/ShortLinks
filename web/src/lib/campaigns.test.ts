@@ -3,9 +3,12 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { currentUser } from './stores';
-import type { CampaignStats, CampaignWithCounts, Link, LinkBucket } from './types';
+import type { CampaignStats, CampaignWithCounts, Link, LinkBucket, PlacementBucket } from './types';
 import {
   visibleCampaigns,
+  hasNamedPlacement,
+  placementClickTotal,
+  NONE_PLACEMENT,
   campaignDateRangeLabel,
   formatDateOnly,
   toDateInput,
@@ -1047,5 +1050,27 @@ describe('buildBatchCreateRows', () => {
 
   it('returns an empty array when every row is blank', () => {
     expect(buildBatchCreateRows('https://example.com/promo', [emptyBatchChannelRow()], '', '')).toEqual([]);
+  });
+});
+
+describe('hasNamedPlacement / placementClickTotal (#0122)', () => {
+  const none: PlacementBucket = { placement: NONE_PLACEMENT, link_count: 2, count: 3 };
+  const shop: PlacementBucket = { placement: 'Acme', link_count: 1, count: 4 };
+
+  it('is false for empty, undefined and null', () => {
+    expect(hasNamedPlacement([])).toBe(false);
+    expect(hasNamedPlacement(undefined)).toBe(false);
+    expect(hasNamedPlacement(null)).toBe(false);
+  });
+  it('is false when only the (none) row exists', () => {
+    expect(hasNamedPlacement([none])).toBe(false);
+  });
+  it('is true when any named placement exists', () => {
+    expect(hasNamedPlacement([shop, none])).toBe(true);
+  });
+  it('sums clicks, and is 0 for empty input', () => {
+    expect(placementClickTotal([])).toBe(0);
+    expect(placementClickTotal(undefined)).toBe(0);
+    expect(placementClickTotal([shop, none])).toBe(7);
   });
 });

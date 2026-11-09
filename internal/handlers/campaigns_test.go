@@ -672,7 +672,7 @@ func TestCampaignsStats_ReturnsRollup(t *testing.T) {
 	if ebc, _ := body["excluded_bot_count"].(float64); ebc != 1 {
 		t.Errorf("excluded_bot_count = %v, want 1", body["excluded_bot_count"])
 	}
-	for _, key := range []string{"by_source", "by_medium", "by_content", "by_referer", "timeseries", "by_link", "series_by_link"} {
+	for _, key := range []string{"by_source", "by_medium", "by_content", "by_referer", "timeseries", "by_link", "series_by_link", "by_placement"} {
 		if _, present := body[key]; !present {
 			t.Errorf("%q key missing from stats response", key)
 		}
@@ -680,6 +680,14 @@ func TestCampaignsStats_ReturnsRollup(t *testing.T) {
 	byLink, ok := body["by_link"].([]any)
 	if !ok || len(byLink) != 1 {
 		t.Fatalf("by_link = %#v, want a 1-element array", body["by_link"])
+	}
+	byPlacement, ok := body["by_placement"].([]any)
+	if !ok || len(byPlacement) != 1 {
+		t.Fatalf("by_placement = %#v, want a 1-element array", body["by_placement"])
+	}
+	row, _ := byPlacement[0].(map[string]any)
+	if row["placement"] != "(none)" || row["link_count"] != float64(1) || row["count"] != float64(2) {
+		t.Errorf("by_placement[0] = %#v, want {(none), link_count 1, count 2}", row)
 	}
 }
 

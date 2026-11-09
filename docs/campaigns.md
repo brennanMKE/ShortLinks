@@ -128,7 +128,7 @@ user-visible.
 | `GET` | `/api/campaigns/{slug}` | Metadata + links + stats (`CampaignSummary`) |
 | `PATCH` | `/api/campaigns/{slug}` | Update name, description, dates, archived, defaults |
 | `DELETE` | `/api/campaigns/{slug}` | Delete (hard, not reversible; unassigns links/clicks, deletes neither) |
-| `GET` | `/api/campaigns/{slug}/stats` | Full rollup (`CampaignRollup`) — stats, timeseries, by-link, series-by-link |
+| `GET` | `/api/campaigns/{slug}/stats` | Full rollup (`CampaignRollup`) — stats, timeseries, by-link, series-by-link, by-placement |
 | `GET` | `/api/campaigns/{slug}/links` | Links in the campaign |
 | `POST` | `/api/campaigns/{slug}/links` | Assign existing links by key (≤50/request, **not atomic** — resolved independently in order, a failure stops the request without rolling back earlier successes) |
 | `DELETE` | `/api/campaigns/{slug}/links/{key}` | Unassign one link |
@@ -452,6 +452,26 @@ file is written with `encoding/csv` to a buffer rather than streamed
 (deliberate — a clean 500 beats a truncated download); and the export is
 bot-excluded by default, matching every other number in the campaign view.
 
+### Clicks by placement (#0122)
+
+`GET /api/campaigns/{slug}/stats` also returns `by_placement`, and
+CampaignDetail shows it as the "Clicks by placement" panel (between "Channel
+breakdown" and "Links"). Each row is `{placement, link_count, count}`, sorted
+by clicks descending, then link count, then name. Grouping is
+case-insensitive with surrounding whitespace trimmed (`Testing` and
+`testing ` are one row); the display name is the most common spelling among
+the group's links. NULL, empty and blank placements form one `(none)` row.
+`lower()` is the database's simple case mapping, not full Unicode folding.
+
+The two columns are on different time scales, like "Links" and "Clicks in
+window" in the summary: `link_count` is current campaign membership, `count`
+is windowed, bot-excluded clicks attributed via `clicks.campaign_id`. So the
+Clicks column sums to `click_count` and the Links column sums to the
+campaign's link count. A placement whose links have no clicks in the window
+still gets a row with `0`. When no link has a placement, the panel shows a
+note instead of a one-row table. Output is aggregate counts only; placement
+never enters a short URL, destination URL or UTM parameter.
+
 ---
 
 ## Bot exclusion (#0101)
@@ -601,7 +621,7 @@ Filed, open, and worth knowing about rather than assuming fixed:
 | `internal/handlers/campaigns.go` | All `/api/campaigns...` endpoints |
 | `internal/handlers/campaigns_export.go` | CSV export |
 | `internal/clicks/botdetect.go` | `IsBot`, `BotUserAgentSubstrings` |
-| `internal/clicks/stats.go` | `CampaignStats`, `CampaignSummary`, `CampaignRollup`, `CampaignClicksOverTime`, `CampaignClicksByLink`, `CampaignSeriesByLink` |
+| `internal/clicks/stats.go` | `CampaignStats`, `CampaignSummary`, `CampaignRollup`, `CampaignClicksOverTime`, `CampaignClicksByLink`, `CampaignSeriesByLink`, `PlacementBucket` |
 | `internal/qr/qr.go` | QR bitmap generation, SVG/PNG rendering, filenames |
 | `internal/devstore/devstore.go` | In-memory twins for `scripts/dev.sh` (`STORAGE=json`) |
 | `web/src/lib/campaigns.ts` | Pure shaping helpers for the list/detail views, batch rows, CSV/QR URL builders |

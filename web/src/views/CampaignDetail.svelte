@@ -142,10 +142,12 @@
     joinSentences,
     campaignUtmDimensions,
     isEmptyCampaignChannelStats,
+    hasNamedPlacement,
+    NONE_PLACEMENT,
   } from '../lib/campaigns';
   import { qrSvgUrl, qrPngUrl, shortUrlBase } from '../lib/links';
   import { formatDate } from '../lib/linkDetail';
-  import type { CampaignDetail, LinkBucket, LinkSeries } from '../lib/types';
+  import type { CampaignDetail, LinkBucket, LinkSeries, PlacementBucket } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
@@ -167,6 +169,7 @@
   let loadError = $state<string | null>(null);
   let detail = $state<CampaignDetail | null>(null);
   let byLink = $state<LinkBucket[]>([]);
+  let byPlacement = $state<PlacementBucket[]>([]);
   let seriesByLink = $state<LinkSeries[]>([]);
 
   // ── Charts (#0104) ────────────────────────────────────────────────────
@@ -238,9 +241,11 @@
     try {
       const rollup = await getCampaignStats(slug);
       byLink = rollup.by_link;
+      byPlacement = rollup.by_placement ?? [];
       seriesByLink = rollup.series_by_link;
     } catch {
       byLink = [];
+      byPlacement = [];
       seriesByLink = [];
     }
 
@@ -622,6 +627,44 @@
           and ShortLinks has no way to measure impressions. Relative bar height here does not by itself
           say which channel performed better.
         </p>
+      {/if}
+    </Panel>
+
+    <!-- Clicks by placement (#0122). Rows arrive sorted from the server. -->
+    <Panel title="Clicks by placement" noPadding>
+      <p class="text-faint chart-window-label">{windowLabel(detail.stats)}</p>
+      {#if byPlacement.length === 0}
+        <p class="text-muted empty-msg">No links or clicks yet.</p>
+      {:else if !hasNamedPlacement(byPlacement)}
+        <p class="text-muted empty-msg">
+          No link in this campaign has a placement. Set one on each link (for a poster, the shop name) to see clicks by placement.
+        </p>
+      {:else}
+        <div class="table-scroll">
+          <table class="placement-table">
+            <colgroup>
+              <col />
+              <col class="placement-num-col" />
+              <col class="placement-num-col" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Placement</th>
+                <th class="num">Links</th>
+                <th class="num">Clicks</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each byPlacement as row (row.placement)}
+                <tr>
+                  <td class="placement-name" class:text-muted={row.placement === NONE_PLACEMENT} title={row.placement}>{row.placement}</td>
+                  <td class="num">{row.link_count}</td>
+                  <td class="num">{row.count}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
       {/if}
     </Panel>
 
@@ -1020,6 +1063,20 @@
   }
   .empty-msg {
     padding: var(--space-4);
+  }
+  /* Clicks by placement (#0122): fixed layout + 100% width means the table can
+     never exceed .table-scroll at any viewport (#0103 zero horizontal scroll). */
+  .placement-table {
+    width: 100%;
+    table-layout: fixed;
+  }
+  .placement-num-col {
+    width: 5.5rem;
+  }
+  .placement-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .sort-btn {
     background: none;

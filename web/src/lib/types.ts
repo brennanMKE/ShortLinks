@@ -227,6 +227,21 @@ export interface LinkBucket {
 }
 
 /**
+ * One row of the campaign's clicks-by-placement rollup (GET
+ * /api/campaigns/{slug}/stats `by_placement`, #0122). Matches
+ * internal/clicks/stats.go `PlacementBucket`. `placement` is the display
+ * spelling, or "(none)" for links with no placement. TWO TIME SCALES:
+ * `link_count` is current campaign membership, `count` is windowed,
+ * bot-excluded clicks, like "Links" vs "Clicks in window" in the summary.
+ * Sorted server-side by count desc; aggregates only.
+ */
+export interface PlacementBucket {
+  placement: string;
+  link_count: number;
+  count: number;
+}
+
+/**
  * One named per-link series in the campaign's per-link clicks-over-time
  * chart (GET /api/campaigns/{slug}/stats `series_by_link`) — #0104's chart
  * input, unused by #0103 but typed here since it ships in the same response
@@ -250,6 +265,8 @@ export interface LinkSeries {
  * `series_by_link` are #0104's chart slot.
  */
 export interface CampaignRollup extends CampaignStats {
+  /** Clicks by placement (#0122); see PlacementBucket for the two time scales. */
+  by_placement: PlacementBucket[];
   timeseries: TimeseriesResult;
   by_link: LinkBucket[];
   series_by_link: LinkSeries[];

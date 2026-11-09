@@ -2,7 +2,7 @@
 // (#0103). Same discipline as utm.ts/charts.ts/linkDetail.ts — every function
 // here is unit-testable without a DOM or Svelte; see campaigns.test.ts.
 
-import type { Campaign, CampaignStats, CampaignWithCounts, Link, LinkBucket, UTMBucket } from './types';
+import type { Campaign, CampaignStats, CampaignWithCounts, Link, LinkBucket, PlacementBucket, UTMBucket } from './types';
 import { shortUrl } from './links';
 import { sortBuckets } from './linkDetail';
 import { composeUtmUrl, emptyUtmParams, type UtmParams } from './utm';
@@ -689,4 +689,23 @@ export function buildBatchCreateRows(
     utm_content: r.utm_content.trim() || undefined,
     placement: r.placement.trim() || undefined,
   }));
+}
+
+// ── Clicks by placement (#0122) ─────────────────────────────────────────────
+
+/** The label the server (clicks.NoneBucket) gives links with no placement. */
+export const NONE_PLACEMENT = '(none)';
+
+/**
+ * True when at least one row is a real placement. When false (empty, or only
+ * the "(none)" row) the panel shows a "set a placement" note instead of a
+ * one-row table.
+ */
+export function hasNamedPlacement(rows: PlacementBucket[] | undefined | null): boolean {
+  return (rows ?? []).some((r) => r.placement !== NONE_PLACEMENT);
+}
+
+/** Sum of the Clicks column; equals the campaign's "Clicks in window". */
+export function placementClickTotal(rows: PlacementBucket[] | undefined | null): number {
+  return (rows ?? []).reduce((sum, r) => sum + r.count, 0);
 }
