@@ -126,6 +126,7 @@ func New(adminEmail string) *Store {
 	// Seed the registrations_enabled setting.
 	s.settings = []auth.Setting{
 		{Key: "registrations_enabled", Value: "true"},
+		{Key: "home_redirect_url", Value: ""},
 	}
 
 	logger.Info("devstore: seeded in-memory store", "admin_email", adminEmail, "links", len(s.links))
@@ -210,6 +211,18 @@ func (s *Store) ListSettings(_ context.Context) ([]auth.Setting, error) {
 	out := make([]auth.Setting, len(s.settings))
 	copy(out, s.settings)
 	return out, nil
+}
+
+// GetSetting reads one setting's value; ErrSettingNotFound when absent (#0125).
+func (s *Store) GetSetting(_ context.Context, key string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, st := range s.settings {
+		if st.Key == key {
+			return st.Value, nil
+		}
+	}
+	return "", auth.ErrSettingNotFound
 }
 
 // UpdateSetting updates an existing setting. Returns ErrSettingNotFound for an

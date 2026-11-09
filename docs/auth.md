@@ -203,6 +203,7 @@ which middleware each route group carries.
 | `GET /auth/recover/verify` | Verify recovery token |
 | `POST /auth/recover/finish` | Complete recovery, issue session |
 | `GET /` (catch-all) | Svelte SPA static assets |
+| `GET /api/public/home` | Signed-out home info (#0125): `{"redirect_url":"…","registrations_enabled":bool}`, nothing else; `Cache-Control: no-store` |
 
 **Authenticated (RequireSession)**
 
@@ -285,21 +286,41 @@ Only admins can read or update the settings table, via the routes guarded by
   `{"settings":[{"key":"...","value":"...","updated_at":"..."}]}`.
 - `PATCH /admin/settings` — accepts `{"key":"registrations_enabled","value":"true"}`.
 
-The `SettingsHandler.Patch` handler (`internal/handlers/settings.go`) validates
-the value for `registrations_enabled` via `validSettingValue`:
+The `SettingsHandler.Patch` handler (`internal/handlers/settings.go`) trims the
+value and validates it per key via `validateSettingValue(key, value, baseURL)`,
+which returns an error whose message is the `400` body:
 
-```go
-case "registrations_enabled":
-    return value == "true" || value == "false"
-```
+- `registrations_enabled` — only `"true"` or `"false"`; anything else is
+  `400 invalid value`.
+- `home_redirect_url` (#0125) — the signed-out home page's **primary URL**.
+  Empty clears it (no redirect; there is no default anywhere). Otherwise it
+  must be an absolute `http`/`https` URL (scheme case-insensitive) with a host,
+  no credentials, no whitespace or control characters, at most 2048
+  characters, and its hostname must not equal the hostname of `BASE_URL`
+  (so it can never loop back to the instance). Failures return
+  `home_redirect_url must be an absolute http(s) URL` or
+  `home_redirect_url must not point at this instance`. Example:
+  `https://www.example.com/` on an instance at `https://go.example.com`.
 
-Only the values `"true"` and `"false"` are accepted; anything else returns
-`400`. Unknown keys return `400` (the store's `ErrSettingNotFound`); arbitrary
-key creation is forbidden.
+Unknown keys return `400` (the store's `ErrSettingNotFound`); arbitrary key
+creation is forbidden.
 
 Every `PATCH` writes a `settings.updated` audit entry via `audit.Logger`,
 recording `{key, old_value, new_value}` and the acting admin's `actor_id` and
-IP address.
+IP address. A primary URL change appears as `settings.updated` with
+`key=home_redirect_url`.
+
+#### Public home info (`GET /api/public/home`)
+
+`HomeHandler` (`internal/handlers/home.go`) is deliberately **unauthenticated**
+(mounted without `requireAPI`): the SPA calls it before anyone signs in, to
+decide whether to show the signed-out home page and whether Login offers
+Register. The body has exactly two keys, `redirect_url` and
+`registrations_enabled`; no other setting is exposed. It reads fresh on every
+request and sends `Cache-Control: no-store`. A missing `home_redirect_url` row
+(database not yet migrated) is treated as `""`. `/admin/settings` stays
+admin-only. The server-side registration gate in `/auth/register/start` is
+unchanged; hiding Register on Login is UX only.
 
 ---
 
@@ -401,7 +422,8 @@ are not rate-limited at the middleware layer.
 | `internal/middleware/auth.go` | `RequireSession`, `RequireAdmin`, `AuthUser`, `UserFromContext` |
 | `internal/middleware/ratelimit.go` | Per-IP token-bucket rate limiter |
 | `internal/handlers/auth.go` | `AuthHandler` — all `/auth/*` endpoints |
-| `internal/handlers/settings.go` | `SettingsHandler` — `/admin/settings` |
+| `internal/handlers/settings.go` | `SettingsHandler` — `/admin/settings`, `validateSettingValue` |
+| `internal/handlers/home.go` | `HomeHandler` — public `GET /api/public/home` (#0125) |
 | `internal/handlers/users.go` | `AdminUsersHandler` — `/admin/users/*` |
 | `internal/config/config.go` | `SESSION_SECRET`, `ADMIN_EMAIL` env vars |
 | `migrations/000005_create_sessions.up.sql` | `sessions` table schema |

@@ -4,7 +4,8 @@
   admin data. It ties together four backend areas behind a single view with a
   tab bar:
 
-  - Settings   — GET/PATCH /admin/settings: a registrations_enabled toggle.
+  - Settings   — GET/PATCH /admin/settings: a registrations_enabled toggle and
+    the home_redirect_url primary URL (#0125).
   - URL filters — GET/POST/PATCH/DELETE /admin/url-filters plus
     POST /admin/url-filters/test: list, create, edit, delete (with confirm), and
     a dry-run test tool.
@@ -79,6 +80,40 @@
       settingsError = 'Could not load settings. Please try again.';
     } finally {
       settingsLoading = false;
+    }
+  }
+
+  // Primary URL (#0125): the draft is initialized from the saved value after
+  // each load/save and compared against it to enable Save.
+  let homeRedirectDraft = $state('');
+  let savingHomeRedirect = $state(false);
+  let homeRedirectError = $state<string | null>(null);
+  const homeRedirectSaved = $derived(
+    settings.find((s) => s.key === 'home_redirect_url')?.value ?? '',
+  );
+  $effect(() => {
+    homeRedirectDraft = homeRedirectSaved;
+  });
+
+  async function saveHomeRedirect(value: string) {
+    savingHomeRedirect = true;
+    settingsNotice = null;
+    homeRedirectError = null;
+    try {
+      const res = (await updateSetting('home_redirect_url', value.trim())) as {
+        settings: Setting[];
+      };
+      if (res && Array.isArray(res.settings)) settings = res.settings;
+      else await loadSettings();
+      settingsNotice = value.trim() === '' ? 'Primary URL cleared.' : 'Primary URL saved.';
+    } catch (err) {
+      if (handleAuthError(err)) return;
+      homeRedirectError =
+        err instanceof ApiError && err.status === 400
+          ? err.message
+          : 'Could not update the setting. Please try again.';
+    } finally {
+      savingHomeRedirect = false;
     }
   }
 
@@ -504,6 +539,49 @@
               {togglingRegistrations ? 'Saving…' : regEnabled ? 'On' : 'Off'}
             </button>
           </div>
+          <div class="setting-row home-redirect-row">
+            <div class="setting-info">
+              <label class="setting-name" for="home-redirect-url">Primary URL</label>
+              <p class="text-muted setting-desc">
+                Where a signed-out visitor to the home page is sent when registration is off. Leave
+                empty to show the sign-in screen instead.
+              </p>
+              <div class="home-redirect-controls">
+                <input
+                  type="url"
+                  id="home-redirect-url"
+                  inputmode="url"
+                  placeholder="https://www.example.com/"
+                  bind:value={homeRedirectDraft}
+                  disabled={savingHomeRedirect}
+                />
+                <Button
+                  variant="primary"
+                  disabled={savingHomeRedirect || homeRedirectDraft.trim() === homeRedirectSaved}
+                  onclick={() => saveHomeRedirect(homeRedirectDraft)}
+                >
+                  {savingHomeRedirect ? 'Saving…' : 'Save'}
+                </Button>
+                {#if homeRedirectSaved !== ''}
+                  <Button
+                    variant="subtle"
+                    disabled={savingHomeRedirect}
+                    onclick={() => saveHomeRedirect('')}
+                  >
+                    Clear
+                  </Button>
+                {/if}
+              </div>
+              {#if homeRedirectError}
+                <p class="text-error" role="alert">{homeRedirectError}</p>
+              {/if}
+              {#if regEnabled}
+                <p class="text-muted setting-desc">
+                  Registration is on, so the home page shows the sign-in screen regardless.
+                </p>
+              {/if}
+            </div>
+          </div>
           {#if settingsNotice}
             <p class="text-notice" role="status">{settingsNotice}</p>
           {/if}
@@ -920,6 +998,20 @@
   }
   .setting-info {
     flex: 1;
+    min-width: 0;
+  }
+  .home-redirect-row {
+    margin-top: var(--space-4);
+  }
+  .home-redirect-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+  .home-redirect-controls input {
+    flex: 1 1 14rem;
+    min-width: 0;
   }
   .setting-name {
     font-weight: 600;

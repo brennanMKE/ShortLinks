@@ -333,7 +333,22 @@ seeded admin.
 `registrations_enabled` defaults to `false`. Once you are logged in as admin,
 open **Admin → Settings** and toggle it on before inviting additional users to
 register. Non-admin users use the **Register** form (not Recover account) and
-must receive an email verification link to complete their enrollment.
+must receive an email verification link to complete their enrollment. While
+registration is off, the Login screen hides the Register option.
+
+### Primary URL (signed-out home page)
+
+Each instance decides where a signed-out visitor to its bare home page goes.
+Sign in as admin, open **Admin → Settings → Primary URL**, and enter the
+absolute `https://` URL of the site the short links promote, e.g. on
+`go.example.com` enter `https://www.example.com/`. The URL must not be on the
+instance's own host (`BASE_URL`). Leave it empty to keep showing the sign-in
+screen. The redirect only happens while **Registrations enabled** is off, and
+after a 3 second pause with a "Go now" link and a small "Sign in" link.
+`/#/login`, signed-out deep links, emailed `/auth/*` links, `/u/{key}` short
+links, QR codes, `/api/*`, and `/health` are not affected. Changes take effect
+on the next page load and are recorded in the audit log as `settings.updated`.
+There is no default value for any deployment; each operator sets their own.
 
 ---
 
