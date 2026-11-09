@@ -74,7 +74,7 @@ Work the open issues in this order. Finish a phase before starting the next unle
 | **0 — Shipped** | Every issue settled before phases were introduced (#0001–#0118) | Already done. Keeps the whole tracker phased so the listing groups by phase. |
 | **1 — Green test baseline** | [#0116](0116.md), [#0110](0110.md) | `go test ./...` must pass on a clean checkout, and the test DB must match a clean migration replay, before any later issue can be verified. |
 | **2 — Backend correctness** | [#0109](0109.md), [#0119](0119.md), [#0121](0121.md) | Editing a link skips the URL filter (a security gap), every click chart hides today, and clicks store raw visitor IPs. All are server-side and independent of the SPA work. #0121 is worked first, out of order: it blocks the Dust Almanac poster launch. |
-| **3 — SPA routing** | [#0120](0120.md) | Replaces store-based navigation in every view with hash routes and `<a>` Links. Goes before the table and E2E work so neither is built around navigation that is about to be replaced. |
+| **3 — SPA routing** | [#0120](0120.md), [#0122](0122.md) | Replaces store-based navigation in every view with hash routes and `<a>` Links. Goes before the table and E2E work so neither is built around navigation that is about to be replaced. #0122 (clicks by placement on CampaignDetail) was moved here by Brennan on 2026-11-09 for the Dust Almanac posters; it builds on #0120's routed CampaignDetail. |
 | **4 — Links table layout** | [#0113](0113.md), [#0114](0114.md), [#0115](0115.md) | Same tables, same zero-horizontal-scroll invariant ([#0103](0103.md)). Goes after #0120, whose row navigation becomes anchors. |
 | **5 — E2E harness** | [#0080](0080.md) | Blocks every E2E coverage issue. Hash URLs from #0120 let page objects deep-link. |
 | **6 — E2E auth and account** | [#0081](0081.md), [#0086](0086.md) | Every later E2E test depends on a working signed-in session, so sign-in and passkey flows are proven first. |
@@ -82,7 +82,6 @@ Work the open issues in this order. Finish a phase before starting the next unle
 | **8 — E2E analytics and live updates** | [#0085](0085.md), [#0091](0091.md) | Both need links with clicks, and both check that the screen reflects changed data. |
 | **9 — E2E admin users and settings** | [#0087](0087.md), [#0088](0088.md) | Registration gate and user management share the admin role and account screens. |
 | **10 — E2E filters, audit, and umbrella** | [#0090](0090.md), [#0089](0089.md), then [#0079](0079.md) | Work in the listed order, not by number: filter rules tie back to #0109; the audit log checks entries produced by earlier phases; umbrella #0079 closes when its sub-issues do. |
-| **11 — Campaign analytics** | [#0122](0122.md) | Feature work on campaign reporting, requested for the Dust Almanac posters. Placed after the E2E phases by default; Brennan may move it earlier. |
 | **Ops — Owner** | [#0045](0045.md) | SES sandbox and domain verification is done in the AWS console, not in code. It blocks nothing above. |
 
 ## Resolution workflow (review-gated subagents)
