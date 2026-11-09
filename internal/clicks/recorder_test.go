@@ -106,6 +106,7 @@ func seedCampaign(t *testing.T, pool *pgxpool.Pool, userID int64, name, slug str
 // Empty fields store SQL NULL, mirroring links.Store's nullIfEmpty convention.
 type seededLinkUTM struct {
 	Source, Medium, Campaign, Term, Content string
+	Placement                               string
 }
 
 // seedLinkWithUTM inserts an active, non-denied link carrying stored discrete
@@ -118,12 +119,12 @@ func seedLinkWithUTM(t *testing.T, pool *pgxpool.Pool, userID int64, key, dest s
 	var id int64
 	if err := pool.QueryRow(context.Background(),
 		`INSERT INTO links (user_id, key, destination_url, active, denied_reason, created_at,
-		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content)
-		 VALUES ($1, $2, $3, TRUE, 0, now(), $4, $5, $6, $7, $8, $9)
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement)
+		 VALUES ($1, $2, $3, TRUE, 0, now(), $4, $5, $6, $7, $8, $9, $10)
 		 RETURNING id`,
 		userID, key, dest, campaignID,
 		nullIfEmptyTest(utm.Source), nullIfEmptyTest(utm.Medium), nullIfEmptyTest(utm.Campaign),
-		nullIfEmptyTest(utm.Term), nullIfEmptyTest(utm.Content),
+		nullIfEmptyTest(utm.Term), nullIfEmptyTest(utm.Content), nullIfEmptyTest(utm.Placement),
 	).Scan(&id); err != nil {
 		t.Fatalf("seed link with UTM %q: %v", key, err)
 	}

@@ -1574,15 +1574,20 @@ func TestCampaignRollup_TimeseriesConsistentWithClickCountUnderConcurrentWrites(
 	// transaction onto the pool passed the entire suite.
 	readers := []struct {
 		name string
-		read func(context.Context, int64, time.Time, time.Time) (CampaignStats, TimeseriesResult, error)
+		read func(context.Context, int64, time.Time, time.Time) (CampaignStats, TimeseriesResult, int64, error)
 	}{
-		{"CampaignRollup", func(ctx context.Context, id int64, f, t2 time.Time) (CampaignStats, TimeseriesResult, error) {
+		{"CampaignRollup", func(ctx context.Context, id int64, f, t2 time.Time) (CampaignStats, TimeseriesResult, int64, error) {
 			got, err := stats.CampaignRollup(ctx, id, f, t2)
-			return got.Stats, got.Timeseries, err
+			// by_placement (#0122) must sit inside the same snapshot too.
+			var placementTotal int64
+			for _, b := range got.ByPlacement {
+				placementTotal += b.Count
+			}
+			return got.Stats, got.Timeseries, placementTotal, err
 		}},
-		{"CampaignSummary", func(ctx context.Context, id int64, f, t2 time.Time) (CampaignStats, TimeseriesResult, error) {
+		{"CampaignSummary", func(ctx context.Context, id int64, f, t2 time.Time) (CampaignStats, TimeseriesResult, int64, error) {
 			got, err := stats.CampaignSummary(ctx, id, f, t2)
-			return got.Stats, got.Timeseries, err
+			return got.Stats, got.Timeseries, got.Stats.ClickCount, err
 		}},
 	}
 
@@ -1603,7 +1608,7 @@ func TestCampaignRollup_TimeseriesConsistentWithClickCountUnderConcurrentWrites(
 	iterations := 0
 	for time.Now().Before(deadline) {
 		for _, r := range readers {
-			gotStats, gotTS, err := r.read(ctx, campID, from, to)
+			gotStats, gotTS, placementTotal, err := r.read(ctx, campID, from, to)
 			if err != nil {
 				t.Fatalf("iteration %d: %s: %v", iterations, r.name, err)
 			}
@@ -1613,6 +1618,9 @@ func TestCampaignRollup_TimeseriesConsistentWithClickCountUnderConcurrentWrites(
 			}
 			if tsTotal != gotStats.ClickCount {
 				t.Fatalf("iteration %d: %s timeseries sums to %d but stats.click_count = %d — the payload's reads split across snapshots", iterations, r.name, tsTotal, gotStats.ClickCount)
+			}
+			if placementTotal != gotStats.ClickCount {
+				t.Fatalf("iteration %d: %s by_placement sums to %d but stats.click_count = %d — the payload's reads split across snapshots", iterations, r.name, placementTotal, gotStats.ClickCount)
 			}
 		}
 		iterations++
@@ -1668,5 +1676,223 @@ func TestCampaignStats_WindowFromSurvivesDatabaseRoundTripInNonUTCZone(t *testin
 	}
 	if got.WindowFrom != "2026-07-01" {
 		t.Errorf("window_from = %q, want %q — the campaign's starts_at is UTC-midnight 2026-07-01; a previous-day value means it was formatted in the process's local zone rather than UTC", got.WindowFrom, "2026-07-01")
+	}
+}
+
+// --- #0122: clicks by placement ---
+
+func placementFixture(t *testing.T, pool *pgxpool.Pool, email, slug string) (int64, int64, *StatsStore, time.Time, time.Time) {
+	t.Helper()
+	uid := seedUser(t, pool, email)
+	campID := seedCampaign(t, pool, uid, slug, slug)
+	from := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	return uid, campID, NewStatsStore(pool), from, from.Add(24 * time.Hour)
+}
+
+func placementLink(t *testing.T, pool *pgxpool.Pool, uid, campID int64, key, placement string, clicks int, at time.Time) int64 {
+	t.Helper()
+	id := seedLinkWithUTM(t, pool, uid, key, "https://example.com", &campID, seededLinkUTM{Placement: placement})
+	seedCampaignClicksN(t, pool, id, campID, at, clicks)
+	return id
+}
+
+func TestCampaignRollup_ByPlacement_GroupsCaseAndWhitespace(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-group@example.com", "pl-group")
+	at := from.Add(time.Hour)
+	placementLink(t, pool, uid, campID, "plgrp001", "Testing", 3, at)
+	placementLink(t, pool, uid, campID, "plgrp002", "Testing", 2, at)
+	placementLink(t, pool, uid, campID, "plgrp003", "testing ", 1, at)
+	placementLink(t, pool, uid, campID, "plgrp004", " TESTING", 1, at)
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	if len(got.ByPlacement) != 1 {
+		t.Fatalf("ByPlacement = %+v, want 1 row", got.ByPlacement)
+	}
+	if r := got.ByPlacement[0]; r.Placement != "Testing" || r.LinkCount != 4 || r.Count != 7 {
+		t.Errorf("row = %+v, want {Testing 4 7}", r)
+	}
+}
+
+func TestCampaignRollup_ByPlacement_TieBreaksByByteOrder(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-tie@example.com", "pl-tie")
+	placementLink(t, pool, uid, campID, "pltie001", "acme", 1, from.Add(time.Hour))
+	placementLink(t, pool, uid, campID, "pltie002", "Acme", 1, from.Add(time.Hour))
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	if len(got.ByPlacement) != 1 || got.ByPlacement[0].Placement != "Acme" {
+		t.Fatalf("ByPlacement = %+v, want one row spelled Acme", got.ByPlacement)
+	}
+}
+
+func TestCampaignRollup_ByPlacement_NullEmptyAndBlankAreNone(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-none@example.com", "pl-none")
+	at := from.Add(time.Hour)
+	placementLink(t, pool, uid, campID, "plnon001", "", 1, at) // stored NULL
+	placementLink(t, pool, uid, campID, "plnon002", "   ", 1, at)
+	id := placementLink(t, pool, uid, campID, "plnon003", "x", 1, at)
+	if _, err := pool.Exec(context.Background(), `UPDATE links SET placement = '' WHERE id = $1`, id); err != nil {
+		t.Fatalf("set empty placement: %v", err)
+	}
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	if len(got.ByPlacement) != 1 {
+		t.Fatalf("ByPlacement = %+v, want 1 row", got.ByPlacement)
+	}
+	if r := got.ByPlacement[0]; r.Placement != NoneBucket || r.LinkCount != 3 || r.Count != 3 {
+		t.Errorf("row = %+v, want {(none) 3 3}", r)
+	}
+}
+
+func TestCampaignRollup_ByPlacement_ZeroClickLinkStillCounted(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-zero@example.com", "pl-zero")
+	at := from.Add(time.Hour)
+	placementLink(t, pool, uid, campID, "plzer001", "Quiet Shop", 0, at)
+	placementLink(t, pool, uid, campID, "plzer002", "Busy Shop", 2, at)
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	want := []PlacementBucket{{Placement: "Busy Shop", LinkCount: 1, Count: 2}, {Placement: "Quiet Shop", LinkCount: 1, Count: 0}}
+	if len(got.ByPlacement) != 2 || got.ByPlacement[0] != want[0] || got.ByPlacement[1] != want[1] {
+		t.Fatalf("ByPlacement = %+v, want %+v", got.ByPlacement, want)
+	}
+}
+
+func TestCampaignRollup_ByPlacement_SortOrder(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-sort@example.com", "pl-sort")
+	at := from.Add(time.Hour)
+	placementLink(t, pool, uid, campID, "plsrt001", "Solo", 5, at) // 1 link, 5 clicks
+	placementLink(t, pool, uid, campID, "plsrt002", "Trio", 5, at) // 3 links, 5 clicks
+	placementLink(t, pool, uid, campID, "plsrt003", "Trio", 0, at)
+	placementLink(t, pool, uid, campID, "plsrt004", "Trio", 0, at)
+	placementLink(t, pool, uid, campID, "plsrt005", "Low", 2, at)
+	placementLink(t, pool, uid, campID, "plsrt006", "Beta", 1, at) // ties Alpha on both
+	placementLink(t, pool, uid, campID, "plsrt007", "Alpha", 1, at)
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	var order []string
+	for _, r := range got.ByPlacement {
+		order = append(order, r.Placement)
+	}
+	want := []string{"Trio", "Solo", "Low", "Alpha", "Beta"}
+	if len(order) != len(want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order = %v, want %v", order, want)
+		}
+	}
+}
+
+func TestCampaignRollup_ByPlacement_RespectsWindowAndExcludesBots(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-win@example.com", "pl-win")
+	link := seedLinkWithUTM(t, pool, uid, "plwin001", "https://example.com", &campID, seededLinkUTM{Placement: "Shop"})
+	for _, at := range []time.Time{from.Add(-time.Second), from, to.Add(-time.Second), to} {
+		seedCampaignClick(t, pool, &link, &campID, at, false, "", "", "", "")
+	}
+	seedCampaignClick(t, pool, &link, &campID, from.Add(time.Hour), true, "", "", "", "")
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	if len(got.ByPlacement) != 1 || got.ByPlacement[0].Count != 2 {
+		t.Fatalf("ByPlacement = %+v, want one row with Count 2", got.ByPlacement)
+	}
+}
+
+func TestCampaignRollup_ByPlacement_SumsMatchTotals(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-sum@example.com", "pl-sum")
+	at := from.Add(time.Hour)
+	placementLink(t, pool, uid, campID, "plsum001", "North", 3, at)
+	placementLink(t, pool, uid, campID, "plsum002", "north", 1, at)
+	placementLink(t, pool, uid, campID, "plsum003", "", 2, at)
+	gone := placementLink(t, pool, uid, campID, "plsum004", "Gone Shop", 4, at)
+	unassignLink(t, pool, gone)
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	var clicksSum, linksSum int64
+	var goneRow *PlacementBucket
+	for i, r := range got.ByPlacement {
+		clicksSum += r.Count
+		linksSum += r.LinkCount
+		if r.Placement == "gone shop" {
+			goneRow = &got.ByPlacement[i]
+		}
+	}
+	if clicksSum != got.Stats.ClickCount || clicksSum != 10 {
+		t.Errorf("sum(Count) = %d, stats.ClickCount = %d, want both 10", clicksSum, got.Stats.ClickCount)
+	}
+	var members int64
+	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM links WHERE campaign_id = $1`, campID).Scan(&members); err != nil {
+		t.Fatalf("count members: %v", err)
+	}
+	if linksSum != members || members != 3 {
+		t.Errorf("sum(LinkCount) = %d, members = %d, want both 3", linksSum, members)
+	}
+	// The unassigned link's placement is read live from links, which is still
+	// "Gone Shop", so its clicks stay on that group with no current members...
+	// except the group has no member links at all, so no spelling votes and
+	// Go falls back to the normalized key.
+	if goneRow == nil || goneRow.Count != 4 || goneRow.LinkCount != 0 {
+		t.Errorf("gone-shop row = %+v, want Count 4, LinkCount 0 (rows: %+v)", goneRow, got.ByPlacement)
+	}
+}
+
+func TestCampaignRollup_ByPlacement_EmptyCampaign(t *testing.T) {
+	pool := testPool(t)
+	_, campID, stats, from, to := placementFixture(t, pool, "pl-empty@example.com", "pl-empty")
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	if got.ByPlacement == nil || len(got.ByPlacement) != 0 {
+		t.Fatalf("ByPlacement = %#v, want non-nil empty slice", got.ByPlacement)
+	}
+}
+
+// A placement literally spelled "(none)" is its own group, distinct from the
+// blank bucket, even though both display as "(none)". IsNone tells them apart.
+func TestCampaignRollup_ByPlacement_LiteralNoneIsDistinctFromBlank(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-lit@example.com", "pl-lit")
+	at := from.Add(time.Hour)
+	placementLink(t, pool, uid, campID, "pllit001", "(none)", 2, at)
+	placementLink(t, pool, uid, campID, "pllit002", "", 1, at)
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	want := []PlacementBucket{
+		{Placement: NoneBucket, IsNone: false, LinkCount: 1, Count: 2},
+		{Placement: NoneBucket, IsNone: true, LinkCount: 1, Count: 1},
+	}
+	if len(got.ByPlacement) != 2 || got.ByPlacement[0] != want[0] || got.ByPlacement[1] != want[1] {
+		t.Fatalf("ByPlacement = %+v, want %+v", got.ByPlacement, want)
 	}
 }
