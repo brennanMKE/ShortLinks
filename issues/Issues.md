@@ -73,7 +73,7 @@ Work the open issues in this order. Finish a phase before starting the next unle
 |---|---|---|
 | **0 — Shipped** | Every issue settled before phases were introduced (#0001–#0118) | Already done. Keeps the whole tracker phased so the listing groups by phase. |
 | **1 — Green test baseline** | [#0116](0116.md), [#0110](0110.md) | `go test ./...` must pass on a clean checkout, and the test DB must match a clean migration replay, before any later issue can be verified. |
-| **2 — Backend correctness** | [#0109](0109.md), [#0119](0119.md) | Editing a link skips the URL filter (a security gap), and every click chart hides today. Both are small, server-side, and independent of the SPA work. |
+| **2 — Backend correctness** | [#0109](0109.md), [#0119](0119.md), [#0121](0121.md) | Editing a link skips the URL filter (a security gap), every click chart hides today, and clicks store raw visitor IPs. All are server-side and independent of the SPA work. #0121 is worked first, out of order: it blocks the Dust Almanac poster launch. |
 | **3 — SPA routing** | [#0120](0120.md) | Replaces store-based navigation in every view with hash routes and `<a>` Links. Goes before the table and E2E work so neither is built around navigation that is about to be replaced. |
 | **4 — Links table layout** | [#0113](0113.md), [#0114](0114.md), [#0115](0115.md) | Same tables, same zero-horizontal-scroll invariant ([#0103](0103.md)). Goes after #0120, whose row navigation becomes anchors. |
 | **5 — E2E harness** | [#0080](0080.md) | Blocks every E2E coverage issue. Hash URLs from #0120 let page objects deep-link. |
