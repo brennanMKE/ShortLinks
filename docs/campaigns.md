@@ -456,7 +456,7 @@ bot-excluded by default, matching every other number in the campaign view.
 
 `GET /api/campaigns/{slug}/stats` also returns `by_placement`, and
 CampaignDetail shows it as the "Clicks by placement" panel (between "Channel
-breakdown" and "Links"). Each row is `{placement, link_count, count}`, sorted
+breakdown" and "Links"). Each row is `{placement, is_none, link_count, count}`, sorted
 by clicks descending, then link count, then name. Grouping is
 case-insensitive with surrounding whitespace trimmed (`Testing` and
 `testing ` are one row); the display name is the most common spelling among
