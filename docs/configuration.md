@@ -14,7 +14,7 @@ implemented in [`internal/config/config.go`](../internal/config/config.go).
 | `DATABASE_URL` | **required** | — | PostgreSQL connection string (e.g. `postgres://shortlinks:pw@localhost:5432/shortlinks?sslmode=disable`). |
 | `WEBAUTHN_RP_ID` | **required** | — | WebAuthn Relying Party ID — the registerable domain suffix (e.g. `go.sstools.co`). Must match the domain users visit. |
 | `WEBAUTHN_RP_ORIGIN` | **required** | — | WebAuthn Relying Party origin — the full scheme+host (e.g. `https://go.sstools.co`). Must exactly match the browser origin. |
-| `SESSION_SECRET` | **required** | — | 32-byte (64 hex character) random secret used to sign session cookies. Generate with `openssl rand -hex 32`. |
+| `SESSION_SECRET` | **required** | — | 32-byte (64 hex character) random secret used to sign session cookies; it also derives the key that hashes visitor IPs in click records (#0121). Generate with `openssl rand -hex 32`. |
 | `SES_SMTP_HOST` | optional | `""` | AWS SES SMTP hostname (e.g. `email-smtp.us-east-1.amazonaws.com`). Leave blank to disable email delivery. |
 | `SES_SMTP_PORT` | optional | `587` | TCP port for the SES SMTP connection. |
 | `SES_SMTP_USERNAME` | optional | `""` | SMTP username issued by AWS SES. |
@@ -123,7 +123,7 @@ control or logged:
 
 | Variable | Secret type |
 |---|---|
-| `SESSION_SECRET` | Cookie signing key (64 hex chars, 32 bytes of entropy) |
+| `SESSION_SECRET` | Cookie signing key and source of the click-IP hashing key (64 hex chars, 32 bytes of entropy) |
 | `DATABASE_URL` | Contains the database password |
 | `SES_SMTP_USERNAME` | AWS SES SMTP credential |
 | `SES_SMTP_PASSWORD` | AWS SES SMTP credential |
@@ -137,4 +137,6 @@ other system unless you also update the loader — `config.Load` reads only from
 the process environment and the local `.env` file.
 
 `SESSION_SECRET` should be regenerated if it is ever exposed. Changing it
-invalidates all active sessions, requiring users to sign in again.
+invalidates all active sessions, requiring users to sign in again. It also
+changes the click-IP hashing key, which only means hashes from before and
+after the change are not comparable; analytics are unaffected.

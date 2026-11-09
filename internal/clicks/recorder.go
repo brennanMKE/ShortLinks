@@ -3,7 +3,6 @@ package clicks
 import (
 	"context"
 	"log/slog"
-	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,7 +27,9 @@ type Click struct {
 	// request. Zero means "use now()".
 	ClickedAt time.Time
 	// IPAddress is the originating client IP (already extracted from
-	// X-Forwarded-For / RemoteAddr by the handler). Empty stores SQL NULL.
+	// X-Forwarded-For / RemoteAddr by the handler). It is hashed by the Recorder
+	// before storage and never persisted raw (#0121). Empty or unparseable
+	// stores SQL NULL.
 	IPAddress string
 	UserAgent string
 	Referer   string
@@ -53,17 +54,19 @@ type Click struct {
 // detached goroutine: recording is best-effort and never propagates an error to
 // the caller, so a DB hiccup can never break a redirect.
 type Recorder struct {
-	pool *pgxpool.Pool
-	log  *slog.Logger
+	pool   *pgxpool.Pool
+	hasher *IPHasher
+	log    *slog.Logger
 }
 
-// NewRecorder constructs a Recorder over the shared connection pool. If log is
-// nil the default slog logger is used.
-func NewRecorder(pool *pgxpool.Pool, log *slog.Logger) *Recorder {
+// NewRecorder constructs a Recorder over the shared connection pool. hasher
+// hashes visitor IPs before storage (#0121); a nil hasher stores NULL, never the
+// raw IP. If log is nil the default slog logger is used.
+func NewRecorder(pool *pgxpool.Pool, hasher *IPHasher, log *slog.Logger) *Recorder {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Recorder{pool: pool, log: log}
+	return &Recorder{pool: pool, hasher: hasher, log: log}
 }
 
 // Record inserts one click row for the link identified by c.Key. It resolves the
@@ -90,8 +93,10 @@ func NewRecorder(pool *pgxpool.Pool, log *slog.Logger) *Recorder {
 // utm_source takes the inbound value, utm_medium falls back to the link's
 // stored value (or NULL if the link has none either).
 //
-// Non-UTM metadata (ip_address/user_agent/referer) has no fallback and keeps
-// the pre-#0100 empty-string-to-NULL behavior via nullStr/nullableIP below.
+// Non-UTM metadata (user_agent/referer) has no fallback and keeps the
+// pre-#0100 empty-string-to-NULL behavior via nullStr below. The visitor IP is
+// never stored: it is replaced by ip_hash, a keyed daily HMAC (#0121, see
+// IPHasher), computed with the salt for the click's own UTC day.
 //
 // is_bot (#0101) is classified here, in Go, from c.UserAgent via IsBot before
 // the INSERT ever runs — not in SQL — so the substring list stays a plain,
@@ -110,7 +115,7 @@ func (r *Recorder) Record(ctx context.Context, c Click) error {
 
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO clicks
-		     (link_id, clicked_at, ip_address, user_agent, referer,
+		     (link_id, clicked_at, ip_hash, user_agent, referer,
 		      utm_source, utm_medium, utm_campaign, utm_term, utm_content,
 		      campaign_id, is_bot)
 		 SELECT l.id, $2, $3, $4, $5,
@@ -124,7 +129,7 @@ func (r *Recorder) Record(ctx context.Context, c Click) error {
 		  WHERE l.key = $1`,
 		c.Key,
 		clickedAt,
-		nullableIP(c.IPAddress),
+		r.hashIP(c.IPAddress, clickedAt),
 		nullStr(c.UserAgent),
 		nullStr(c.Referer),
 		c.UTMSource,
@@ -161,15 +166,16 @@ func nullStr(s string) any {
 	return s
 }
 
-// nullableIP returns the IP for storage in the INET column, or nil (SQL NULL)
-// when the value is empty or not a parseable IP. An unparseable value is dropped
-// rather than failing the whole INSERT, since the IP is incidental metadata.
-func nullableIP(s string) any {
-	if s == "" {
+// hashIP returns the daily keyed hash of ip for storage, or nil (SQL NULL) when
+// there is no hasher or the value is empty/unparseable. It fails closed: the raw
+// IP is never returned.
+func (r *Recorder) hashIP(ip string, at time.Time) any {
+	if r.hasher == nil {
 		return nil
 	}
-	if net.ParseIP(s) == nil {
+	h := r.hasher.HashAt(ip, at)
+	if h == nil {
 		return nil
 	}
-	return s
+	return h
 }

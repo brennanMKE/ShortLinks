@@ -505,6 +505,31 @@ Rolling back (`migrate ... down 1`) drops `api_tokens` and every issued
 token with it. Roll back the binary first if you need to; the v0.3.0 binary
 runs fine on a v14 schema.
 
+**The visitor-IP hashing deploy needs one more:** `000015_clicks_ip_hash`
+(#0121, see `docs/analytics.md`). It drops `clicks.ip_address` and adds
+`clicks.ip_hash`. Run it **before** `deploy.sh`:
+
+```bash
+scripts/db/backup.sh
+migrate -path migrations -database "$DATABASE_URL" version   # expect 14
+migrate -path migrations -database "$DATABASE_URL" up        # 14 → 15
+./scripts/deploy.sh
+```
+
+The old binary inserts into `ip_address`, so until the new binary is running
+every click INSERT fails (logged; redirects still work and the click is lost).
+Keep the gap between the two steps short. No new variable is needed: the hash
+key derives from `SESSION_SECRET`.
+
+On first start the new binary's retention sweep sets `user_agent` (and
+`ip_hash`) to NULL on every click older than 90 days. That is intended and
+applies to existing hosts' history immediately. Existing rows' IPs are
+discarded by the migration and cannot be recovered. Rolling back
+(`migrate ... down 1`) restores an empty `ip_address` column only.
+
+Apache's `combined` access log still records visitor IPs; its retention is a
+logrotate setting.
+
 ### Manual steps (what the script automates)
 
 To deploy a new version by hand after pulling code changes:

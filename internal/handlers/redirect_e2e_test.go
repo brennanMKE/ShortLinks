@@ -26,7 +26,7 @@ func redirectE2EMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	}
 	t.Cleanup(c.Close)
 	resolver := links.NewResolver(c, links.NewStore(pool))
-	recorder := clicks.NewRecorder(pool, nil)
+	recorder := clicks.NewRecorder(pool, nil, nil)
 	h := NewRedirectHandler(resolver, NewClickRecorder(recorder))
 	mux := http.NewServeMux()
 	mux.Handle("GET /u/{key}", h)
@@ -160,7 +160,7 @@ func TestLinksGet_UTMStats(t *testing.T) {
 	seedSession(t, pool, bob, "bob-token")
 	linkID := seedLink(t, pool, alice, "stats1", "https://example.com")
 
-	rec := clicks.NewRecorder(pool, nil)
+	rec := clicks.NewRecorder(pool, nil, nil)
 	for i := 0; i < 3; i++ {
 		_ = rec.Record(context.Background(), clicks.Click{Key: "stats1", UTMSource: "email", UTMCampaign: "launch"})
 	}

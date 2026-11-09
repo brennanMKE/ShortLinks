@@ -1,6 +1,7 @@
 package clicks
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"strings"
@@ -143,7 +144,11 @@ func nullIfEmptyTest(s string) any {
 // link_id, metadata, and all five utm_* values round-trip exactly.
 func TestRecorder_PersistsClick(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	hasher, err := NewIPHasher("test-secret")
+	if err != nil {
+		t.Fatalf("NewIPHasher: %v", err)
+	}
+	rec := NewRecorder(pool, hasher, nil)
 
 	uid := seedUser(t, pool, "alice@example.com")
 	linkID := seedLink(t, pool, uid, "abc123", "https://example.com/page")
@@ -166,15 +171,16 @@ func TestRecorder_PersistsClick(t *testing.T) {
 	}
 
 	var (
-		gotLinkID                                  int64
-		gotIP, ua, ref, src, med, camp, term, cont string
-		clickedAt                                  time.Time
+		gotLinkID                           int64
+		ua, ref, src, med, camp, term, cont string
+		clickedAt                           time.Time
+		gotHash                             []byte
 	)
 	if err := pool.QueryRow(context.Background(),
-		`SELECT link_id, clicked_at, host(ip_address), user_agent, referer,
+		`SELECT link_id, clicked_at, ip_hash, user_agent, referer,
 		        utm_source, utm_medium, utm_campaign, utm_term, utm_content
 		   FROM clicks WHERE link_id = $1`, linkID,
-	).Scan(&gotLinkID, &clickedAt, &gotIP, &ua, &ref, &src, &med, &camp, &term, &cont); err != nil {
+	).Scan(&gotLinkID, &clickedAt, &gotHash, &ua, &ref, &src, &med, &camp, &term, &cont); err != nil {
 		t.Fatalf("read back click: %v", err)
 	}
 
@@ -184,8 +190,11 @@ func TestRecorder_PersistsClick(t *testing.T) {
 	if !clickedAt.Equal(when) {
 		t.Errorf("clicked_at = %v, want %v", clickedAt, when)
 	}
-	if gotIP != "203.0.113.7" {
-		t.Errorf("ip_address = %q, want 203.0.113.7", gotIP)
+	if want := hasher.HashAt("203.0.113.7", when); len(gotHash) != 32 || !bytes.Equal(gotHash, want) {
+		t.Errorf("ip_hash = %x, want %x", gotHash, want)
+	}
+	if bytes.Contains(gotHash, []byte("203.0.113.7")) {
+		t.Error("ip_hash contains the raw IP")
 	}
 	if ua != "test-agent" || ref != "https://referrer.example" {
 		t.Errorf("metadata mismatch: ua=%q ref=%q", ua, ref)
@@ -200,7 +209,7 @@ func TestRecorder_PersistsClick(t *testing.T) {
 // path's best-effort recording never fails on a bogus key.
 func TestRecorder_UnknownKeyInsertsNothing(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	if err := rec.Record(context.Background(), Click{Key: "nope42"}); err != nil {
 		t.Fatalf("Record unknown key: %v", err)
@@ -218,7 +227,7 @@ func TestRecorder_UnknownKeyInsertsNothing(t *testing.T) {
 // NULL so the analytics "(none)" bucket is driven by genuine absence.
 func TestRecorder_EmptyUTMStoredAsNull(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "bob@example.com")
 	seedLink(t, pool, uid, "bare01", "https://example.com")
@@ -229,7 +238,7 @@ func TestRecorder_EmptyUTMStoredAsNull(t *testing.T) {
 
 	var srcNull, ipNull bool
 	if err := pool.QueryRow(context.Background(),
-		`SELECT utm_source IS NULL, ip_address IS NULL FROM clicks WHERE link_id IN
+		`SELECT utm_source IS NULL, ip_hash IS NULL FROM clicks WHERE link_id IN
 		   (SELECT id FROM links WHERE key = 'bare01')`,
 	).Scan(&srcNull, &ipNull); err != nil {
 		t.Fatalf("read back: %v", err)
@@ -238,7 +247,7 @@ func TestRecorder_EmptyUTMStoredAsNull(t *testing.T) {
 		t.Error("utm_source should be NULL when empty")
 	}
 	if !ipNull {
-		t.Error("ip_address should be NULL when empty")
+		t.Error("ip_hash should be NULL when empty")
 	}
 }
 
@@ -302,7 +311,7 @@ func readClick(t *testing.T, pool *pgxpool.Pool, key string) clickRow {
 // test below which requires per-key (not all-or-nothing) resolution.
 func TestRecorder_FallsBackToLinkStoredUTMWhenAllInboundOmitted(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "fallback@example.com")
 	seedLinkWithUTM(t, pool, uid, "fb0001", "https://example.com", nil, seededLinkUTM{
@@ -333,7 +342,7 @@ func TestRecorder_FallsBackToLinkStoredUTMWhenAllInboundOmitted(t *testing.T) {
 // fallback: an inbound utm_source WINS over the link's own stored value.
 func TestRecorder_InboundUTMOverridesLinkStoredUTM(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "override@example.com")
 	seedLinkWithUTM(t, pool, uid, "ov0001", "https://example.com", nil, seededLinkUTM{
@@ -361,7 +370,7 @@ func TestRecorder_InboundUTMOverridesLinkStoredUTM(t *testing.T) {
 // link's stored values (because not every key was supplied).
 func TestRecorder_MixedInboundAndStoredUTMResolveIndependently(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "mixed@example.com")
 	seedLinkWithUTM(t, pool, uid, "mix0001", "https://example.com", nil, seededLinkUTM{
@@ -403,7 +412,7 @@ func TestRecorder_MixedInboundAndStoredUTMResolveIndependently(t *testing.T) {
 // literal "" would surface as a mismatch here instead of passing vacuously.
 func TestRecorder_EmptyStringInboundTreatedAsAbsentNotLiteralOverride(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "empty-absent@example.com")
 	seedLinkWithUTM(t, pool, uid, "ea0001", "https://example.com", nil, seededLinkUTM{
@@ -425,7 +434,7 @@ func TestRecorder_EmptyStringInboundTreatedAsAbsentNotLiteralOverride(t *testing
 // assigned to a campaign records that campaign's id.
 func TestRecorder_StoresLinkCampaignIDAtRecordTime(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "camp-record@example.com")
 	campID := seedCampaign(t, pool, uid, "Launch", "launch")
@@ -449,7 +458,7 @@ func TestRecorder_StoresLinkCampaignIDAtRecordTime(t *testing.T) {
 // silently rewrite this click to Campaign B; this test would catch that.
 func TestRecorder_ClickCampaignIDSurvivesLaterLinkReassignment(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "reassign@example.com")
 	campA := seedCampaign(t, pool, uid, "Campaign A", "campaign-a")
@@ -488,7 +497,7 @@ func TestRecorder_ClickCampaignIDSurvivesLaterLinkReassignment(t *testing.T) {
 // entities it references).
 func TestRecorder_DeletingCampaignNullsClickCampaignIDWithoutDeletingRow(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "camp-delete@example.com")
 	campID := seedCampaign(t, pool, uid, "Doomed", "doomed")
@@ -517,7 +526,7 @@ func TestRecorder_DeletingCampaignNullsClickCampaignIDWithoutDeletingRow(t *test
 // row exists via readClick's built-in count check.
 func TestRecorder_ClassifiesBotUserAgentAndStillRecordsRow(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "bot-record@example.com")
 	seedLink(t, pool, uid, "bot0001", "https://example.com")
@@ -539,7 +548,7 @@ func TestRecorder_ClassifiesBotUserAgentAndStillRecordsRow(t *testing.T) {
 // pass vacuously alongside a broken, always-true classifier).
 func TestRecorder_RealBrowserUserAgentNotFlagged(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "human-record@example.com")
 	seedLink(t, pool, uid, "hum0001", "https://example.com")
@@ -563,7 +572,7 @@ func TestRecorder_RealBrowserUserAgentNotFlagged(t *testing.T) {
 // User-Agent at all is recorded as is_bot = FALSE, not TRUE.
 func TestRecorder_EmptyUserAgentNotFlaggedAsBot(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "empty-ua-record@example.com")
 	seedLink(t, pool, uid, "eua0001", "https://example.com")
@@ -600,7 +609,7 @@ func TestRecorder_EmptyUserAgentNotFlaggedAsBot(t *testing.T) {
 //     can no longer seek directly to that campaign's rows.
 func TestExplain_IdxClicksCampaignTimeUsed(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 
 	uid := seedUser(t, pool, "explain@example.com")
 	campID := seedCampaign(t, pool, uid, "Explain", "explain")
@@ -757,7 +766,7 @@ func TestRecorder_RecordIssuesExactlyOneStatement(t *testing.T) {
 	campID := seedCampaign(t, pool, uid, "Count", "count")
 	seedLinkWithUTM(t, pool, uid, "sc0001", "https://example.com", &campID, seededLinkUTM{Source: "link-src"})
 
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 	counter.reset() // exclude the seeding queries above; only rec.Record itself is under test
 
 	if err := rec.Record(context.Background(), Click{Key: "sc0001", UTMTerm: "inbound-term"}); err != nil {
@@ -767,5 +776,25 @@ func TestRecorder_RecordIssuesExactlyOneStatement(t *testing.T) {
 	if got := counter.Count(); got != 1 {
 		t.Errorf("Record issued %d statement(s) (%v), want exactly 1 — "+
 			"campaign_id and the UTM fallback must resolve inside the single INSERT, not a separate lookup", got, counter.sqls)
+	}
+}
+
+// TestRecorder_NilHasherStoresNullHash asserts the fail-closed path: with no
+// hasher the IP is dropped, never stored raw (#0121).
+func TestRecorder_NilHasherStoresNullHash(t *testing.T) {
+	pool := testPool(t)
+	rec := NewRecorder(pool, nil, nil)
+	uid := seedUser(t, pool, "alice@example.com")
+	seedLink(t, pool, uid, "nilhash", "https://example.com/")
+
+	if err := rec.Record(context.Background(), Click{Key: "nilhash", IPAddress: "203.0.113.7"}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	var isNull bool
+	if err := pool.QueryRow(context.Background(), `SELECT ip_hash IS NULL FROM clicks`).Scan(&isNull); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !isNull {
+		t.Error("ip_hash should be NULL when no hasher is configured")
 	}
 }

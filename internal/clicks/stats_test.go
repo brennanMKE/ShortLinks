@@ -60,7 +60,7 @@ func findBucket(buckets []Bucket, value string) int64 {
 // bucket and the count-desc ordering.
 func TestUTMStatsForLink_Breakdown(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 	stats := NewStatsStore(pool)
 
 	uid := seedUser(t, pool, "alice@example.com")
@@ -155,7 +155,7 @@ func TestUTMStatsForLink_NoClicks(t *testing.T) {
 // removed.
 func TestUTMStatsForLink_ExcludesBotsAndReportsExcludedCount(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 	stats := NewStatsStore(pool)
 
 	uid := seedUser(t, pool, "bot-stats@example.com")
@@ -249,7 +249,7 @@ func TestUTMStatsForLink_ClickCountAndExcludedComputedInOneQuery(t *testing.T) {
 
 	uid := seedUser(t, pool, "query-count@example.com")
 	linkID := seedLink(t, pool, uid, "qc0001", "https://example.com")
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 	recordN(t, rec, "qc0001", "email", "newsletter", "launch", 2)
 	recordBotN(t, rec, "qc0001", 1)
 
@@ -295,7 +295,7 @@ func findDay(days []DayBucket, date string) int64 {
 // a window that includes both, and asserts the per-day counts are correct.
 func TestClicksOverTime_BasicBuckets(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 	stats := NewStatsStore(pool)
 
 	uid := seedUser(t, pool, "charlie@example.com")
@@ -1233,7 +1233,7 @@ func TestDimensionBreakdown_AllowsEveryDocumentedDimensionAndFilterColumn(t *tes
 // expected and correct, not a defect.
 func TestExplainCampaignClicksOverTime_UsesCampaignTimeIndexWithBotFilter(t *testing.T) {
 	pool := testPool(t)
-	rec := NewRecorder(pool, nil)
+	rec := NewRecorder(pool, nil, nil)
 	uid := seedUser(t, pool, "explain-cot@example.com")
 	campID := seedCampaign(t, pool, uid, "Explain COT", "explain-cot")
 	seedLinkWithUTM(t, pool, uid, "excot001", "https://example.com", &campID, seededLinkUTM{})

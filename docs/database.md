@@ -143,7 +143,7 @@ campaign/UTM/placement columns; they are not backfilled by parsing
 
 ---
 
-### `clicks` — `000003_create_clicks.up.sql`, extended by `000012_clicks_campaign_and_bot.up.sql`
+### `clicks` — `000003_create_clicks.up.sql`, extended by `000012_clicks_campaign_and_bot.up.sql` and `000015_clicks_ip_hash.up.sql`
 
 One row per redirect, capturing request metadata and any inbound UTM parameters
 for analytics. `link_id` is nullable; the FK does not cascade-delete so click
@@ -154,8 +154,8 @@ history is preserved if a link is deleted.
 | `id` | `BIGSERIAL` | Primary key |
 | `link_id` | `BIGINT` | FK → `links(id)`, nullable |
 | `clicked_at` | `TIMESTAMPTZ` | Default `now()` |
-| `ip_address` | `INET` | Nullable |
-| `user_agent` | `TEXT` | Nullable |
+| `ip_hash` | `BYTEA` | Nullable. 32-byte keyed daily HMAC-SHA256 of the visitor IP (#0121); the raw IP is never stored. Rows from before `000015` are NULL, and the down migration only restores an empty `ip_address INET` (lossy by design). Set to NULL after 90 days |
+| `user_agent` | `TEXT` | Nullable. Set to NULL after 90 days (#0121) |
 | `referer` | `TEXT` | Nullable |
 | `utm_source` | `TEXT` | Nullable. Inbound short-URL value if present, else the link's own stored value (#0100), else `NULL` — see `docs/analytics.md`'s "UTM fallback precedence" |
 | `utm_medium` | `TEXT` | Same precedence as `utm_source` |

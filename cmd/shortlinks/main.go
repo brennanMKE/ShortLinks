@@ -149,7 +149,14 @@ func servePostgres(cfg *config.Config) error {
 	}
 	defer redirectCache.Close()
 	resolver := links.NewResolver(redirectCache, linkStore)
-	clickRecorder := clicks.NewRecorder(pool, slog.Default())
+	ipHasher, err := clicks.NewIPHasher(cfg.SessionSecret)
+	if err != nil {
+		return err
+	}
+	clickRecorder := clicks.NewRecorder(pool, ipHasher, slog.Default())
+	// #0121: strip ip_hash/user_agent from clicks older than 90 days, hourly.
+	// No graceful-shutdown ctx exists; process exit ends the goroutine.
+	go clicks.NewSweeper(pool, slog.Default()).Run(context.Background())
 	statsStore := clicks.NewStatsStore(pool)
 	redirectH := handlers.NewRedirectHandler(resolver, handlers.NewClickRecorder(clickRecorder))
 

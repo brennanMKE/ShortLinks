@@ -30,8 +30,8 @@ Each click maps to one row in the `clicks` table (migration
 | `id` | `BIGSERIAL` | Surrogate primary key |
 | `link_id` | `BIGINT` | Resolved inside the INSERT via the link's `key`; an unknown key inserts zero rows rather than erroring |
 | `clicked_at` | `TIMESTAMPTZ` | Snapshot taken by the handler before the response is written; falls back to `now()` if zero |
-| `ip_address` | `INET` | Extracted from `X-Forwarded-For` / `RemoteAddr`; unparseable values are dropped (stored as NULL) |
-| `user_agent` | `TEXT` | NULL when empty |
+| `ip_hash` | `BYTEA` | 32-byte keyed daily HMAC-SHA256 of the visitor IP (extracted from `X-Forwarded-For` / `RemoteAddr`), computed by the `Recorder`; **the raw IP is never stored** (#0121). NULL when the IP is empty/unparseable, and for every click recorded before `000015` — see "Visitor privacy and retention" below |
+| `user_agent` | `TEXT` | NULL when empty. Set to NULL after 90 days (#0121) |
 | `referer` | `TEXT` | NULL when empty |
 | `utm_source` | `TEXT` | Inbound short-URL value if present, else the link's own stored `utm_source` (#0099), else NULL — see "UTM fallback precedence" below |
 | `utm_medium` | `TEXT` | Same precedence as `utm_source` |
@@ -41,13 +41,46 @@ Each click maps to one row in the `clicks` table (migration
 | `campaign_id` | `BIGINT` | The link's `campaign_id` **at the moment of the click** (#0100), `NULL` if the link had no campaign. `REFERENCES campaigns(id) ON DELETE SET NULL`. See "Campaign attribution" below |
 | `is_bot` | `BOOLEAN` | Classified at record time from `user_agent` ([#0101](../issues/0101.md)) — see "Bot classification" below. Column added by #0100; rows recorded before #0101 shipped keep `FALSE` regardless of whether they were automated traffic |
 
-`user_agent`/`referer`/`ip_address` have no fallback: the recorder stores an
-empty string as SQL NULL for these three (via `nullStr`/`nullableIP` in
+`user_agent`/`referer` have no fallback: the recorder stores an
+empty string as SQL NULL for these two (via `nullStr` in
 `internal/clicks/recorder.go`), so an absent value is always genuine absence,
 never an empty string that happened to be forwarded. The five `utm_*` columns
 are different — `nullStr` does not touch them at all; their empty-vs-absent
 handling and `(none)`-bucket behavior are governed by the fallback precedence
 below instead.
+
+### Visitor privacy and retention (#0121)
+
+Nothing in the stats, CSV export, or API reads per-click rows, so the visitor
+IP is only ever used to tell repeat clicks apart within a day. It is stored as
+a one-way hash, and click detail expires.
+
+- **Hash.** `Recorder.Record` calls `IPHasher.HashAt(ip, clickedAt)`
+  (`internal/clicks/iphash.go`). The key is
+  `HMAC-SHA256(SESSION_SECRET, "shortlinks click-ip key v1")`, so no new
+  variable is needed and the key is independent of cookie signing. The daily
+  salt is `HMAC-SHA256(key, "shortlinks click-ip salt v1\x00" + <UTC date of the click>)`
+  and the stored value is `HMAC-SHA256(salt, canonical IP)`. The same IP hashes
+  the same within one UTC day and differently on every other day, so hashes
+  cannot be linked across days. IPv4-mapped IPv6 is hashed as IPv4 and zones
+  are dropped; IPv6 is hashed at full address. Rotating `SESSION_SECRET`
+  changes the key, which is harmless for the same reason.
+- **Fail closed.** A nil hasher or an unparseable IP stores NULL, never the raw
+  value.
+- **Retention.** `Sweeper` (`internal/clicks/retention.go`, started from
+  `servePostgres`) runs at startup and then hourly. It sets `ip_hash` and
+  `user_agent` to NULL on clicks older than `DetailRetention` (90 days). The
+  **row is kept** as an anonymous event, so `links.click_count`, campaign
+  totals, charts and breakdowns are unchanged and no daily-aggregate table is
+  needed. `referer` and `utm_*` are kept: they are stats dimensions and
+  describe the referring page, not the visitor. `is_bot` is classified at
+  record time, so stripping `user_agent` loses nothing the stats use.
+- **Legacy data.** Migration `000015` drops `ip_address` and adds `ip_hash`;
+  existing rows get NULL because SQL cannot reproduce the keyed hash and an
+  unsalted hash of an IPv4 address is reversible. The raw IPs are gone for good.
+- **Not covered.** Apache's access log on the host still records visitor IPs
+  (rotate it with logrotate), and `audit_log` / `api_tokens.last_used_ip` hold
+  the signed-in operator's IP, not visitors'.
 
 Four indexes support analytics queries:
 
@@ -546,6 +579,8 @@ When `buckets` is empty or null, the component renders "No data." in faint text.
 | Name | Location | Value | Meaning |
 |---|---|---|---|
 | `recordTimeout` | `internal/clicks/recorder.go` | 5s | Max time a background click INSERT may run |
+| `DetailRetention` | `internal/clicks/retention.go` | 90 days | Age after which a click's `ip_hash` and `user_agent` are set to NULL (#0121) |
+| `sweepInterval` | `internal/clicks/retention.go` | 1h | How often the retention sweep runs (also once at startup) |
 | `defaultTimeseriesDays` | `internal/clicks/stats.go` | 30 | Look-back window when no range is supplied (per-link and campaign-without-dates) |
 | `NoneBucket` | `internal/clicks/stats.go` | `"(none)"` | Label for NULL/empty UTM values in breakdowns |
 | `breakdownLimit` | `internal/clicks/stats.go` | 20 | Top-N rows returned per UTM dimension, per-link and per-campaign alike |
@@ -560,6 +595,9 @@ When `buckets` is empty or null, the component renders "No data." in faint text.
 |---|---|
 | `migrations/000003_create_clicks.up.sql` | Original schema for the `clicks` table and its first two indexes |
 | `migrations/000012_clicks_campaign_and_bot.{up,down}.sql` | Adds `campaign_id`/`is_bot` and `idx_clicks_campaign_id`/`idx_clicks_campaign_time` (#0100) |
+| `migrations/000015_clicks_ip_hash.{up,down}.sql` | Replaces `ip_address INET` with `ip_hash BYTEA` (#0121); existing rows become NULL |
+| `internal/clicks/iphash.go` | `IPHasher`: keyed daily-salted IP hash (#0121) |
+| `internal/clicks/retention.go` | `Sweeper`, `DetailRetention`: strips `ip_hash`/`user_agent` after 90 days (#0121) |
 | `internal/clicks/recorder.go` | `Click` type, `Recorder`, `RecordClick` (fire-and-forget), `Record` (the #0100 UTM fallback + campaign_id resolution + #0101 bot classification) |
 | `internal/clicks/botdetect.go` | `IsBot`, `BotUserAgentSubstrings` (#0101) |
 | `internal/clicks/stats.go` | `StatsStore`; per-link `UTMStatsForLink`/`ClicksOverTime`; campaign `CampaignStats`/`CampaignSummary`/`CampaignRollup`/`CampaignClicksOverTime`/`CampaignClicksByLink`/`CampaignSeriesByLink` (#0102); `Bucket`, `UTMStats`, `DayBucket`, `TimeseriesResult`, `LinkBucket`, `LinkSeries` |

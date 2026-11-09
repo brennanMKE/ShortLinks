@@ -44,7 +44,7 @@ type Config struct {
 	WebAuthnRPID     string
 	WebAuthnRPOrigin string
 
-	// Sessions
+	// Sessions. SessionSecret also derives the click-IP hashing key (#0121).
 	SessionSecret string
 
 	// Email (AWS SES SMTP)
