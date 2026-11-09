@@ -460,7 +460,9 @@ breakdown" and "Links"). Each row is `{placement, link_count, count}`, sorted
 by clicks descending, then link count, then name. Grouping is
 case-insensitive with surrounding whitespace trimmed (`Testing` and
 `testing ` are one row); the display name is the most common spelling among
-the group's links. NULL, empty and blank placements form one `(none)` row.
+the group's links (a group whose links were all since unassigned shows the
+lowercased normalized key). Rows carry `is_none` for the blank bucket, since a
+link may be literally named `(none)`. NULL, empty and blank placements form one `(none)` row.
 `lower()` is the database's simple case mapping, not full Unicode folding.
 
 The two columns are on different time scales, like "Links" and "Clicks in

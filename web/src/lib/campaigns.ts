@@ -693,16 +693,13 @@ export function buildBatchCreateRows(
 
 // ── Clicks by placement (#0122) ─────────────────────────────────────────────
 
-/** The label the server (clicks.NoneBucket) gives links with no placement. */
-export const NONE_PLACEMENT = '(none)';
-
 /**
- * True when at least one row is a real placement. When false (empty, or only
+ * True when at least one row is a real placement (is_none false). When false (empty, or only
  * the "(none)" row) the panel shows a "set a placement" note instead of a
  * one-row table.
  */
 export function hasNamedPlacement(rows: PlacementBucket[] | undefined | null): boolean {
-  return (rows ?? []).some((r) => r.placement !== NONE_PLACEMENT);
+  return (rows ?? []).some((r) => !r.is_none);
 }
 
 /** Sum of the Clicks column; equals the campaign's "Clicks in window". */

@@ -686,7 +686,7 @@ func TestCampaignsStats_ReturnsRollup(t *testing.T) {
 		t.Fatalf("by_placement = %#v, want a 1-element array", body["by_placement"])
 	}
 	row, _ := byPlacement[0].(map[string]any)
-	if row["placement"] != "(none)" || row["link_count"] != float64(1) || row["count"] != float64(2) {
+	if row["placement"] != "(none)" || row["is_none"] != true || row["link_count"] != float64(1) || row["count"] != float64(2) {
 		t.Errorf("by_placement[0] = %#v, want {(none), link_count 1, count 2}", row)
 	}
 }

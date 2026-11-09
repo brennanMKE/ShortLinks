@@ -1766,7 +1766,7 @@ func TestCampaignRollup_ByPlacement_ZeroClickLinkStillCounted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
-	want := []PlacementBucket{{"Busy Shop", 1, 2}, {"Quiet Shop", 1, 0}}
+	want := []PlacementBucket{{Placement: "Busy Shop", LinkCount: 1, Count: 2}, {Placement: "Quiet Shop", LinkCount: 1, Count: 0}}
 	if len(got.ByPlacement) != 2 || got.ByPlacement[0] != want[0] || got.ByPlacement[1] != want[1] {
 		t.Fatalf("ByPlacement = %+v, want %+v", got.ByPlacement, want)
 	}
@@ -1872,5 +1872,27 @@ func TestCampaignRollup_ByPlacement_EmptyCampaign(t *testing.T) {
 	}
 	if got.ByPlacement == nil || len(got.ByPlacement) != 0 {
 		t.Fatalf("ByPlacement = %#v, want non-nil empty slice", got.ByPlacement)
+	}
+}
+
+// A placement literally spelled "(none)" is its own group, distinct from the
+// blank bucket, even though both display as "(none)". IsNone tells them apart.
+func TestCampaignRollup_ByPlacement_LiteralNoneIsDistinctFromBlank(t *testing.T) {
+	pool := testPool(t)
+	uid, campID, stats, from, to := placementFixture(t, pool, "pl-lit@example.com", "pl-lit")
+	at := from.Add(time.Hour)
+	placementLink(t, pool, uid, campID, "pllit001", "(none)", 2, at)
+	placementLink(t, pool, uid, campID, "pllit002", "", 1, at)
+
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	if err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	want := []PlacementBucket{
+		{Placement: NoneBucket, IsNone: false, LinkCount: 1, Count: 2},
+		{Placement: NoneBucket, IsNone: true, LinkCount: 1, Count: 1},
+	}
+	if len(got.ByPlacement) != 2 || got.ByPlacement[0] != want[0] || got.ByPlacement[1] != want[1] {
+		t.Fatalf("ByPlacement = %+v, want %+v", got.ByPlacement, want)
 	}
 }

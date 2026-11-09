@@ -256,7 +256,6 @@ func TestRecorder_EmptyUTMStoredAsNull(t *testing.T) {
 // below read back. Empty string fields mean the underlying column was NULL.
 type clickRow struct {
 	Source, Medium, Campaign, Term, Content string
-	Placement                               string
 	CampaignID                              *int64
 	IsBot                                   bool
 }

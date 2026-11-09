@@ -689,8 +689,12 @@ func campaignClicksByLinkQuery(ctx context.Context, q rowQuerier, campaignID int
 // campaign detail page. Aggregates only: no per-click detail is returned.
 type PlacementBucket struct {
 	Placement string `json:"placement"`
-	LinkCount int64  `json:"link_count"`
-	Count     int64  `json:"count"`
+	// IsNone marks the blank-placement bucket. Clients must use it, not the
+	// Placement text, to tell that bucket apart: a link may be literally
+	// named "(none)", which then has the same Placement string.
+	IsNone    bool  `json:"is_none"`
+	LinkCount int64 `json:"link_count"`
+	Count     int64 `json:"count"`
 }
 
 // campaignClicksByPlacementQuery groups the campaign by normalized placement
@@ -756,6 +760,7 @@ func campaignClicksByPlacementQuery(ctx context.Context, q rowQuerier, campaignI
 		switch {
 		case grp == "":
 			b.Placement = NoneBucket
+			b.IsNone = true
 		case spelling == "":
 			b.Placement = grp
 		default:

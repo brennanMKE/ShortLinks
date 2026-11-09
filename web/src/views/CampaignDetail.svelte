@@ -143,7 +143,6 @@
     campaignUtmDimensions,
     isEmptyCampaignChannelStats,
     hasNamedPlacement,
-    NONE_PLACEMENT,
   } from '../lib/campaigns';
   import { qrSvgUrl, qrPngUrl, shortUrlBase } from '../lib/links';
   import { formatDate } from '../lib/linkDetail';
@@ -632,7 +631,7 @@
 
     <!-- Clicks by placement (#0122). Rows arrive sorted from the server. -->
     <Panel title="Clicks by placement" noPadding>
-      <p class="text-faint chart-window-label">{windowLabel(detail.stats)}</p>
+      <p class="text-faint chart-window-label placement-window-label">{windowLabel(detail.stats)}</p>
       {#if byPlacement.length === 0}
         <p class="text-muted empty-msg">No links or clicks yet.</p>
       {:else if !hasNamedPlacement(byPlacement)}
@@ -655,9 +654,10 @@
               </tr>
             </thead>
             <tbody>
-              {#each byPlacement as row (row.placement)}
+              <!-- Keyed by index: placement text is not unique (a link may be literally "(none)"). -->
+              {#each byPlacement as row, i (i)}
                 <tr>
-                  <td class="placement-name" class:text-muted={row.placement === NONE_PLACEMENT} title={row.placement}>{row.placement}</td>
+                  <td class="placement-name" class:text-muted={row.is_none} title={row.placement}>{row.placement}</td>
                   <td class="num">{row.link_count}</td>
                   <td class="num">{row.count}</td>
                 </tr>
@@ -1069,6 +1069,9 @@
   .placement-table {
     width: 100%;
     table-layout: fixed;
+  }
+  .placement-window-label {
+    padding: var(--space-3) var(--space-4) 0;
   }
   .placement-num-col {
     width: 5.5rem;

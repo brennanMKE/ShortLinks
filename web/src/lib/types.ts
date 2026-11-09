@@ -237,6 +237,8 @@ export interface LinkBucket {
  */
 export interface PlacementBucket {
   placement: string;
+  /** True only for the blank-placement bucket; a link literally named "(none)" has false. */
+  is_none: boolean;
   link_count: number;
   count: number;
 }

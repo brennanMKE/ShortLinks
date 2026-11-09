@@ -8,7 +8,6 @@ import {
   visibleCampaigns,
   hasNamedPlacement,
   placementClickTotal,
-  NONE_PLACEMENT,
   campaignDateRangeLabel,
   formatDateOnly,
   toDateInput,
@@ -1054,8 +1053,8 @@ describe('buildBatchCreateRows', () => {
 });
 
 describe('hasNamedPlacement / placementClickTotal (#0122)', () => {
-  const none: PlacementBucket = { placement: NONE_PLACEMENT, link_count: 2, count: 3 };
-  const shop: PlacementBucket = { placement: 'Acme', link_count: 1, count: 4 };
+  const none: PlacementBucket = { placement: '(none)', is_none: true, link_count: 2, count: 3 };
+  const shop: PlacementBucket = { placement: 'Acme', is_none: false, link_count: 1, count: 4 };
 
   it('is false for empty, undefined and null', () => {
     expect(hasNamedPlacement([])).toBe(false);
@@ -1067,6 +1066,9 @@ describe('hasNamedPlacement / placementClickTotal (#0122)', () => {
   });
   it('is true when any named placement exists', () => {
     expect(hasNamedPlacement([shop, none])).toBe(true);
+  });
+  it('treats a placement literally spelled (none) as named', () => {
+    expect(hasNamedPlacement([{ placement: '(none)', is_none: false, link_count: 1, count: 1 }, none])).toBe(true);
   });
   it('sums clicks, and is 0 for empty input', () => {
     expect(placementClickTotal([])).toBe(0);
