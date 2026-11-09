@@ -82,6 +82,7 @@ Work the open issues in this order. Finish a phase before starting the next unle
 | **8 — E2E analytics and live updates** | [#0085](0085.md), [#0091](0091.md) | Both need links with clicks, and both check that the screen reflects changed data. |
 | **9 — E2E admin users and settings** | [#0087](0087.md), [#0088](0088.md) | Registration gate and user management share the admin role and account screens. |
 | **10 — E2E filters, audit, and umbrella** | [#0090](0090.md), [#0089](0089.md), then [#0079](0079.md) | Work in the listed order, not by number: filter rules tie back to #0109; the audit log checks entries produced by earlier phases; umbrella #0079 closes when its sub-issues do. |
+| **11 — Campaign analytics** | [#0122](0122.md) | Feature work on campaign reporting, requested for the Dust Almanac posters. Placed after the E2E phases by default; Brennan may move it earlier. |
 | **Ops — Owner** | [#0045](0045.md) | SES sandbox and domain verification is done in the AWS console, not in code. It blocks nothing above. |
 
 ## Resolution workflow (review-gated subagents)
