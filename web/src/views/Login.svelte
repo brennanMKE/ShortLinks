@@ -28,6 +28,7 @@
   import { currentUser } from '../lib/stores';
   import {
     getMe,
+    getPublicHome,
     loginStart,
     loginFinish,
     registerStart,
@@ -44,10 +45,17 @@
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import { APP_NAME } from '../lib/branding';
+  import { registerOptionVisible, type HomeInfo } from '../lib/home';
 
   let email = $state('');
   let signingIn = $state(false);
   let loginError = $state<string | null>(null);
+
+  // Whether to offer Register (#0125): hidden until /api/public/home says
+  // enrollment is open, so a closed instance (or a failed fetch) never shows a
+  // sign-up the server would refuse. The server gate stays the enforcement.
+  let homeInfo = $state<HomeInfo | null>(null);
+  const canRegister = $derived(registerOptionVisible(homeInfo));
 
   // Registration sub-form state.
   let showRegister = $state(false);
@@ -207,6 +215,13 @@
 
   onMount(() => {
     startConditional();
+    getPublicHome()
+      .then((info) => {
+        homeInfo = info;
+      })
+      .catch(() => {
+        homeInfo = null;
+      });
   });
 
   onDestroy(() => {
@@ -253,6 +268,7 @@
 
     <hr class="divider" />
 
+    {#if canRegister}
     <div class="sub-section">
       {#if !showRegister}
         <Button
@@ -306,6 +322,7 @@
         </form>
       {/if}
     </div>
+    {/if}
 
     <div class="sub-section">
       {#if !showRecover}

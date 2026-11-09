@@ -105,7 +105,7 @@ func servePostgres(cfg *config.Config) error {
 	recoverSvc := auth.NewRecoveryService(store, wa, mailer, auditLogger)
 	authH := handlers.NewAuthHandler(regSvc, loginSvc, recoverSvc, slog.Default())
 	credsH := handlers.NewCredentialsHandler(store, auditLogger)
-	settingsH := handlers.NewSettingsHandler(store, auditLogger)
+	settingsH := handlers.NewSettingsHandler(store, auditLogger, cfg.BaseURL)
 	// Admin user management (#0028): list/detail/deactivate/reactivate. The
 	// deactivate/reactivate paths write their account.deactivated/reactivated audit
 	// row inside the store's transaction (WriteTx) so it commits atomically with
@@ -200,6 +200,7 @@ func servePostgres(cfg *config.Config) error {
 	// read straight off the RequireSession-attached context, so the Svelte SPA
 	// can gate the admin view. Stateless — no data-layer dependency.
 	meH := handlers.NewMeHandler(cfg.BaseURL)
+	homeH := handlers.NewHomeHandler(store)
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
@@ -220,7 +221,7 @@ func servePostgres(cfg *config.Config) error {
 
 	return mountAndServe(cfg, pool,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
-		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH, apiTokensH,
+		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH, homeH, apiTokensH,
 		requireSession, requireAdmin, requireAPI, requireCookie, nil /* no outer middleware in production */)
 }
 
@@ -252,7 +253,7 @@ func serveDevMode(cfg *config.Config) error {
 
 	// Credential, settings, user-management, and audit handlers use the dev store.
 	credsH := handlers.NewCredentialsHandler(ds, nil /* no audit in dev */)
-	settingsH := handlers.NewSettingsHandler(ds, nil)
+	settingsH := handlers.NewSettingsHandler(ds, nil, cfg.BaseURL)
 	adminUsersH := handlers.NewAdminUsersHandler(ds, nil)
 	adminAuditH := handlers.NewAdminAuditHandler(ds)
 
@@ -276,6 +277,7 @@ func serveDevMode(cfg *config.Config) error {
 	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds, ds, cfg.BaseURL)
 
 	meH := handlers.NewMeHandler(cfg.BaseURL)
+	homeH := handlers.NewHomeHandler(ds)
 
 	// Session middleware backed by the dev store.
 	requireSession := middleware.RequireSession(ds)
@@ -309,7 +311,7 @@ func serveDevMode(cfg *config.Config) error {
 
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
-		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH, apiTokensH,
+		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH, homeH, apiTokensH,
 		requireSession, requireAdmin, requireAPI, requireCookie, devAutoLogin)
 }
 
@@ -336,6 +338,7 @@ func mountAndServe(
 	linksH *handlers.LinksHandler,
 	campaignsH *handlers.CampaignsHandler,
 	meH *handlers.MeHandler,
+	homeH *handlers.HomeHandler,
 	apiTokensH *handlers.APITokensHandler,
 	requireSession func(http.Handler) http.Handler,
 	requireAdmin func(http.Handler) http.Handler,
@@ -468,6 +471,11 @@ func mountAndServe(
 	// Current user profile (#0027) — behind RequireSession; returns the caller's
 	// {id, email, is_admin} for the SPA to gate the admin view.
 	mux.Handle("GET /api/me", requireAPI(http.HandlerFunc(meH.Me)))
+
+	// Signed-out home page info (#0125) — deliberately UNAUTHENTICATED (no
+	// requireAPI): the SPA needs it before anyone signs in. It exposes only
+	// {redirect_url, registrations_enabled}, never other settings.
+	mux.Handle("GET /api/public/home", homeH)
 
 	// SSE stream (#0026) — behind RequireSession; pushes link.created events to
 	// the authenticated user's connected dashboard clients.

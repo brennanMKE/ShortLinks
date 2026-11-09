@@ -3,6 +3,7 @@
 // binary serves the SPA itself), send the session cookie via
 // `credentials: 'include'`, and throw a typed ApiError on a non-2xx response.
 
+import type { HomeInfo } from './home';
 import type {
   User,
   Link,
@@ -115,6 +116,11 @@ export function apiDelete<T>(path: string): Promise<T> {
 /** GET /api/me — current user profile; throws ApiError(401) when unauthenticated. */
 export function getMe(): Promise<User> {
   return apiGet<User>('/api/me');
+}
+
+/** GET /api/public/home — unauthenticated; the primary URL and registration state (#0125). */
+export function getPublicHome(): Promise<HomeInfo> {
+  return apiGet<HomeInfo>('/api/public/home');
 }
 
 /** GET /api/links — the caller's links (paginated, most-recent-first). */

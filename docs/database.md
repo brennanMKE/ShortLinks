@@ -343,7 +343,7 @@ digests were stored). Clients would need new tokens after re-applying it.
 ### `settings` — `000006_create_settings.up.sql`
 
 Runtime configuration values that can be changed without a service restart.
-Currently one row is seeded by the migration itself.
+Rows are seeded by migrations 6 and 16.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -356,6 +356,7 @@ Currently one row is seeded by the migration itself.
 | `key` | Default `value` | Meaning |
 |---|---|---|
 | `registrations_enabled` | `'false'` | Gate controlling whether new user registration is open. Defaults closed; admin toggles it via **Admin → Settings**. |
+| `home_redirect_url` | `''` | The signed-out home page's primary URL (`000016_seed_home_redirect_url`, #0125). Empty means unset: visitors get the sign-in screen. There is no default; each operator sets their own (e.g. `https://www.example.com/`) via **Admin → Settings → Primary URL**. The down migration deletes the row. |
 
 The migration inserts this row with `ON CONFLICT DO NOTHING` so re-running
 migrations on an existing database does not overwrite an admin's setting.

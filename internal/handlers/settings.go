@@ -3,7 +3,10 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
@@ -38,12 +41,15 @@ type SettingsHandler struct {
 	// now is injectable so updated_at and the audit timestamp are deterministic
 	// in tests; defaults to time.Now.
 	now func() time.Time
+	// baseURL is the instance's own BASE_URL, used to reject a home_redirect_url
+	// that points back at this instance (#0125).
+	baseURL string
 }
 
 // NewSettingsHandler constructs a SettingsHandler over the data layer. A nil
 // auditor disables audit writes.
-func NewSettingsHandler(store settingStore, auditor *audit.Logger) *SettingsHandler {
-	return &SettingsHandler{store: store, auditor: auditor, now: time.Now}
+func NewSettingsHandler(store settingStore, auditor *audit.Logger, baseURL string) *SettingsHandler {
+	return &SettingsHandler{store: store, auditor: auditor, now: time.Now, baseURL: baseURL}
 }
 
 // settingView is the JSON shape for one settings row. updated_at is omitted when
@@ -102,8 +108,9 @@ func (h *SettingsHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key is required")
 		return
 	}
-	if !validSettingValue(req.Key, req.Value) {
-		writeError(w, http.StatusBadRequest, "invalid value")
+	req.Value = strings.TrimSpace(req.Value)
+	if err := validateSettingValue(req.Key, req.Value, h.baseURL); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -162,16 +169,60 @@ func toSettingsResponse(settings []auth.Setting) settingsResponse {
 	return settingsResponse{Settings: views}
 }
 
-// validSettingValue enforces per-key value constraints. registrations_enabled is
-// a boolean toggle and must be exactly "true" or "false"; any other validated
-// key would be added here. Unrecognized keys pass this check and are rejected
-// later by the store (ErrSettingNotFound → 400) because they do not exist —
-// this function only guards the shape of values for known keys.
-func validSettingValue(key, value string) bool {
+// settingHomeRedirectURL is the key of the signed-out home page's primary URL
+// (#0125). Empty means unset: there is deliberately no default.
+const settingHomeRedirectURL = "home_redirect_url"
+
+// maxHomeRedirectURLLen bounds the stored primary URL.
+const maxHomeRedirectURLLen = 2048
+
+// validateSettingValue enforces per-key value constraints and returns an error
+// whose message is safe to show to the admin. registrations_enabled is a boolean
+// toggle and must be exactly "true" or "false"; home_redirect_url is empty or an
+// absolute http(s) URL that is not on this instance's own host (baseURL).
+// Unrecognized keys pass and are rejected later by the store
+// (ErrSettingNotFound -> 400) because they do not exist.
+func validateSettingValue(key, value, baseURL string) error {
 	switch key {
 	case "registrations_enabled":
-		return value == "true" || value == "false"
+		if value == "true" || value == "false" {
+			return nil
+		}
+		return errors.New("invalid value")
+	case settingHomeRedirectURL:
+		return validHomeRedirectURL(value, baseURL)
 	default:
-		return true
+		return nil
 	}
+}
+
+// validHomeRedirectURL checks the primary URL rules (#0125). Empty clears it.
+func validHomeRedirectURL(value, baseURL string) error {
+	if value == "" {
+		return nil
+	}
+	errAbsolute := fmt.Errorf("%s must be an absolute http(s) URL", settingHomeRedirectURL)
+	if len(value) > maxHomeRedirectURLLen || strings.ContainsAny(value, " \t\r\n") {
+		return errAbsolute
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return errAbsolute
+		}
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return errAbsolute
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "http" && scheme != "https") || u.Host == "" || u.Hostname() == "" || u.User != nil || u.Opaque != "" {
+		return errAbsolute
+	}
+	// Never loop back to this instance's own home page. Hostname only: anything
+	// on the instance's host is pointless as a primary site.
+	if base, perr := url.Parse(baseURL); perr == nil && base.Hostname() != "" &&
+		strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), strings.TrimSuffix(base.Hostname(), ".")) {
+		return fmt.Errorf("%s must not point at this instance", settingHomeRedirectURL)
+	}
+	return nil
 }

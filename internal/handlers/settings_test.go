@@ -64,7 +64,7 @@ func resetSettings(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO settings (key, value, updated_at)
-		 VALUES ('registrations_enabled', 'false', now())`); err != nil {
+		 VALUES ('registrations_enabled', 'false', now()), ('home_redirect_url', '', now())`); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
 }
@@ -112,7 +112,7 @@ func settingUpdatedAt(t *testing.T, pool *pgxpool.Pool, key string) time.Time {
 // through the genuine session + admin middleware, proving the routes are
 // protected exactly as wired in main.go.
 func adminMux(store *auth.Store) http.Handler {
-	h := NewSettingsHandler(store, nil)
+	h := NewSettingsHandler(store, nil, testBaseURL)
 	requireSession := middleware.RequireSession(store)
 	requireAdmin := func(next http.Handler) http.Handler {
 		return requireSession(middleware.RequireAdmin(next))
@@ -240,6 +240,9 @@ func TestAdminSettings_GetReturnsSeeded(t *testing.T) {
 	settings := decodeSettings(t, body)
 	if settings["registrations_enabled"] != "false" {
 		t.Errorf("registrations_enabled = %q, want false", settings["registrations_enabled"])
+	}
+	if v, ok := settings["home_redirect_url"]; !ok || v != "" {
+		t.Errorf("home_redirect_url = %q (present=%v), want empty seed", v, ok)
 	}
 }
 
@@ -371,7 +374,7 @@ func TestAdminSettings_PatchOpensRegistrationGate(t *testing.T) {
 	regSvc := auth.NewRegistrationService(store, wa, &gateMailer{}, nil, cfg)
 	authH := NewAuthHandler(regSvc, nil, nil, nil)
 
-	settingsH := NewSettingsHandler(store, nil)
+	settingsH := NewSettingsHandler(store, nil, testBaseURL)
 	requireSession := middleware.RequireSession(store)
 	requireAdmin := func(next http.Handler) http.Handler {
 		return requireSession(middleware.RequireAdmin(next))
@@ -439,4 +442,49 @@ func (gateMailer) SendVerification(context.Context, string, string) error { retu
 func (gateMailer) SendRecovery(context.Context, string, string) error     { return nil }
 func (gateMailer) SendSessionsRevoked(context.Context, string, time.Time) error {
 	return nil
+}
+
+// TestAdminSettings_PatchHomeRedirectURL covers set, self-host rejection and
+// clear for the primary URL (#0125).
+func TestAdminSettings_PatchHomeRedirectURL(t *testing.T) {
+	pool := settingsTestPool(t)
+	store := auth.NewStore(pool)
+	srv := httptest.NewServer(adminMux(store))
+	defer srv.Close()
+
+	admin := seedAdmin(t, pool, "admin@example.com")
+	seedSession(t, pool, admin, "admin-token")
+
+	patch := func(value string) int {
+		t.Helper()
+		b, _ := json.Marshal(map[string]string{"key": "home_redirect_url", "value": value})
+		req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/admin/settings", jsonBody(string(b)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := srv.Client().Do(withCookie(req, "admin-token"))
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if got := patch("https://www.example.com/"); got != http.StatusOK {
+		t.Fatalf("set status = %d, want 200", got)
+	}
+	if v := settingValue(t, pool, "home_redirect_url"); v != "https://www.example.com/" {
+		t.Errorf("DB value = %q, want https://www.example.com/", v)
+	}
+	// testBaseURL is https://example.test: same hostname is rejected, DB unchanged.
+	if got := patch("https://example.test/"); got != http.StatusBadRequest {
+		t.Fatalf("self status = %d, want 400", got)
+	}
+	if v := settingValue(t, pool, "home_redirect_url"); v != "https://www.example.com/" {
+		t.Errorf("DB value after rejected = %q, want unchanged", v)
+	}
+	if got := patch(""); got != http.StatusOK {
+		t.Fatalf("clear status = %d, want 200", got)
+	}
+	if v := settingValue(t, pool, "home_redirect_url"); v != "" {
+		t.Errorf("DB value after clear = %q, want empty", v)
+	}
 }

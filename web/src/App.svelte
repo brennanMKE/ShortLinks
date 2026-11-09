@@ -1,9 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentUser, pendingVerifyToken } from './lib/stores';
-  import { getMe } from './lib/api';
+  import { getMe, getPublicHome } from './lib/api';
   import { initRouter, getRoute, replace } from './lib/hashRouter.svelte';
-  import { loginPathWithRedirect, redirectTargetFrom, type RouteDef } from './lib/routing';
+  import {
+    loginPathWithRedirect,
+    parseHash,
+    redirectTargetFrom,
+    type RouteDef,
+  } from './lib/routing';
+  import { shouldShowHome, type HomeInfo } from './lib/home';
+  import Home from './views/Home.svelte';
   import Login from './views/Login.svelte';
   import Dashboard from './views/Dashboard.svelte';
   import LinkDetail from './views/LinkDetail.svelte';
@@ -41,6 +48,14 @@
   type Mode = 'loading' | 'verify-register' | 'verify-recover' | 'app';
   let mode = $state<Mode>('loading');
 
+  // Public home info (#0125): fetched only on a signed-out cold load at the
+  // bare root, cleared the moment someone signs in so a later sign-out falls
+  // through to the normal /login bounce rather than ejecting to another site.
+  let homeInfo = $state<HomeInfo | null>(null);
+  const showHome = $derived(
+    shouldShowHome($currentUser !== null, getRoute().path, homeInfo),
+  );
+
   // Redirects away from a route currentUser doesn't belong on: signed-out on
   // a protected route bounces to /login (preserving it as the `redirect`
   // target); signed-in on /login bounces onward. Called from enterApp()
@@ -49,7 +64,11 @@
   // below on every later hashchange.
   function redirectIfNeeded(): void {
     const route = getRoute();
-    if ($currentUser === null && route.path !== '/login') {
+    if (
+      $currentUser === null &&
+      route.path !== '/login' &&
+      !shouldShowHome(false, route.path, homeInfo)
+    ) {
       replace(loginPathWithRedirect(route.path));
     } else if ($currentUser !== null && route.path === '/login') {
       replace(redirectTargetFrom(route.query));
@@ -114,6 +133,15 @@
       // A 401 (signed out) or any other failure (network/server) both land
       // signed-out; the guard effect below bounces to /login either way.
       currentUser.set(null);
+      // Only the bare root can show the home page; any failure here means
+      // today's behavior (bounce to /login).
+      if (parseHash(window.location.hash).path === '/') {
+        try {
+          homeInfo = await getPublicHome();
+        } catch {
+          homeInfo = null;
+        }
+      }
     }
     enterApp();
   });
@@ -125,6 +153,7 @@
   // replace() lands.
   $effect(() => {
     if (mode !== 'app') return;
+    if ($currentUser !== null) homeInfo = null;
     redirectIfNeeded();
   });
 </script>
@@ -137,6 +166,8 @@
   <RegisterVerify onverified={() => enterApp('/')} ongotologin={() => enterApp('/login')} />
 {:else if mode === 'verify-recover'}
   <RecoverVerify onverified={() => enterApp('/')} ongotologin={() => enterApp('/login')} />
+{:else if showHome && homeInfo}
+  <Home info={homeInfo} />
 {:else}
   <Router />
 {/if}

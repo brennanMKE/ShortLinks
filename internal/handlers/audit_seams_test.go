@@ -222,7 +222,7 @@ func auditAdminMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	t.Helper()
 	authStore := auth.NewStore(pool)
 	logger := audit.New(pool)
-	settingsH := NewSettingsHandler(authStore, logger)
+	settingsH := NewSettingsHandler(authStore, logger, testBaseURL)
 	filterStore := filters.NewStore(pool)
 	urlFiltersH := NewURLFiltersHandler(filterStore, nil, logger)
 	requireSession := middleware.RequireSession(authStore)
@@ -273,6 +273,42 @@ func TestAudit_SettingsUpdated(t *testing.T) {
 	if row.Metadata["key"] != "registrations_enabled" ||
 		row.Metadata["old_value"] != "false" || row.Metadata["new_value"] != "true" {
 		t.Errorf("metadata = %v, want key/old=false/new=true", row.Metadata)
+	}
+}
+
+// TestAudit_HomeRedirectURLUpdated proves a primary URL change writes a
+// settings.updated row with key=home_redirect_url (#0125).
+func TestAudit_HomeRedirectURLUpdated(t *testing.T) {
+	pool := filterTestPool(t)
+	srv := httptest.NewServer(auditAdminMux(t, pool))
+	defer srv.Close()
+
+	admin := seedAdmin(t, pool, "admin@example.com")
+	seedSession(t, pool, admin, "admin-token")
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO settings (key, value, updated_at) VALUES ('home_redirect_url','', now())
+		 ON CONFLICT (key) DO UPDATE SET value = ''`); err != nil {
+		t.Fatalf("seed setting: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodPatch, srv.URL+"/admin/settings",
+		jsonBody(`{"key":"home_redirect_url","value":"https://www.example.com/"}`))
+	resp, err := srv.Client().Do(withCookie(req, "admin-token"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	row := lastAuditFor(t, pool, audit.ActionSettingsUpdated)
+	if row.ActorID == nil || *row.ActorID != admin {
+		t.Errorf("actor_id = %v, want %d", row.ActorID, admin)
+	}
+	if row.Metadata["key"] != "home_redirect_url" ||
+		row.Metadata["old_value"] != "" || row.Metadata["new_value"] != "https://www.example.com/" {
+		t.Errorf("metadata = %v, want key=home_redirect_url old=\"\" new=https://www.example.com/", row.Metadata)
 	}
 }
 
