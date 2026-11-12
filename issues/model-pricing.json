@@ -1,38 +1,50 @@
 {
-  "fetched": "2026-08-07",
+  "fetched": "2026-11-12",
   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
   "currency": "USD per MTok",
   "notes": "cache_write_5m = 1.25x input; cache_read = 0.1x input. claude-sonnet-5 is at introductory pricing ($2/$10) through 2026-08-31; its standard rate is $3.00/$15.00 (cache_write_5m 3.75, cache_read 0.30).",
   "models": {
+    "claude-opus-5-5": {
+      "input": 4.0,
+      "output": 20.0,
+      "cache_write_5m": 5.0,
+      "cache_read": 0.2
+    },
+    "claude-sonnet-5-5": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_write_5m": 2.5,
+      "cache_read": 0.1
+    },
     "claude-opus-5": {
-      "input": 5.00,
-      "output": 25.00,
+      "input": 5.0,
+      "output": 25.0,
       "cache_write_5m": 6.25,
-      "cache_read": 0.50
+      "cache_read": 0.5
     },
     "claude-sonnet-5": {
-      "input": 2.00,
-      "output": 10.00,
-      "cache_write_5m": 2.50,
-      "cache_read": 0.20
+      "input": 2.0,
+      "output": 10.0,
+      "cache_write_5m": 2.5,
+      "cache_read": 0.2
     },
     "claude-opus-4-8": {
-      "input": 5.00,
-      "output": 25.00,
+      "input": 5.0,
+      "output": 25.0,
       "cache_write_5m": 6.25,
-      "cache_read": 0.50
+      "cache_read": 0.5
     },
     "claude-sonnet-4-6": {
-      "input": 3.00,
-      "output": 15.00,
+      "input": 3.0,
+      "output": 15.0,
       "cache_write_5m": 3.75,
-      "cache_read": 0.30
+      "cache_read": 0.3
     },
     "claude-haiku-4-5": {
-      "input": 1.00,
-      "output": 5.00,
+      "input": 1.0,
+      "output": 5.0,
       "cache_write_5m": 1.25,
-      "cache_read": 0.10
+      "cache_read": 0.1
     }
   }
 }
