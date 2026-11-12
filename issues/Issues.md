@@ -46,6 +46,7 @@ Never mark an issue `resolved`, `closed`, or `wontfix` based on inference. Only 
 | `handlers` | HTTP handlers, routing |
 | `middleware` | Logging, rate limiting, session guard |
 | `web` | Svelte SPA, Vite, all views |
+| `portiko (upstream)` | Changes needed in `Kolonnade/Portiko`; the work happens in that repo |
 
 ## Build / verify command
 
@@ -83,6 +84,10 @@ Work the open issues in this order. Finish a phase before starting the next unle
 | **9 — E2E admin users and settings** | [#0087](0087.md), [#0088](0088.md) | Registration gate and user management share the admin role and account screens. |
 | **10 — E2E filters, audit, and umbrella** | [#0090](0090.md), [#0089](0089.md), then [#0079](0079.md) | Work in the listed order, not by number: filter rules tie back to #0109; the audit log checks entries produced by earlier phases; umbrella #0079 closes when its sub-issues do. |
 | **11 — Campaign analytics** | [#0124](0124.md), [#0123](0123.md) | Follow-ons carved out of #0122. Work #0124 first: the range picker defines the window the placement CSV should honor. |
+| **12 — Portiko groundwork** | [#0127](0127.md), [#0128](0128.md), [#0129](0129.md), [#0137](0137.md) | Umbrella [#0126](0126.md): each instance becomes its own Portiko identity provider. Ship #0127 to production first and on its own, because user handles are only collected as people sign in. #0128, #0129 and #0137 are changes in `Kolonnade/Portiko` that the embedding needs. |
+| **13 — Embedded provider** | [#0130](0130.md), [#0131](0131.md) | Run Portiko inside the binary under `/id`, behind a switch that is off by default, then import accounts and passkeys into it. |
+| **14 — Sign in through Portiko** | [#0132](0132.md), [#0133](0133.md), [#0134](0134.md) | Server `rp` wiring first, then the SPA, then dev mode. |
+| **15 — Portiko cutover and cleanup** | [#0135](0135.md), [#0136](0136.md), then [#0126](0126.md) | Switch the three instances over, then delete the old passkey code and tables. The umbrella closes last. The E2E issues that cover today's sign-in screens (#0081, #0086, #0087, #0088) need re-scoping once this lands. |
 | **Ops — Owner** | [#0045](0045.md) | SES sandbox and domain verification is done in the AWS console, not in code. It blocks nothing above. |
 
 ## Resolution workflow (review-gated subagents)
