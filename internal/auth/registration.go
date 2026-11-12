@@ -134,14 +134,14 @@ func (s *RegistrationService) VerifyRegistration(ctx context.Context, token stri
 	}
 
 	// session.Challenge is base64url(challenge bytes); store the raw bytes in
-	// the BYTEA column. The handle does not need persisting: FinishRegistration
-	// only checks the session handle equals the user handle, and both come from
-	// a RegistrationUser we reconstruct on finish.
+	// the BYTEA column. The handle sent to the browser (user.id) is persisted
+	// with the challenge: the authenticator keeps it, so finish must replay the
+	// same value and store it on the credential row (#0127).
 	challengeBytes, err := base64.RawURLEncoding.DecodeString(session.Challenge)
 	if err != nil {
 		return nil, fmt.Errorf("auth: decoding challenge: %w", err)
 	}
-	if err := s.store.SaveRegistrationChallenge(ctx, challengeBytes, token, now); err != nil {
+	if err := s.store.SaveRegistrationChallenge(ctx, challengeBytes, token, user.WebAuthnID(), now); err != nil {
 		return nil, err
 	}
 
@@ -176,7 +176,7 @@ func (s *RegistrationService) FinishRegistration(ctx context.Context, token, dev
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	challengeBytes, err := s.store.ConsumeRegistrationChallenge(ctx, tx, token, now)
+	challengeBytes, handle, err := s.store.ConsumeRegistrationChallenge(ctx, tx, token, now)
 	if err != nil {
 		return FinishResult{}, err
 	}
@@ -186,8 +186,13 @@ func (s *RegistrationService) FinishRegistration(ctx context.Context, token, dev
 		return FinishResult{}, err
 	}
 
-	user, err := NewRegistrationUser(email)
-	if err != nil {
+	// Replay the handle issued at the verify step. A NULL handle means the
+	// challenge was written by a pre-#0127 binary: fall back to a fresh handle
+	// and leave the credential's user_handle NULL (login captures it later).
+	var user *RegistrationUser
+	if len(handle) > 0 {
+		user = registrationUserFromHandle(handle, email)
+	} else if user, err = NewRegistrationUser(email); err != nil {
 		return FinishResult{}, err
 	}
 
@@ -228,6 +233,7 @@ func (s *RegistrationService) FinishRegistration(ctx context.Context, token, dev
 		DeviceName:     deviceName,
 		BackupEligible: credential.Flags.BackupEligible,
 		BackupState:    credential.Flags.BackupState,
+		UserHandle:     handle,
 	}, now); err != nil {
 		return FinishResult{}, err
 	}

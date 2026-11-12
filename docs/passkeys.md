@@ -272,6 +272,7 @@ by `migrations/000009_passkey_backup_flags.up.sql`.
 | `device_name` | `TEXT` | Optional user-supplied label |
 | `backup_eligible` | `BOOLEAN NOT NULL DEFAULT FALSE` | BE flag — immutable after registration (added by migration 000009) |
 | `backup_state` | `BOOLEAN NOT NULL DEFAULT FALSE` | BS flag — updated on each successful login (added by migration 000009) |
+| `user_handle` | `BYTEA` | WebAuthn user handle held by the authenticator; nullable, write-once (added by migration 000017, #0127) |
 | `created_at` | `TIMESTAMPTZ` | Enrollment time |
 | `last_used_at` | `TIMESTAMPTZ` | Last successful assertion |
 
@@ -280,6 +281,49 @@ by `migrations/000009_passkey_backup_flags.up.sql`.
 `StoredCredential` (`internal/auth/store.go`) carries the fields written at
 enrollment. `CredentialRecord` carries the fields read back for assertion
 verification (same fields, minus `DeviceName`).
+
+### User handle capture and import readiness
+
+Portiko requires every imported passkey to carry its WebAuthn user handle
+(`user_handle BYTEA NOT NULL`) and checks each assertion against it (#0131). The
+handle lives on the user's authenticator; the server only learns it when it
+generates one or when the passkey signs in.
+
+- Registration and recovery persist the handle issued at the verify step with
+  the challenge (`webauthn_challenges.user_handle`), replay it at finish, and
+  store it on the new credential row. (Before #0127 the finish step generated a
+  second, different random handle that was discarded.) A challenge written by an
+  older binary has no handle; the credential is then stored with NULL.
+- `FinishLogin` records the assertion's `userHandle` after `ValidateLogin`
+  succeeds, in the same transaction, only while the column is NULL. A stored
+  handle is never overwritten; a differing assertion handle logs a warning
+  (user id only) and the stored value is kept.
+- One account's passkeys may carry different handles (a new one was generated
+  per registration/recovery); each credential records what its authenticator
+  reports. #0131 decides how Portiko represents that.
+
+Readiness query (credentials still lacking a handle, total and per user):
+
+```sql
+-- Total
+SELECT count(*) FILTER (WHERE user_handle IS NULL) AS missing,
+       count(*)                                     AS total
+  FROM passkey_credentials;
+
+-- Per user
+SELECT u.email,
+       count(*) FILTER (WHERE c.user_handle IS NULL) AS missing,
+       count(*)                                       AS total
+  FROM passkey_credentials c
+  JOIN users u ON u.id = c.user_id
+ GROUP BY u.email
+HAVING count(*) FILTER (WHERE c.user_handle IS NULL) > 0
+ ORDER BY missing DESC, u.email;
+```
+
+Run it on each instance's database. Credentials with `user_handle IS NULL` can
+only be imported after their owner signs in once before cutover; any still NULL
+at cutover must be re-enrolled.
 
 ### Backup-Eligible / Backup-State and iCloud Keychain
 

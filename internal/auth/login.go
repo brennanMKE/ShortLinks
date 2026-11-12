@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -217,6 +218,21 @@ func (s *LoginService) FinishLogin(ctx context.Context, ip string, r *http.Reque
 	if err != nil {
 		s.log.Warn("login: validating assertion", ceremonyWarnArgs(err)...)
 		return LoginResult{}, ErrLoginFailed
+	}
+
+	// Capture the authenticator's user handle (#0127), first-write-wins: the
+	// stored value never changes. A mismatch is logged (no handle bytes) and the
+	// stored value kept.
+	switch assertionHandle := parsed.Response.UserHandle; {
+	case len(assertionHandle) == 0:
+		// Non-discoverable assertion without a handle: nothing to record.
+	case len(rec.UserHandle) == 0:
+		if _, err := s.store.CaptureUserHandle(ctx, tx, rec.CredentialID, assertionHandle); err != nil {
+			return LoginResult{}, err
+		}
+	case !bytes.Equal(rec.UserHandle, assertionHandle):
+		s.log.Warn("login: assertion user handle differs from stored handle; keeping stored",
+			"user_id", rec.UserID, "credential_row_id", rec.ID)
 	}
 
 	// Apply the PRD sign_count rules. go-webauthn's UpdateCounter has already

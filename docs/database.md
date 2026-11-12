@@ -233,7 +233,7 @@ the WebAuthn challenge because `webauthn_challenges` references this table's
 
 ---
 
-### `passkey_credentials` — `000004_create_auth_credentials.up.sql` + `000009_passkey_backup_flags.up.sql` + `000013_enforce_session_passkey_not_null.up.sql`
+### `passkey_credentials` — `000004_create_auth_credentials.up.sql` + `000009_passkey_backup_flags.up.sql` + `000013_enforce_session_passkey_not_null.up.sql` + `000017_passkey_user_handle.up.sql`
 
 One row per registered WebAuthn (passkey) credential. Migration 4 creates the
 table; migration 9 adds the `backup_eligible` and `backup_state` flag columns
@@ -255,6 +255,7 @@ place; on a clean replay it is a no-op (#0111).
 | `last_used_at` | `TIMESTAMPTZ` | Nullable; updated after each successful assertion |
 | `backup_eligible` | `BOOLEAN` | Default `false` (added migration 9). Must match the value presented at registration on every subsequent assertion. |
 | `backup_state` | `BOOLEAN` | Default `false` (added migration 9). Current backup state of the credential. |
+| `user_handle` | `BYTEA` | Nullable (added migration 17, #0127). The WebAuthn user handle the authenticator holds for this credential. Written at registration/recovery, or captured at the next successful login for older rows. Write-once: never changed once set. |
 
 Migration 9 also backfills `backup_eligible = TRUE` for all existing rows,
 because every credential enrolled in this deployment at that point was an Apple
@@ -262,7 +263,7 @@ iCloud Keychain synced passkey.
 
 ---
 
-### `webauthn_challenges` — `000004_create_auth_credentials.up.sql`
+### `webauthn_challenges` — `000004_create_auth_credentials.up.sql` + `000017_passkey_user_handle.up.sql`
 
 Ephemeral challenges issued during registration and authentication ceremonies.
 Rows are deleted after use or expiry; the table is not intended to accumulate
@@ -276,6 +277,7 @@ long-term data.
 | `pending_registration_token` | `TEXT` | FK → `pending_registrations(token)`, nullable |
 | `purpose` | `TEXT` | Nullable; describes the ceremony type |
 | `expires_at` | `TIMESTAMPTZ` | Nullable |
+| `user_handle` | `BYTEA` | Nullable (added migration 17, #0127). Registration/recovery only: the user handle issued at the verify step, replayed at finish and stored on the credential. |
 
 **Indexes:**
 

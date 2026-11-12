@@ -152,7 +152,7 @@ func (s *RecoveryService) VerifyRecovery(ctx context.Context, token string) (*pr
 	if err != nil {
 		return nil, fmt.Errorf("auth: decoding challenge: %w", err)
 	}
-	if err := s.store.SaveRecoveryChallenge(ctx, challengeBytes, account.ID, token, now); err != nil {
+	if err := s.store.SaveRecoveryChallenge(ctx, challengeBytes, account.ID, token, user.WebAuthnID(), now); err != nil {
 		return nil, err
 	}
 
@@ -185,7 +185,7 @@ func (s *RecoveryService) FinishRecovery(ctx context.Context, token, deviceName,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	challengeBytes, userID, err := s.store.ConsumeRecoveryChallenge(ctx, tx, token, now)
+	challengeBytes, userID, handle, err := s.store.ConsumeRecoveryChallenge(ctx, tx, token, now)
 	if err != nil {
 		return RecoveryResult{}, err
 	}
@@ -195,12 +195,14 @@ func (s *RecoveryService) FinishRecovery(ctx context.Context, token, deviceName,
 		return RecoveryResult{}, err
 	}
 
-	// Reconstruct a registration user for the email. As in registration finish,
-	// a fresh handle is fine: go-webauthn's registration verification checks the
-	// session handle against the user handle (both from this object) and the
-	// attestation, not against any previously issued handle.
-	user, err := NewRegistrationUser(email)
-	if err != nil {
+	// Reconstruct the registration user with the handle issued at the verify
+	// step (the authenticator stores that one). A NULL handle means the challenge
+	// came from a pre-#0127 binary: fall back to a fresh handle and leave the
+	// credential's user_handle NULL (login captures it later).
+	var user *RegistrationUser
+	if len(handle) > 0 {
+		user = registrationUserFromHandle(handle, email)
+	} else if user, err = NewRegistrationUser(email); err != nil {
 		return RecoveryResult{}, err
 	}
 
@@ -231,6 +233,7 @@ func (s *RecoveryService) FinishRecovery(ctx context.Context, token, deviceName,
 		DeviceName:     deviceName,
 		BackupEligible: credential.Flags.BackupEligible,
 		BackupState:    credential.Flags.BackupState,
+		UserHandle:     handle,
 	}, now); err != nil {
 		return RecoveryResult{}, err
 	}

@@ -221,13 +221,15 @@ func (s *Store) LookupPendingRegistration(ctx context.Context, token string, now
 
 // SaveRegistrationChallenge persists a registration WebAuthn challenge linked to
 // the pending registration token, with a 5-minute TTL. user_id is NULL during
-// registration because no account exists yet.
-func (s *Store) SaveRegistrationChallenge(ctx context.Context, challenge []byte, token string, now time.Time) error {
+// registration because no account exists yet. handle is the WebAuthn user
+// handle issued to the browser at the verify step; it is stored so the finish
+// leg can replay it and persist it on the credential row.
+func (s *Store) SaveRegistrationChallenge(ctx context.Context, challenge []byte, token string, handle []byte, now time.Time) error {
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO webauthn_challenges
-		     (challenge, user_id, pending_registration_token, purpose, expires_at)
-		 VALUES ($1, NULL, $2, 'registration', $3)`,
-		challenge, token, now.Add(registrationTTL),
+		     (challenge, user_id, pending_registration_token, purpose, expires_at, user_handle)
+		 VALUES ($1, NULL, $2, 'registration', $3, $4)`,
+		challenge, token, now.Add(registrationTTL), handle,
 	); err != nil {
 		return fmt.Errorf("auth: saving registration challenge: %w", err)
 	}
@@ -237,26 +239,26 @@ func (s *Store) SaveRegistrationChallenge(ctx context.Context, challenge []byte,
 // ConsumeRegistrationChallenge atomically deletes and returns the registration
 // challenge for a pending-registration token, enforcing the TTL. A challenge is
 // single-use: deleting it on read prevents replay. ErrTokenInvalid is returned
-// when no live challenge exists for the token.
-func (s *Store) ConsumeRegistrationChallenge(ctx context.Context, q querier, token string, now time.Time) ([]byte, error) {
-	var challenge []byte
+// when no live challenge exists for the token. The stored user handle is
+// returned too; it is nil for a challenge written before migration 000017.
+func (s *Store) ConsumeRegistrationChallenge(ctx context.Context, q querier, token string, now time.Time) (challenge, handle []byte, err error) {
 	var expiresAt time.Time
-	err := q.QueryRow(ctx,
+	err = q.QueryRow(ctx,
 		`DELETE FROM webauthn_challenges
 		 WHERE pending_registration_token = $1 AND purpose = 'registration'
-		 RETURNING challenge, expires_at`,
+		 RETURNING challenge, expires_at, user_handle`,
 		token,
-	).Scan(&challenge, &expiresAt)
+	).Scan(&challenge, &expiresAt, &handle)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return nil, ErrTokenInvalid
+		return nil, nil, ErrTokenInvalid
 	case err != nil:
-		return nil, fmt.Errorf("auth: consuming registration challenge: %w", err)
+		return nil, nil, fmt.Errorf("auth: consuming registration challenge: %w", err)
 	}
 	if !expiresAt.After(now) {
-		return nil, ErrTokenInvalid
+		return nil, nil, ErrTokenInvalid
 	}
-	return challenge, nil
+	return challenge, handle, nil
 }
 
 // CreatedUser is the result of inserting a new account.
@@ -301,8 +303,9 @@ type StoredCredential struct {
 	AAGUID         []byte // raw 16 bytes; nil/empty stored as SQL NULL
 	SignCount      uint32
 	DeviceName     string
-	BackupEligible bool // immutable BE flag from registration; must match on every assertion
-	BackupState    bool // mutable BS flag; updated on each successful login
+	BackupEligible bool   // immutable BE flag from registration; must match on every assertion
+	BackupState    bool   // mutable BS flag; updated on each successful login
+	UserHandle     []byte // WebAuthn user handle the authenticator holds; nil stored as SQL NULL
 }
 
 // InsertCredential stores a passkey_credentials row inside the given querier.
@@ -312,10 +315,10 @@ func (s *Store) InsertCredential(ctx context.Context, q querier, c StoredCredent
 	if _, err := q.Exec(ctx,
 		`INSERT INTO passkey_credentials
 		     (user_id, credential_id, public_key, aaguid, sign_count, device_name,
-		      backup_eligible, backup_state, created_at, last_used_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)`,
+		      backup_eligible, backup_state, created_at, last_used_at, user_handle)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)`,
 		c.UserID, c.CredentialID, c.PublicKey, aaguid, int64(c.SignCount), c.DeviceName,
-		c.BackupEligible, c.BackupState, now,
+		c.BackupEligible, c.BackupState, now, nilIfEmpty(c.UserHandle),
 	); err != nil {
 		return fmt.Errorf("auth: inserting credential: %w", err)
 	}
@@ -387,12 +390,12 @@ func (s *Store) LookupRecoveryToken(ctx context.Context, token string, now time.
 // recovery token and bound to the existing user_id, with a 15-minute TTL. The
 // purpose is 'recovery' so it is consumed only by the recovery finish path and
 // never collides with a registration challenge for the same token.
-func (s *Store) SaveRecoveryChallenge(ctx context.Context, challenge []byte, userID int64, token string, now time.Time) error {
+func (s *Store) SaveRecoveryChallenge(ctx context.Context, challenge []byte, userID int64, token string, handle []byte, now time.Time) error {
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO webauthn_challenges
-		     (challenge, user_id, pending_registration_token, purpose, expires_at)
-		 VALUES ($1, $2, $3, 'recovery', $4)`,
-		challenge, userID, token, now.Add(recoveryTTL),
+		     (challenge, user_id, pending_registration_token, purpose, expires_at, user_handle)
+		 VALUES ($1, $2, $3, 'recovery', $4, $5)`,
+		challenge, userID, token, now.Add(recoveryTTL), handle,
 	); err != nil {
 		return fmt.Errorf("auth: saving recovery challenge: %w", err)
 	}
@@ -403,24 +406,24 @@ func (s *Store) SaveRecoveryChallenge(ctx context.Context, challenge []byte, use
 // (and its bound user_id) for a recovery token, enforcing the TTL. Single-use
 // deletion prevents replay. ErrTokenInvalid is returned when no live recovery
 // challenge exists for the token.
-func (s *Store) ConsumeRecoveryChallenge(ctx context.Context, q querier, token string, now time.Time) (challenge []byte, userID int64, err error) {
+func (s *Store) ConsumeRecoveryChallenge(ctx context.Context, q querier, token string, now time.Time) (challenge []byte, userID int64, handle []byte, err error) {
 	var expiresAt time.Time
 	err = q.QueryRow(ctx,
 		`DELETE FROM webauthn_challenges
 		 WHERE pending_registration_token = $1 AND purpose = 'recovery'
-		 RETURNING challenge, user_id, expires_at`,
+		 RETURNING challenge, user_id, expires_at, user_handle`,
 		token,
-	).Scan(&challenge, &userID, &expiresAt)
+	).Scan(&challenge, &userID, &expiresAt, &handle)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return nil, 0, ErrTokenInvalid
+		return nil, 0, nil, ErrTokenInvalid
 	case err != nil:
-		return nil, 0, fmt.Errorf("auth: consuming recovery challenge: %w", err)
+		return nil, 0, nil, fmt.Errorf("auth: consuming recovery challenge: %w", err)
 	}
 	if !expiresAt.After(now) {
-		return nil, 0, ErrTokenInvalid
+		return nil, 0, nil, ErrTokenInvalid
 	}
-	return challenge, userID, nil
+	return challenge, userID, handle, nil
 }
 
 // AccountByEmail is a lightweight view of a users row used by the login
@@ -451,21 +454,23 @@ func (s *Store) LookupUserByEmail(ctx context.Context, email string) (AccountByE
 // CredentialRecord carries the stored fields of a passkey needed to verify an
 // assertion and apply the sign_count rules.
 type CredentialRecord struct {
+	ID             int64 // passkey_credentials.id (row id, safe to log)
 	UserID         int64
 	CredentialID   []byte
 	PublicKey      []byte
 	AAGUID         []byte // raw 16 bytes; NULL in the DB decodes to nil
 	SignCount      uint32
-	BackupEligible bool // immutable BE flag; must be re-presented correctly on every assertion
-	BackupState    bool // mutable BS flag; last-seen value from the stored row
+	BackupEligible bool   // immutable BE flag; must be re-presented correctly on every assertion
+	BackupState    bool   // mutable BS flag; last-seen value from the stored row
+	UserHandle     []byte // stored WebAuthn user handle; nil when not yet captured (NULL)
 }
 
 // CredentialsForUser loads every stored passkey for an account. Used to build
 // the allowCredentials list and the login webauthn.User's credential set.
 func (s *Store) CredentialsForUser(ctx context.Context, userID int64) ([]CredentialRecord, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT user_id, credential_id, public_key, aaguid, sign_count,
-		        backup_eligible, backup_state
+		`SELECT id, user_id, credential_id, public_key, aaguid, sign_count,
+		        backup_eligible, backup_state, user_handle
 		   FROM passkey_credentials WHERE user_id = $1`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("auth: loading credentials for user: %w", err)
@@ -483,13 +488,13 @@ func (s *Store) CredentialByID(ctx context.Context, credentialID []byte) (Creden
 	var rec CredentialRecord
 	var active bool
 	err := s.pool.QueryRow(ctx,
-		`SELECT c.user_id, c.credential_id, c.public_key, c.aaguid, c.sign_count,
-		        c.backup_eligible, c.backup_state, u.active
+		`SELECT c.id, c.user_id, c.credential_id, c.public_key, c.aaguid, c.sign_count,
+		        c.backup_eligible, c.backup_state, c.user_handle, u.active
 		   FROM passkey_credentials c
 		   JOIN users u ON u.id = c.user_id
 		  WHERE c.credential_id = $1`, credentialID,
-	).Scan(&rec.UserID, &rec.CredentialID, &rec.PublicKey, &rec.AAGUID, &rec.SignCount,
-		&rec.BackupEligible, &rec.BackupState, &active)
+	).Scan(&rec.ID, &rec.UserID, &rec.CredentialID, &rec.PublicKey, &rec.AAGUID, &rec.SignCount,
+		&rec.BackupEligible, &rec.BackupState, &rec.UserHandle, &active)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return CredentialRecord{}, false, ErrCredentialNotFound
@@ -501,15 +506,16 @@ func (s *Store) CredentialByID(ctx context.Context, credentialID []byte) (Creden
 
 // scanCredentialRecords decodes credential rows, mapping a NULL/zero AAGUID UUID
 // back to nil bytes. The SELECT must include backup_eligible and backup_state
-// columns (added by migration 000009) immediately after sign_count.
+// columns (added by migration 000009) immediately after sign_count, followed by
+// user_handle (migration 000017).
 func scanCredentialRecords(rows pgx.Rows) ([]CredentialRecord, error) {
 	var out []CredentialRecord
 	for rows.Next() {
 		var rec CredentialRecord
 		var aaguid *[16]byte
 		var signCount int64
-		if err := rows.Scan(&rec.UserID, &rec.CredentialID, &rec.PublicKey, &aaguid, &signCount,
-			&rec.BackupEligible, &rec.BackupState); err != nil {
+		if err := rows.Scan(&rec.ID, &rec.UserID, &rec.CredentialID, &rec.PublicKey, &aaguid, &signCount,
+			&rec.BackupEligible, &rec.BackupState, &rec.UserHandle); err != nil {
 			return nil, fmt.Errorf("auth: scanning credential row: %w", err)
 		}
 		if aaguid != nil {
@@ -588,6 +594,32 @@ func (s *Store) TouchCredentialLastUsed(ctx context.Context, q querier, credenti
 		return fmt.Errorf("auth: touching credential last_used_at: %w", err)
 	}
 	return nil
+}
+
+// CaptureUserHandle records the WebAuthn user handle an authenticator reported
+// for a credential, but only while the column is still NULL: once stored, the
+// handle never changes. It reports whether a row was written.
+func (s *Store) CaptureUserHandle(ctx context.Context, q querier, credentialID, handle []byte) (bool, error) {
+	if len(handle) == 0 {
+		return false, nil
+	}
+	tag, err := q.Exec(ctx,
+		`UPDATE passkey_credentials SET user_handle = $1
+		  WHERE credential_id = $2 AND user_handle IS NULL`,
+		handle, credentialID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("auth: capturing user handle: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// nilIfEmpty maps an empty byte slice to nil so it is stored as SQL NULL.
+func nilIfEmpty(b []byte) []byte {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }
 
 // UpdateLastLogin sets users.last_login_at for an account.
