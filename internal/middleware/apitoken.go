@@ -86,12 +86,16 @@ func RequireSessionOrAPIToken(sessions SessionResolver, tokens APITokenResolver,
 				return
 			}
 
-			if limits.PerToken != nil && !limits.PerToken.limiterFor(strconv.FormatInt(u.TokenID, 10)).Allow() {
+			// An in-process MCP dispatch (#0149) was already counted once, as
+			// the outer POST /mcp request; counting its inner REST call too
+			// would charge every tool call twice.
+			if limits.PerToken != nil && !isInternalDispatch(r.Context()) &&
+				!limits.PerToken.limiterFor(strconv.FormatInt(u.TokenID, 10)).Allow() {
 				writeRateLimited(w, limits.PerToken)
 				return
 			}
 
-			if u.ReadOnly && !isSafeMethod(r.Method) {
+			if u.ReadOnly && !isSafeMethod(r.Method) && !isMCPTransport(r) {
 				writeJSONError(w, http.StatusForbidden, "api_token_read_only")
 				return
 			}
@@ -130,6 +134,36 @@ func RequireCookieSession(sessions SessionResolver) func(http.Handler) http.Hand
 			guarded.ServeHTTP(w, r)
 		})
 	}
+}
+
+// MCPPath is the one route exempt from the read-only method check (#0149).
+const MCPPath = "/mcp"
+
+// isMCPTransport reports whether r is the MCP transport's own POST to /mcp.
+// The MCP protocol carries every call, reads included, in a POST, so the
+// method check cannot tell a read tool from a write tool there. The exemption
+// is exactly this one path and method: /mcp enforces read-only per tool (a
+// read-only session never lists a write tool and refuses one called anyway),
+// and every tool dispatches back through this middleware on its real
+// /api route, where a write by a read-only token is still refused with 403.
+func isMCPTransport(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == MCPPath
+}
+
+type internalDispatchKey struct{}
+
+// WithInternalDispatch marks ctx as an in-process dispatch from an already
+// authenticated, already rate-limited request (the MCP server's inner REST
+// calls). It only skips the per-token rate limit; authentication, the
+// read-only check and everything downstream still run. The key is unexported,
+// so a network client cannot set it.
+func WithInternalDispatch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, internalDispatchKey{}, true)
+}
+
+func isInternalDispatch(ctx context.Context) bool {
+	v, _ := ctx.Value(internalDispatchKey{}).(bool)
+	return v
 }
 
 // isSafeMethod reports whether the method is read-only per RFC 9110.

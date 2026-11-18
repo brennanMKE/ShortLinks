@@ -225,3 +225,63 @@ func TestRequireCookieSession(t *testing.T) {
 		}
 	}
 }
+
+// #0149: the read-only method check is exempted for POST /mcp and nothing
+// else. The MCP server enforces read-only per tool and again at the REST layer.
+func TestAPIToken_ReadOnlyMCPExemptionIsNarrow(t *testing.T) {
+	cases := []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodPost, "/mcp", http.StatusOK},
+		{http.MethodPost, "/api/links", http.StatusForbidden},
+		{http.MethodPost, "/mcp/", http.StatusForbidden},
+		{http.MethodPost, "/mcpx", http.StatusForbidden},
+		{http.MethodPost, "/api/mcp", http.StatusForbidden},
+		{http.MethodDelete, "/mcp", http.StatusForbidden},
+		{http.MethodPatch, "/mcp", http.StatusForbidden},
+		{http.MethodGet, "/api/links", http.StatusOK},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest(c.method, c.path, nil)
+		r.Header.Set("Authorization", "Bearer "+readOnlyToken)
+		rec := httptest.NewRecorder()
+		RequireSessionOrAPIToken(newFakeDevStore(), newFakeTokens(), noLimits())(&captureHandler{}).ServeHTTP(rec, r)
+		if rec.Code != c.want {
+			t.Errorf("read-only %s %s = %d; want %d", c.method, c.path, rec.Code, c.want)
+		}
+	}
+}
+
+// An internal (in-process) dispatch skips the per-token rate limit only.
+func TestAPIToken_InternalDispatchSkipsRateLimitNotReadOnly(t *testing.T) {
+	limits := APITokenLimits{PerToken: NewRateLimiter(rate.Every(time.Hour), 1)}
+	guard := RequireSessionOrAPIToken(newFakeDevStore(), newFakeTokens(), limits)(&captureHandler{})
+	do := func(method string, internal bool) int {
+		r := httptest.NewRequest(method, "/api/links", nil)
+		r.Header.Set("Authorization", "Bearer "+goodToken)
+		if internal {
+			r = r.WithContext(WithInternalDispatch(r.Context()))
+		}
+		rec := httptest.NewRecorder()
+		guard.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	if c := do(http.MethodGet, false); c != 200 {
+		t.Fatalf("first = %d", c)
+	}
+	if c := do(http.MethodGet, false); c != http.StatusTooManyRequests {
+		t.Errorf("second external = %d; want 429", c)
+	}
+	if c := do(http.MethodGet, true); c != 200 {
+		t.Errorf("internal = %d; want 200", c)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/api/links", nil)
+	r.Header.Set("Authorization", "Bearer "+readOnlyToken)
+	r = r.WithContext(WithInternalDispatch(r.Context()))
+	rec := httptest.NewRecorder()
+	RequireSessionOrAPIToken(newFakeDevStore(), newFakeTokens(), noLimits())(&captureHandler{}).ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("internal read-only write = %d; want 403", rec.Code)
+	}
+}

@@ -134,7 +134,7 @@ func insert(ctx context.Context, q querier, e Entry) error {
 		metaJSON = b
 	}
 	if tok, ok := apiTokenFrom(ctx); ok {
-		b, err := withAPITokenMetadata(metaJSON, tok)
+		b, err := withAPITokenMetadata(metaJSON, tok, viaFrom(ctx))
 		if err != nil {
 			return fmt.Errorf("audit: annotating metadata for %q: %w", e.Action, err)
 		}
@@ -203,7 +203,7 @@ func apiTokenFrom(ctx context.Context) (APITokenRef, bool) {
 // withAPITokenMetadata merges the token attribution into a marshalled metadata
 // object (nil means no metadata yet). Metadata that is not a JSON object — no
 // call site writes one today — is nested under "metadata" rather than dropped.
-func withAPITokenMetadata(metaJSON []byte, ref APITokenRef) ([]byte, error) {
+func withAPITokenMetadata(metaJSON []byte, ref APITokenRef, via string) ([]byte, error) {
 	m := map[string]any{}
 	if metaJSON != nil {
 		if err := json.Unmarshal(metaJSON, &m); err != nil {
@@ -214,8 +214,28 @@ func withAPITokenMetadata(metaJSON []byte, ref APITokenRef) ([]byte, error) {
 			m = map[string]any{"metadata": v}
 		}
 	}
-	m["via"] = "api_token"
+	if via == "" {
+		via = "api_token"
+	}
+	m["via"] = via
 	m["api_token_id"] = ref.ID
 	m["api_token_name"] = ref.Name
 	return json.Marshal(m)
+}
+
+// viaKey is the context key under which WithVia stores the call's source.
+type viaKey struct{}
+
+// WithVia overrides the "via" value written into token-attributed audit
+// metadata, which is "api_token" by default. The MCP server sets "mcp" on the
+// context of its in-process REST dispatch so the log shows an agent's tool
+// call as such, still with the token's id and name. It has no effect on a
+// context that carries no API token.
+func WithVia(ctx context.Context, via string) context.Context {
+	return context.WithValue(ctx, viaKey{}, via)
+}
+
+func viaFrom(ctx context.Context) string {
+	v, _ := ctx.Value(viaKey{}).(string)
+	return v
 }

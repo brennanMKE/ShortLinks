@@ -223,6 +223,11 @@ const link = await res.json();
 console.log(`${BASE}/u/${link.key}`);
 ```
 
+### MCP
+
+An agent that speaks the Model Context Protocol can use the same token against
+`/mcp` instead of calling REST by hand: see [mcp.md](mcp.md).
+
 ### Instructions for an AI agent
 
 Put the token in the agent's secret or environment configuration, not in the

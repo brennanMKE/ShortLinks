@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/time/rate"
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
@@ -24,6 +25,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
 	"github.com/brennanMKE/ShortLinks/internal/idempotency"
 	"github.com/brennanMKE/ShortLinks/internal/links"
+	"github.com/brennanMKE/ShortLinks/internal/mcpserver"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 	"github.com/brennanMKE/ShortLinks/internal/reports"
 	"github.com/brennanMKE/ShortLinks/web"
@@ -83,9 +85,23 @@ func servePostgres(cfg *config.Config) error {
 	}
 	defer pool.Close()
 
-	wa, err := auth.NewWebAuthn(cfg)
+	handler, _, closeFn, err := newPostgresHandler(ctx, cfg, pool)
 	if err != nil {
 		return err
+	}
+	defer closeFn()
+	return listen(cfg, handler)
+}
+
+// newPostgresHandler constructs the real stores and handlers over pool and
+// returns the fully routed http.Handler, the route patterns registered on it
+// (for the MCP parity test), and a function that releases what it created.
+// Split out of servePostgres so tests can serve the real mux over a test
+// database.
+func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool) (http.Handler, []string, func(), error) {
+	wa, err := auth.NewWebAuthn(cfg)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	// Choose the mailer: real SES transport when SMTP credentials are present,
@@ -147,22 +163,22 @@ func servePostgres(cfg *config.Config) error {
 	linkStore := links.NewStore(pool)
 	redirectCache, err := cache.New(int64(cfg.CacheMaxCost), time.Duration(cfg.CacheTTLSeconds)*time.Second)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
-	defer redirectCache.Close()
 	resolver := links.NewResolver(redirectCache, linkStore)
 	ipHasher, err := clicks.NewIPHasher(cfg.SessionSecret)
 	if err != nil {
-		return err
+		redirectCache.Close()
+		return nil, nil, nil, err
 	}
 	clickRecorder := clicks.NewRecorder(pool, ipHasher, slog.Default())
 	// #0121: strip ip_hash/user_agent from clicks older than 90 days, hourly.
-	// No graceful-shutdown ctx exists; process exit ends the goroutine.
+	// The sweeper stops with ctx (the process lifetime in production).
 	// The same job prunes expired Idempotency-Key records (#0147).
 	idemStore := idempotency.NewStore(pool)
 	go clicks.NewSweeper(pool, slog.Default()).
 		WithPrune("pruned expired idempotency keys", idemStore.Prune).
-		Run(context.Background())
+		Run(ctx)
 	statsStore := clicks.NewStatsStore(pool)
 	redirectH := handlers.NewRedirectHandler(resolver, handlers.NewClickRecorder(clickRecorder))
 
@@ -232,11 +248,12 @@ func servePostgres(cfg *config.Config) error {
 	requireAPI := middleware.RequireSessionOrAPIToken(store, store, middleware.DefaultAPITokenLimits())
 	requireCookie := middleware.RequireCookieSession(store)
 
-	return mountAndServe(cfg, pool,
+	handler, patterns := buildMux(cfg, pool,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
 		urlFiltersH, eventsH, redirectH, linksH, campaignsH, reportsH, meH, homeH, apiTokensH,
 		requireSession, requireAdmin, requireAPI, requireCookie, nil, /* no outer middleware in production */
 		idempotency.Middleware(idemStore))
+	return handler, patterns, redirectCache.Close, nil
 }
 
 // serveDevMode boots the app without PostgreSQL using the in-memory dev store.
@@ -323,15 +340,40 @@ func serveDevMode(cfg *config.Config) error {
 	requireAPI := middleware.RequireSessionOrAPIToken(ds, ds, middleware.DefaultAPITokenLimits())
 	requireCookie := middleware.RequireCookieSession(ds)
 
-	return mountAndServe(cfg, ds,
+	handler, _ := buildMux(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
 		urlFiltersH, eventsH, redirectH, linksH, campaignsH, nil /* no reports in dev mode */, meH, homeH, apiTokensH,
 		requireSession, requireAdmin, requireAPI, requireCookie, devAutoLogin,
 		nil /* dev mode has no database: Idempotency-Key is ignored (#0147) */)
+	return listen(cfg, handler)
 }
 
-// mountAndServe registers all routes on a new ServeMux and starts listening.
-// This is shared between the Postgres and dev paths to avoid code duplication.
+// router wraps a ServeMux and records every pattern registered on it, so a
+// test can enumerate the routes without a second, hand-kept list (#0149).
+type router struct {
+	mux      *http.ServeMux
+	patterns []string
+}
+
+func (r *router) Handle(pattern string, h http.Handler) {
+	r.patterns = append(r.patterns, pattern)
+	r.mux.Handle(pattern, h)
+}
+
+func (r *router) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+	r.Handle(pattern, http.HandlerFunc(h))
+}
+
+// listen serves handler on the configured loopback port.
+func listen(cfg *config.Config, handler http.Handler) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+	log.Printf("shortlinks %s listening on %s", version, addr)
+	return http.ListenAndServe(addr, handler)
+}
+
+// buildMux registers all routes on a new ServeMux and returns the handler plus
+// the registered patterns. It is shared between the Postgres and dev paths to
+// avoid code duplication.
 // The `db` parameter satisfies handlers.Pinger for GET /health.
 // outerMiddleware, when non-nil, wraps the entire mux as the outermost handler.
 // It is used in dev mode only (serveDevMode) to apply the auto-login middleware;
@@ -339,7 +381,7 @@ func serveDevMode(cfg *config.Config) error {
 // campaignsH may be nil (serveDevMode has no dev-store campaigns backing yet),
 // in which case the /api/campaigns routes are simply not mounted rather than
 // registered against a nil handler.
-func mountAndServe(
+func buildMux(
 	cfg *config.Config,
 	pinger handlers.Pinger,
 	authH *handlers.AuthHandler,
@@ -362,7 +404,7 @@ func mountAndServe(
 	requireCookie func(http.Handler) http.Handler,
 	outerMiddleware func(http.Handler) http.Handler,
 	idem func(http.Handler) http.Handler,
-) error {
+) (http.Handler, []string) {
 	// idem wraps the three create routes (#0147); nil (dev mode) is a no-op.
 	if idem == nil {
 		idem = func(h http.Handler) http.Handler { return h }
@@ -374,7 +416,7 @@ func mountAndServe(
 	loginLimiter := middleware.NewRateLimiter(rate.Every(time.Minute/10), 10) // 10 / minute / IP
 	recoverLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)   // 3 / hour / IP
 
-	mux := http.NewServeMux()
+	mux := &router{mux: http.NewServeMux()}
 	mux.Handle("GET /health", handlers.NewHealthHandler(pinger))
 
 	// Public redirect path (#0009): resolve key → 302 to destination with inbound
@@ -510,6 +552,23 @@ func mountAndServe(
 	// the authenticated user's connected dashboard clients.
 	mux.Handle("GET /api/events", requireAPI(http.HandlerFunc(eventsH.Stream)))
 
+	// MCP server (#0149): Streamable HTTP at /mcp for agents, authenticated
+	// with the same API tokens. Cookie sessions are refused inside the handler
+	// (403 api_token_required). requireAPI exempts exactly POST /mcp from the
+	// read-only method check; the server filters write tools out of a
+	// read-only token's session, and its tools call back into this mux (the
+	// /api routes above, through requireAPI again) so a write by a read-only
+	// token is refused twice. Mounted in dev mode too: the dev store serves
+	// the same /api routes, though the report routes (#0150) do not exist there.
+	mcpH := mcpserver.New(mcpserver.Options{BaseURL: cfg.BaseURL})
+	// Method-qualified, because a bare "/mcp" conflicts with the "GET /" SPA
+	// catch-all. GET and DELETE are routed so the SDK answers 405 (stateless
+	// mode has no stream or session) instead of the SPA returning index.html.
+	mcpGuarded := requireAPI(mcpH)
+	for _, m := range []string{"POST", "GET", "DELETE"} {
+		mux.Handle(m+" "+middleware.MCPPath, mcpGuarded)
+	}
+
 	// Svelte SPA (#0038) — the catch-all served LAST. Under the Go 1.22 mux this
 	// "GET /" pattern is the least specific, so every explicit route above wins
 	// over it. It serves hashed assets from the embedded web/dist directly and
@@ -517,14 +576,16 @@ func mountAndServe(
 	// hard refresh.
 	mux.Handle("GET /", handlers.NewSPAHandler(web.DistFS()))
 
-	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
-	log.Printf("shortlinks %s listening on %s", version, addr)
+	// The MCP tools dispatch to the bare mux, never to /mcp itself and never
+	// through the outer middleware (the dev auto-login must not run on an
+	// in-process call that already carries the caller's token).
+	mcpH.SetDispatcher(mux.mux)
 
 	// Apply the outer middleware (dev auto-login) when provided. This must never
 	// be non-nil on the production path — servePostgres always passes nil.
-	var handler http.Handler = mux
+	var handler http.Handler = mux.mux
 	if outerMiddleware != nil {
-		handler = outerMiddleware(mux)
+		handler = outerMiddleware(mux.mux)
 	}
-	return http.ListenAndServe(addr, handler)
+	return handler, mux.patterns
 }

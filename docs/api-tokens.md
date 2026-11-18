@@ -48,7 +48,9 @@ Endpoint details live in [links.md](links.md) and [campaigns.md](campaigns.md).
 object when called with a token.
 
 A **read-only** token may use `GET`/`HEAD` only; anything else is
-`403 api_token_read_only`.
+`403 api_token_read_only`. The one exception is `POST /mcp`, the [MCP
+server](mcp.md)'s transport: it hides write tools from a read-only token and
+the REST layer still refuses the write behind them.
 
 ### Errors and limits
 
@@ -124,7 +126,8 @@ mint or revoke tokens, and a leaked token can't create more of itself:
   `link.created`, `campaign.created` — gets
   `{"via":"api_token","api_token_id":…,"api_token_name":…}` merged into its
   metadata. The middleware marks the request context (`audit.WithAPIToken`) and
-  `audit.insert` applies it, so no call site has to know.
+  `audit.insert` applies it, so no call site has to know. Calls made through
+  the [MCP server](mcp.md) carry `"via":"mcp"` instead.
 
 ---
 
