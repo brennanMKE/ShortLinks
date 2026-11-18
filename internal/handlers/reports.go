@@ -53,9 +53,12 @@ func (h *ReportsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	env, err := h.svc.Run(r.Context(), u.ID, r.PathValue("name"), r.URL.Query())
 	if err != nil {
 		var pe *reports.ParamError
+		var nf *reports.NotFoundError
 		switch {
 		case errors.Is(err, reports.ErrReportNotFound):
 			writeError(w, http.StatusNotFound, "report_not_found")
+		case errors.As(err, &nf):
+			writeError(w, http.StatusNotFound, nf.Code)
 		case errors.As(err, &pe):
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": pe.Code, "field": pe.Field, "message": pe.Message})
 		default:

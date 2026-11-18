@@ -478,7 +478,10 @@ in `STORAGE=json` dev mode.
   {"error":"report_not_found"}`; a bad parameter is `400` with
   `{"error": "<code>", "field": "<param>", "message": "..."}` where the code
   is `invalid_range`, `invalid_tz`, `invalid_date`, `invalid_compare`,
-  `invalid_include_bots` or `invalid_limit`.
+  `invalid_include_bots` or `invalid_limit`. A report about one campaign or
+  link answers `404 {"error":"campaign_not_found"}` or
+  `{"error":"link_not_found"}` when the slug or key does not exist or is not the
+  caller's (a `*reports.NotFoundError`, below).
 
 ### Parameters (shared by every report)
 
@@ -800,6 +803,88 @@ inclusive.
 | `ended` | `ends_at` is set and is before today. |
 | `live` | Everything else, **including a campaign with no dates**. |
 
+### `campaign-performance`
+
+One campaign in a call. Extra parameters: `slug` (required; `missing_slug` 400
+when absent, `404 campaign_not_found` when unknown or not the caller's) and
+`columns=source|medium|placement` (default `source`). `limit` caps matrix rows
+(default 50).
+
+```json
+"data": {"campaign": {"slug": "guides-2026-11", "name": "Guides 2026-11", "status": "live", "starts_on": "2026-11-01", "ends_on": "2026-11-30"},
+  "totals": {"clicks": 902, "previous_clicks": null, "per_active_day": 50.1, "links": 42, "links_clicked": 24},
+  "matrix": {"by": "source", "columns": ["mastodon", "bluesky"], "total_rows": 12,
+    "rows": [{"content_key": "…", "title": "…", "total": 179,
+      "cells": {"mastodon": {"clicks": 118, "key": "HaQRwV"}, "bluesky": {"clicks": 61, "keys": ["riCY47", "Xk29aB"]}}}],
+    "column_totals": {"mastodon": 498, "bluesky": 261}},
+  "timeseries": [{"date": "2026-11-14", "clicks": 64}], "previous_timeseries": null,
+  "placements": [{"placement": "Mission St board", "clicks": 14}, {"placement": "(none)", "is_none": true, "clicks": 3}],
+  "removed_links_clicks": 7}
+```
+
+- **Window.** When the campaign has both dates and the caller sent no `range`,
+  `from` or `to`, the window is `starts_on` to `ends_on` (inclusive civil days
+  in `tz`, end clamped to today). `ends_on` is an inclusive last day and today
+  so far is included. `GET /api/campaigns/{slug}/stats` (`campaignWindow` in
+  package `clicks`) currently excludes the last day and today, so its totals can
+  be lower than this report's; the gap is tracked in #0119. Otherwise (explicit range, or a campaign missing a
+  date) the standard window applies. Over the campaign's own dates there is no
+  previous window unless `compare=previous` is sent explicitly (the days before
+  a campaign began are rarely a useful baseline); then it is the same-length
+  window before it. `totals.previous_clicks` and `previous_timeseries` are null
+  without a previous window; `previous_timeseries[i]` lines up with
+  `timeseries[i]`.
+- **Scope.** Clicks are the ones recorded under the campaign
+  (`clicks.campaign_id`), so history survives a link moving. The common
+  `campaign` filter is ignored; the UTM, placement and bot filters apply.
+- **Matrix.** Rows are content groups (`ContentKey`, as `top-content`) by total
+  clicks; cells are the group's clicks per column value (`~none` for an empty
+  value). A cell has `key` when exactly one link had clicks there and `keys`
+  (most clicks first) when several did. A pairing with no clicks is **absent**
+  from `cells`, never zero. More than six columns keep the top five (by
+  clicks) and add `other`, summing the rest per row. `column_totals` covers all
+  rows, even those `limit` cut (`total_rows` is the uncut count). Each row's
+  `total` sums its cells and all rows sum to `totals.clicks`. Matrix column
+  names are normalized (lower-cased and trimmed for `columns=placement`),
+  whereas `placements` shows the most common spelling. `filters.campaign` in the
+  envelope is the `slug`.
+- `removed_links_clicks` counts clicks attributed to the campaign whose link is
+  no longer in it; they are included in `totals`, the matrix and the series.
+  `links` is current membership; `links_clicked` the member links clicked.
+  `placements` are normalized as in the campaign stats (case and space folded,
+  most common spelling shown).
+
+### `link-performance`
+
+One link. Extra parameter: `key` (required; `missing_key` 400, `404
+link_not_found` when unknown or not the caller's). `limit` caps each breakdown
+(default 10).
+
+```json
+"data": {"link": {"key": "HaQRwV", "short_url": "…", "title": "…", "label": "Mastodon guide post 84", "content_key": "…",
+    "destination_url": "…", "campaign_slug": "guides-2026-11", "active": true},
+  "totals": {"clicks": 90, "previous_clicks": 74, "all_time": 141, "last_clicked_at": "2026-11-18T18:42:00Z"},
+  "timeseries": [{"date": "2026-11-14", "clicks": 6}], "previous_timeseries": [],
+  "by_source": [], "by_medium": [], "by_content": [], "by_referer": [],
+  "siblings": [{"key": "riCY47", "label": "Bluesky guide post 83", "campaign_slug": "guides-2026-12", "active": true, "clicks": 52}]}
+```
+
+- `link.label` is the tail `LinkLabel` cuts off the title (the key when there
+  is none). `all_time` and `last_clicked_at` ignore the window and the UTM
+  filters (bots still follow `include_bots`); `last_clicked_at` is null for a
+  link never clicked.
+- `by_*` rows are `breakdown` rows (`value`, `clicks`, `share`,
+  `previous_clicks`) for this link, empty values as `~none`, referrers as host
+  or `(direct)`. As in `breakdown`, referrer detail is cleared after 90 days:
+  `by_referer[].previous_clicks` is null when the previous window reaches past
+  that, and a highlight says so.
+- `siblings` are the caller's *other* links with the same `ContentKey`, in any
+  campaign, with their clicks in the window (zero included), most first. Their
+  click counts follow the caller's filters, including `campaign=`, and the list
+  is capped like `loadLinks`, with `truncated` set when the cap is hit.
+- The existing `GET /api/links/{key}` and `GET /api/campaigns/{slug}/stats`
+  are unchanged; these reports are additive.
+
 ### Adding a report
 
 Register a `reports.Report` in `NewDefaultRegistry`:
@@ -814,7 +899,9 @@ Register a `reports.Report` in `NewDefaultRegistry`:
   envelope. Extra parameters are read with `req.IntParam(name, def, min, max)`
   (`invalid_<name>`), `req.EnumParam(name, def, allowed...)` (`invalid_<name>`)
   and `req.RequiredString(name)` (`missing_<name>`); each returns a
-  `*ParamError`, which the handler turns into a 400.
+  `*ParamError`, which the handler turns into a 400. A report about a thing the
+  caller may not have returns `&NotFoundError{Code, Message}`, which the handler
+  turns into `404 {"error": Code}`; it may be returned from `Run` or `Windows`.
 - `Windows` (optional) overrides the standard windows, which `Service.Run`
   passes in as `req.Windows`. Return the windows the report should use and the
   envelope reports them. `req.Params.RangeExplicit` is true when the caller

@@ -110,7 +110,12 @@ func (s *seriesCounts) points(names []string, dates []string) []DayCount {
 // dayRows queries clicks per (group, day) for w. group and label are SQL
 // expressions ("'all'" and "”" for no split).
 func dayRows(ctx context.Context, req *Request, w Window, joins, group, label string, fn func(group, label, day string, n int64)) error {
-	sc := req.Params.ScopedQuery(req.UserID, w, ScopeOpts{Joins: joins})
+	return dayRowsWhere(ctx, req, w, ScopeOpts{Joins: joins}, group, label, fn)
+}
+
+// dayRowsWhere is dayRows with full scope options, e.g. an extra Where.
+func dayRowsWhere(ctx context.Context, req *Request, w Window, opts ScopeOpts, group, label string, fn func(group, label, day string, n int64)) error {
+	sc := req.Params.ScopedQuery(req.UserID, w, opts)
 	rows, err := req.Q.Query(ctx, `SELECT `+group+`, `+label+`, `+DayExpr+` AS d, count(*)`+sc.SQL+` GROUP BY 1, 2, 3`, sc.Args...)
 	if err != nil {
 		return fmt.Errorf("reports: timeseries: %w", err)
@@ -222,6 +227,12 @@ func runTimeseries(ctx context.Context, req *Request) (Output, error) {
 // weekly buckets this means a partial first or last current week lines up with
 // an equally partial previous bucket rather than a calendar week.
 func previousSeries(ctx context.Context, req *Request, gran string) ([]DayCount, error) {
+	return previousSeriesWhere(ctx, req, gran, "")
+}
+
+// previousSeriesWhere is previousSeries narrowed by an extra constant
+// condition (see ScopeOpts.Where).
+func previousSeriesWhere(ctx context.Context, req *Request, gran, where string) ([]DayCount, error) {
 	cur, prev := req.Windows.Current, *req.Windows.Previous
 	curDays, prevDays := cur.DayList(), prev.DayList()
 	idx := make([]int, len(curDays)) // day offset -> bucket index
@@ -239,7 +250,7 @@ func previousSeries(ctx context.Context, req *Request, gran string) ([]DayCount,
 	for i, d := range prevDays {
 		offset[d] = i
 	}
-	err := dayRows(ctx, req, prev, "", "'all'", "''", func(_, _, day string, n int64) {
+	err := dayRowsWhere(ctx, req, prev, ScopeOpts{Where: where}, "'all'", "''", func(_, _, day string, n int64) {
 		if i, ok := offset[day]; ok {
 			out[idx[i]].Clicks += n
 		}

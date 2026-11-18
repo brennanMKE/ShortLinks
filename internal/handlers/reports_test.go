@@ -150,6 +150,10 @@ func TestReports_CatalogueAndErrors(t *testing.T) {
 		{"/api/reports/overview?from=2999-01-01", 400, "invalid_date"},
 		{"/api/reports/overview?limit=0", 400, "invalid_limit"},
 		{"/api/reports/overview?include_bots=maybe", 400, "invalid_include_bots"},
+		{"/api/reports/campaign-performance?slug=nope", 404, "campaign_not_found"},
+		{"/api/reports/campaign-performance", 400, "missing_slug"},
+		{"/api/reports/link-performance?key=nope", 404, "link_not_found"},
+		{"/api/reports/link-performance", 400, "missing_key"},
 	}
 	for _, tc := range errs {
 		t.Run(tc.path, func(t *testing.T) {

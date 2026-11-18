@@ -16,6 +16,16 @@ import (
 // ErrReportNotFound is returned by Service.Run for an unregistered report name.
 var ErrReportNotFound = errors.New("reports: report not found")
 
+// NotFoundError is returned by a report whose subject (a campaign slug, a link
+// key) does not exist or is not the caller's. Code is the stable machine code
+// the API returns in {"error": code} with status 404.
+type NotFoundError struct {
+	Code    string
+	Message string
+}
+
+func (e *NotFoundError) Error() string { return e.Code + ": " + e.Message }
+
 // ParamSpec describes one query parameter, for the catalogue.
 type ParamSpec struct {
 	Name        string   `json:"name"`
@@ -128,7 +138,11 @@ type Report struct {
 	// a range) and returns the windows the report runs with and the envelope
 	// reports. Use it for report-specific defaults, e.g. a campaign's dates.
 	Windows func(ctx context.Context, req *Request) (ResolvedWindows, error)
-	Run     RunFunc
+	// CampaignParam, when set, names the extra parameter holding the campaign
+	// the report forces; the envelope's filters.campaign then reports it
+	// instead of the (ignored) common campaign filter.
+	CampaignParam string
+	Run           RunFunc
 }
 
 // ReportInfo is a report's catalogue entry.
@@ -200,6 +214,8 @@ func NewDefaultRegistry() *Registry {
 	r.Register(moversReport)
 	r.Register(idleLinksReport)
 	r.Register(campaignComparisonReport)
+	r.Register(campaignPerformanceReport)
+	r.Register(linkPerformanceReport)
 	return r
 }
 
@@ -322,6 +338,9 @@ func (s *Service) Run(ctx context.Context, userID int64, name string, raw url.Va
 	}
 	if env.Highlights == nil {
 		env.Highlights = []string{}
+	}
+	if rep.CampaignParam != "" {
+		env.Filters.Campaign = strings.TrimSpace(raw.Get(rep.CampaignParam))
 	}
 	if wins.Previous != nil {
 		env.PreviousWindow = &PrevWindowJSON{From: wins.Previous.From, To: wins.Previous.To}
