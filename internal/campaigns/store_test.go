@@ -1270,3 +1270,70 @@ func TestDeleteCampaign_AuditRecordsZeroWhenNoLinks(t *testing.T) {
 		t.Errorf("unassigned_links_count = %v (present=%v), want 0", count, ok)
 	}
 }
+
+// TestCampaignDailyClicks_GroupsByCampaignAndLocalDay covers #0146's store
+// query: bots, other users, and clicks outside [start, end) are excluded, days
+// are bucketed in the requested zone, and the query is scoped to the owner of both the link and the campaign.
+func TestCampaignDailyClicks_GroupsByCampaignAndLocalDay(t *testing.T) {
+	pool := testPool(t)
+	store := NewStore(pool)
+	auditor := audit.New(pool)
+	alice := seedUser(t, pool, "alice@example.com")
+	bob := seedUser(t, pool, "bob@example.com")
+	ctx := context.Background()
+
+	c1, err := store.CreateCampaign(ctx, NewCampaign{UserID: alice, Name: "One"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := store.CreateCampaign(ctx, NewCampaign{UserID: alice, Name: "Two"}, auditor, createEntry(alice, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb, err := store.CreateCampaign(ctx, NewCampaign{UserID: bob, Name: "Bob"}, auditor, createEntry(bob, audit.ActionCampaignCreated))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l1 := seedLink(t, pool, alice, "dly0001", "https://example.com/1", &c1.ID)
+	lb := seedLink(t, pool, bob, "dly0002", "https://example.com/2", &cb.ID)
+	at := func(ts string, link, camp int64, bot bool) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `INSERT INTO clicks (link_id, campaign_id, is_bot, clicked_at) VALUES ($1,$2,$3,$4::timestamptz)`, link, camp, bot, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at("2026-11-10 03:00:00+00", l1, c1.ID, false) // Nov 9 in Los Angeles, Nov 10 in UTC
+	at("2026-11-10 09:00:00+00", l1, c1.ID, false)
+	at("2026-11-10 09:00:00+00", l1, c1.ID, true)  // bot
+	at("2026-11-10 09:00:00+00", lb, cb.ID, false) // another user
+	at("2026-12-01 09:00:00+00", l1, c1.ID, false) // after the range
+	// Cross-owner mismatches: Alice's link carrying Bob's campaign_id, and
+	// Bob's link carrying Alice's. Neither may count for anyone.
+	at("2026-11-10 09:00:00+00", l1, cb.ID, false)
+	at("2026-11-10 09:00:00+00", lb, c1.ID, false)
+
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	utc, err := store.CampaignDailyClicks(ctx, alice, start, end, "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(utc) != 1 || utc[c1.ID]["2026-11-10"] != 2 || len(utc[c1.ID]) != 1 {
+		t.Errorf("UTC buckets = %v, want only campaign 1 with 2026-11-10:2", utc)
+	}
+	if bobUTC, err := store.CampaignDailyClicks(ctx, bob, start, end, "UTC"); err != nil {
+		t.Fatal(err)
+	} else if len(bobUTC) != 1 || bobUTC[cb.ID]["2026-11-10"] != 1 {
+		t.Errorf("bob UTC buckets = %v, want only his campaign with 2026-11-10:1", bobUTC)
+	}
+	if _, ok := utc[c2.ID]; ok {
+		t.Errorf("campaign with no clicks should be absent: %v", utc)
+	}
+	la, err := store.CampaignDailyClicks(ctx, alice, start, end, "America/Los_Angeles")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if la[c1.ID]["2026-11-09"] != 1 || la[c1.ID]["2026-11-10"] != 1 {
+		t.Errorf("LA buckets = %v, want one click on each of Nov 9 and Nov 10", la)
+	}
+}

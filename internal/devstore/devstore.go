@@ -582,6 +582,12 @@ func (s *Store) ListCampaignsForUser(_ context.Context, userID int64) ([]campaig
 	return out, nil
 }
 
+// CampaignDailyClicks is the dev-mode twin of campaigns.Store.CampaignDailyClicks
+// (#0146). Dev mode never persists a click, so there is nothing to report.
+func (s *Store) CampaignDailyClicks(_ context.Context, _ int64, _, _ time.Time, _ string) (map[int64]map[string]int64, error) {
+	return map[int64]map[string]int64{}, nil
+}
+
 // campaignWithCountsLocked pairs a cloned copy of c with its link_count/
 // total_clicks (#0102). Callers must already hold s.mu. LinkCount is real
 // (counted from the in-memory links this campaign's own AssignLinkToCampaign/
@@ -1608,6 +1614,7 @@ var _ interface {
 	UpdateCampaign(ctx context.Context, userID int64, slug string, upd campaigns.CampaignUpdate, auditor *audit.Logger, entry audit.Entry) (campaigns.Campaign, error)
 	DeleteCampaign(ctx context.Context, userID int64, slug string, auditor *audit.Logger, entry audit.Entry) error
 	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.CampaignWithCounts, error)
+	CampaignDailyClicks(ctx context.Context, userID int64, start, end time.Time, tz string) (map[int64]map[string]int64, error)
 	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
 	GetCampaignBySlugWithCounts(ctx context.Context, userID int64, slug string) (campaigns.CampaignWithCounts, error)
 	AssignLinkToCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error

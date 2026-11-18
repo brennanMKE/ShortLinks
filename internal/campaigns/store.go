@@ -314,6 +314,49 @@ func (s *Store) ListCampaignsForUser(ctx context.Context, userID int64) ([]Campa
 	return out, nil
 }
 
+// CampaignDailyClicks returns the caller's bot-excluded clicks per campaign
+// per civil day, for the half-open instant range [start, end), with days
+// bucketed AT TIME ZONE tz ("YYYY-MM-DD" keys). Clicks are attributed by
+// clicks.campaign_id, as total_clicks is. It is ONE grouped query over all of
+// the user's campaigns (#0146), so GET /api/campaigns costs the same number of
+// queries however many campaigns there are. Days with no clicks are absent;
+// the caller zero-fills.
+func (s *Store) CampaignDailyClicks(ctx context.Context, userID int64, start, end time.Time, tz string) (map[int64]map[string]int64, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT k.campaign_id,
+		        to_char(date_trunc('day', k.clicked_at AT TIME ZONE $4), 'YYYY-MM-DD') AS day,
+		        COUNT(*)
+		   FROM clicks k
+		   JOIN campaigns c ON c.id = k.campaign_id
+		   JOIN links l ON l.id = k.link_id AND l.user_id = $1
+		  WHERE c.user_id = $1
+		    AND k.is_bot = FALSE
+		    AND k.clicked_at >= $2 AND k.clicked_at < $3
+		  GROUP BY k.campaign_id, day`,
+		userID, start, end, tz,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("campaigns: daily clicks: %w", err)
+	}
+	defer rows.Close()
+	out := map[int64]map[string]int64{}
+	for rows.Next() {
+		var id, n int64
+		var day string
+		if err := rows.Scan(&id, &day, &n); err != nil {
+			return nil, fmt.Errorf("campaigns: scanning daily clicks: %w", err)
+		}
+		if out[id] == nil {
+			out[id] = map[string]int64{}
+		}
+		out[id][day] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("campaigns: iterating daily clicks: %w", err)
+	}
+	return out, nil
+}
+
 // GetCampaignBySlugWithCounts returns a single campaign by slug, scoped to
 // userID, paired with its link_count/total_clicks (#0102) — the detail-page
 // analog of ListCampaignsForUser's per-row counts. Kept as a separate method

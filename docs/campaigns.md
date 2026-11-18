@@ -123,7 +123,7 @@ user-visible.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/campaigns` | List for the user, with `link_count`/`total_clicks` |
+| `GET` | `/api/campaigns` | List for the user, with `link_count`/`total_clicks` and the activity fields ([below](#list-activity-0146)) |
 | `POST` | `/api/campaigns` | Create |
 | `GET` | `/api/campaigns/{slug}` | Metadata + links + stats (`CampaignSummary`) |
 | `PATCH` | `/api/campaigns/{slug}` | Update name, description, dates, archived, defaults |
@@ -135,6 +135,36 @@ user-visible.
 | `POST` | `/api/campaigns/{slug}/links/batch` | Batch-create new links ([below](#batch-create-0105)) |
 | `GET` | `/api/campaigns/{slug}/qr.zip` | Bulk QR download ([below](#qr-codes-0106)) |
 | `GET` | `/api/campaigns/{slug}/export.csv` | CSV export ([below](#csv-export-0107)) |
+
+### List activity (#0146)
+
+Each item of `GET /api/campaigns` also carries:
+
+| Field | Meaning |
+|---|---|
+| `clicks_30d` | Bot-excluded clicks in the last 30 civil days, today included |
+| `sparkline` | Exactly 30 integers of daily clicks, oldest first, today last. Days with no clicks are `0` |
+| `status` | `live`, `scheduled`, `ended` or `archived`, from `reports.CampaignStatus` (the function `campaign-comparison` uses) with today in `tz` |
+
+The window is fixed at 30 days (the reports' `range=30d` window, #0139); `range`, `from` and `to` are ignored here. Days are civil days in `tz`,
+clicks attributed by `clicks.campaign_id`. `total_clicks` is unchanged and still
+all-time.
+
+Query parameters, both optional:
+
+- `tz`: an IANA zone for the day buckets and for today in `status`. Defaults to
+  `DEFAULT_TIMEZONE`. An invalid zone is a 400 `invalid_tz`.
+- `sort`: `created` (default, newest first), `activity` (`clicks_30d`
+  descending, then newest first) or `name` (case-insensitive, ascending).
+  Ties always fall back to newest first, so every order is deterministic. Any
+  other value is a 400 `invalid_sort`.
+
+The list costs two SQL queries however many campaigns there are: the campaign
+rows with their counts, and one grouped query over `clicks` by
+`(campaign_id, day)` for all of the caller's campaigns
+(`Store.CampaignDailyClicks`). `TestCampaignsList_QueryCountDoesNotGrow` asserts
+this with a pgx tracer. Dev mode has no click data, so its sparklines are all
+zero.
 
 Audit actions, all written **in-band** — see
 ["Audit convention"](#audit-convention) below: `campaign.created`,

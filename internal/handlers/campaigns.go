@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,6 +21,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 	"github.com/brennanMKE/ShortLinks/internal/qr"
+	"github.com/brennanMKE/ShortLinks/internal/reports"
 )
 
 // campaignStore is the behavior the campaigns handler needs from the data
@@ -44,6 +47,9 @@ type campaignStore interface {
 	// metadata and would otherwise pay for the two extra correlated
 	// subqueries on every mutation.
 	ListCampaignsForUser(ctx context.Context, userID int64) ([]campaigns.CampaignWithCounts, error)
+	// CampaignDailyClicks (#0146) is the one grouped query behind clicks_30d
+	// and sparkline for every campaign in the list.
+	CampaignDailyClicks(ctx context.Context, userID int64, start, end time.Time, tz string) (map[int64]map[string]int64, error)
 	GetCampaignBySlug(ctx context.Context, userID int64, slug string) (campaigns.Campaign, error)
 	GetCampaignBySlugWithCounts(ctx context.Context, userID int64, slug string) (campaigns.CampaignWithCounts, error)
 	AssignLinkToCampaign(ctx context.Context, userID, campaignID, linkID int64, auditor *audit.Logger, entry audit.Entry) error
@@ -159,6 +165,18 @@ type CampaignsHandler struct {
 	// bulk QR archive and the CSV export so a campaign's printed codes and
 	// exported short URLs resolve to the same origin the SPA displays.
 	baseURL string
+	// defaultTZ is DEFAULT_TIMEZONE, used for the list's window and status
+	// when the request has no tz (#0146). Empty means UTC.
+	defaultTZ string
+	// now is the clock; nil means time.Now. Tests set it.
+	now func() time.Time
+}
+
+// WithDefaultTimezone sets the IANA zone used by GET /api/campaigns when the
+// request has no tz.
+func (h *CampaignsHandler) WithDefaultTimezone(tz string) *CampaignsHandler {
+	h.defaultTZ = tz
+	return h
 }
 
 // NewCampaignsHandler constructs a CampaignsHandler over the data layer, the
@@ -219,6 +237,13 @@ type campaignListItemView struct {
 	campaignView
 	LinkCount   int64 `json:"link_count"`
 	TotalClicks int64 `json:"total_clicks"`
+	// Clicks30d, Sparkline and Status (#0146): bot-excluded clicks in the last
+	// 30 civil days in tz (today included), the same window as a daily
+	// array of exactly 30 integers (oldest first, today last), and the status
+	// derived by reports.CampaignStatus with today in tz.
+	Clicks30d int64   `json:"clicks_30d"`
+	Sparkline []int64 `json:"sparkline"`
+	Status    string  `json:"status"`
 }
 
 // toCampaignListItemView maps a domain CampaignWithCounts to its JSON shape.
@@ -236,12 +261,17 @@ type listCampaignsResponse struct {
 	Campaigns []campaignListItemView `json:"campaigns"`
 }
 
-// List handles GET /api/campaigns. It returns the caller's campaigns, most
-// recently created first, scoped to the caller in the store, each carrying
-// its real link_count/total_clicks (#0102). A campaign with no links, or
-// whose every click is bot-flagged, still appears with 0/0 — the store's
-// correlated-subquery counts have no JOIN/GROUP BY to collapse a row out of
-// (see campaigns.Store's campaignCountColumns doc comment).
+// List handles GET /api/campaigns. It returns the caller's campaigns, scoped
+// to the caller in the store, each carrying its real link_count/total_clicks
+// (#0102). A campaign with no links, or whose every click is bot-flagged,
+// still appears with 0/0 — the store's correlated-subquery counts have no
+// JOIN/GROUP BY to collapse a row out of (see campaigns.Store's
+// campaignCountColumns doc comment).
+//
+// #0146 adds clicks_30d, sparkline and status to every item, an optional tz
+// (default DEFAULT_TIMEZONE) and sort=activity|created|name (default created,
+// most recent first). The window is the reports' range=30d window. The whole
+// list costs two queries however many campaigns there are.
 func (h *CampaignsHandler) List(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -249,15 +279,74 @@ func (h *CampaignsHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	q := r.URL.Query()
+	sortBy := strings.TrimSpace(q.Get("sort"))
+	switch sortBy {
+	case "", "created", "activity", "name":
+	default:
+		writeListParamError(w, "sort", "invalid_sort", "sort must be one of activity, created, name")
+		return
+	}
+	pv := url.Values{}
+	if v, ok := q["tz"]; ok {
+		pv["tz"] = v
+	}
+	pv.Set("range", reports.Range30d)
+	pv.Set("compare", reports.CompareNone)
+	params, err := reports.ParseParams(pv, h.defaultTZ)
+	if err != nil {
+		var pe *reports.ParamError
+		if errors.As(err, &pe) {
+			writeListParamError(w, pe.Field, pe.Code, pe.Message)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	now := time.Now()
+	if h.now != nil {
+		now = h.now()
+	}
+	win := reports.ResolveWindows(params, now, nil).Current
+
 	rows, err := h.store.ListCampaignsForUser(r.Context(), u.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	daily, err := h.store.CampaignDailyClicks(r.Context(), u.ID, win.Start, win.End, win.TZName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
 
+	days := win.DayList()
 	views := make([]campaignListItemView, 0, len(rows))
 	for _, c := range rows {
-		views = append(views, toCampaignListItemView(c))
+		v := toCampaignListItemView(c)
+		v.Sparkline = make([]int64, len(days))
+		for i, d := range days {
+			n := daily[c.ID][d]
+			v.Sparkline[i] = n
+			v.Clicks30d += n
+		}
+		v.Status = reports.CampaignStatus(c.StartsAt, c.EndsAt, c.Archived, now, params.TZ)
+		views = append(views, v)
+	}
+
+	// The store returns created order (created_at DESC, id DESC). The other
+	// sorts break ties by that same order, so every order is deterministic.
+	switch sortBy {
+	case "activity":
+		sort.SliceStable(views, func(i, j int) bool { return views[i].Clicks30d > views[j].Clicks30d })
+	case "name":
+		sort.SliceStable(views, func(i, j int) bool {
+			a, b := strings.ToLower(views[i].Name), strings.ToLower(views[j].Name)
+			if a != b {
+				return a < b
+			}
+			return views[i].Name < views[j].Name
+		})
 	}
 	writeJSON(w, http.StatusOK, listCampaignsResponse{Campaigns: views})
 }

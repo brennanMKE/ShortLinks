@@ -195,7 +195,7 @@ func servePostgres(cfg *config.Config) error {
 	// for linksH's #0024 filter check) is wired again here so
 	// BatchCreateLinks (#0105) runs the SAME filter check single-create does,
 	// before inserting anything.
-	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger, statsStore, ruleCache, cfg.BaseURL)
+	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger, statsStore, ruleCache, cfg.BaseURL).WithDefaultTimezone(cfg.DefaultTimezone)
 
 	// Analytics reports (#0139): GET /api/reports and /api/reports/{name},
 	// scoped to the caller's links, days bucketed in DEFAULT_TIMEZONE unless a
@@ -311,7 +311,7 @@ func serveDevMode(cfg *config.Config) error {
 	// responses to build against. ds also satisfies ruleProvider (already
 	// wired into linksH above), reused here so BatchCreateLinks runs the same
 	// (empty, in dev) filter check.
-	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil, ds, ds, cfg.BaseURL)
+	campaignsH := handlers.NewCampaignsHandler(ds, ds, nil, ds, ds, cfg.BaseURL).WithDefaultTimezone(cfg.DefaultTimezone)
 
 	apiTokensH := handlers.NewAPITokensHandler(ds, nil)
 	requireAPI := middleware.RequireSessionOrAPIToken(ds, ds, middleware.DefaultAPITokenLimits())
