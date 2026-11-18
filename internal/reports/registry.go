@@ -197,6 +197,9 @@ func NewDefaultRegistry() *Registry {
 	r.Register(topLinksReport)
 	r.Register(breakdownReport)
 	r.Register(timeseriesReport)
+	r.Register(moversReport)
+	r.Register(idleLinksReport)
+	r.Register(campaignComparisonReport)
 	return r
 }
 

@@ -705,6 +705,101 @@ Extra parameters `granularity` (`day` default, or `week`), `split_by` (any
   highlight says so); a current window that starts before it gets a highlight
   that older clicks show as `(direct)`.
 
+### `movers`
+
+Extra parameters `unit` (`content` default, or `link`) and `min_clicks`
+(default 5, 0 or more); `limit` is per list (default 5).
+
+```json
+"data": {"unit": "content", "min_clicks": 5, "compared": true,
+  "rising": [{"title": "Deep sleep guide", "content_key": "…", "clicks": 212, "previous_clicks": 150, "change": 62, "change_pct": 41.3}],
+  "falling": [], "new": [], "gone_quiet": []}
+```
+
+- `rising`: clicks up on a previous period that had some; `falling`: down but
+  still above zero; `new`: no previous clicks, now at least `min_clicks`;
+  `gone_quiet`: at least `min_clicks` before, zero now. `min_clicks` applies to
+  the larger of the two periods (for new and gone quiet, the only non-zero one).
+- Rising and falling are ranked by absolute change, then by percentage; new by
+  current clicks; gone quiet by previous clicks. `change_pct` is null for `new`
+  (no previous clicks to divide by) and -100 for `gone_quiet`.
+- `unit=content` groups by `ContentKey` using the same loading as
+  `top-content`, so a group's clicks, previous clicks and title are identical to
+  that report's. `unit=link` rows also carry `key` and `short_url`.
+- Needs a previous window: with `compare=none` or `range=all`, `compared` is
+  false and every list is empty.
+- `highlights` names the top riser ("\"Deep sleep guide\" is up 41% (150 to 212
+  clicks)."), the top faller, and the top new and gone-quiet item.
+
+### `idle-links`
+
+Extra parameter `min_age_days` (default 7, 0-3650); `limit` defaults to 50.
+
+```json
+"data": {"min_age_days": 7, "total_idle": 9, "links": [{"key": "…", "short_url": "…", "title": "…", "label": "…",
+  "destination": "…", "content_key": "…", "campaign_slug": null, "utm_source": "", "utm_medium": "", "placement": "",
+  "created_at": "…", "age_days": 41, "last_clicked_at": null}]}
+```
+
+- Considers links that are active (`active` and not denied), not expired
+  (`expires_at` null or in the future) and created at least `min_age_days` **calendar days** ago in `tz`
+  (created on or before today minus `min_age_days`; `0` includes today's links),
+  that have **no counted click in the window**. Counted means bots excluded
+  unless `include_bots=true`.
+- `last_clicked_at` is the newest counted click **all-time**, not just in the
+  window; null when the link has never been clicked.
+- Sorted oldest first. `total_idle` counts every match; `limit` only trims the
+  list.
+- **Filters restrict which links are considered, using the link's own fields**:
+  `campaign` is the link's current campaign (`none` for unassigned), and
+  `source`, `medium`, `utm_campaign`, `content`, `term` and `placement` match
+  the link's stored UTM and placement values (OR within a dimension, AND across,
+  `~none` for empty). They are not applied to individual clicks: a link idle in
+  the window is idle whatever its clicks' UTM values were.
+- `highlights`: "9 links have had no clicks in 30 days (from to to)." and the
+  oldest idle link.
+
+### `campaign-comparison`
+
+No extra parameters; `limit` is optional (unlimited by default).
+
+```json
+"data": {"total_campaigns": 3, "campaigns": [{"slug": "…", "name": "…", "status": "live",
+  "starts_on": "2026-10-01", "ends_on": null, "links": 3, "links_clicked": 3, "clicks": 13,
+  "previous_clicks": 5, "change_pct": 160, "clicks_per_active_day": 0.4,
+  "top_content": {"title": "…", "clicks": 9}, "top_source": {"value": "bluesky", "clicks": 7}}]}
+```
+
+- Lists every campaign that has at least one counted click in the window, or
+  whose date range overlaps it. A campaign with no dates overlaps nothing, so
+  it appears only through clicks. Sorted by clicks, then slug.
+- Clicks use the campaign recorded on each click (not the link's current one).
+  `links` is the number of links currently in the campaign; `links_clicked` the
+  distinct links clicked in the window. `top_content` groups by `ContentKey`
+  within the campaign; `top_source` is its biggest non-empty `utm_source`.
+- `clicks_per_active_day` is clicks divided by the days of the window the
+  campaign's date range covers (a campaign with no dates covers the whole
+  window); null when it covers none.
+- `campaign` limits the report to one campaign (`none` yields nothing); the UTM,
+  placement and bot filters apply to the counted clicks.
+- `status` comes from `reports.CampaignStatus` (below). `highlights` names the
+  top campaign and its best content.
+
+#### Campaign status
+
+`CampaignStatus(startsAt, endsAt *time.Time, archived bool, now time.Time, loc *time.Location) string`
+is pure and exported for reuse (e.g. the campaigns list). `starts_at` and
+`ends_at` are date-only values stored as UTC midnight, so their date is read
+in UTC; "today" is `now` in `loc` (the request's `tz`), and both bounds are
+inclusive.
+
+| Status | Rule |
+|---|---|
+| `archived` | The archived flag is set; it wins over the dates. |
+| `scheduled` | `starts_at` is set and is after today. |
+| `ended` | `ends_at` is set and is before today. |
+| `live` | Everything else, **including a campaign with no dates**. |
+
 ### Adding a report
 
 Register a `reports.Report` in `NewDefaultRegistry`:
