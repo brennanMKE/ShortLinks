@@ -179,7 +179,7 @@ func servePostgres(cfg *config.Config) error {
 	// the stats store so GET /api/links/{key} returns the #0030 utm_stats, and
 	// the campaign store so POST /api/links can resolve an optional
 	// campaign_id/campaign_slug (#0099).
-	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore, campaignStore, cfg.BaseURL)
+	linksH := handlers.NewLinksHandler(linkStore, redirectCache, ruleCache, auditLogger, broker, statsStore, campaignStore, cfg.BaseURL).WithDefaultTimezone(cfg.DefaultTimezone)
 
 	// Campaign CRUD + link-membership + batch-create API (#0098, #0099,
 	// #0105). Link membership (assign/unassign/list) and batch-create both
@@ -282,7 +282,7 @@ func serveDevMode(cfg *config.Config) error {
 	// NoCacheEvictor), ruleProvider (ds.Rules), statsProvider, and (#0099)
 	// campaignLookup (GetCampaignByID/GetCampaignBySlug) — all on the same
 	// *devstore.Store.
-	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds, ds, cfg.BaseURL)
+	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds, ds, cfg.BaseURL).WithDefaultTimezone(cfg.DefaultTimezone)
 
 	meH := handlers.NewMeHandler(cfg.BaseURL)
 	homeH := handlers.NewHomeHandler(ds)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 	"github.com/brennanMKE/ShortLinks/internal/qr"
+	"github.com/brennanMKE/ShortLinks/internal/reports"
 )
 
 // timeseriesDays is the default look-back window supplied to ClicksOverTime
@@ -52,6 +54,10 @@ type linkStore interface {
 	// UNIQUE(key) constraint.
 	CreateDeniedLink(ctx context.Context, in links.NewLink, reasonCode int16, genKey func(exists func(key string) (bool, error)) (string, error)) (links.Link, error)
 	ListLinks(ctx context.Context, userID int64, limit, offset int) ([]links.Link, error)
+	// ListLinksFiltered backs GET /api/links when any #0144 search, filter,
+	// sort or window parameter is present; it returns the page and the total
+	// matching the filters.
+	ListLinksFiltered(ctx context.Context, userID int64, opts links.ListOptions) ([]links.Link, int64, error)
 	CountLinks(ctx context.Context, userID int64) (int64, error)
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
 	UpdateLink(ctx context.Context, userID int64, key string, upd links.LinkUpdate) (links.Link, error)
@@ -131,6 +137,8 @@ type eventPublisher interface {
 // links.
 type LinksHandler struct {
 	store linkStore
+	// defaultTZ is DEFAULT_TIMEZONE, the zone for the list window (#0144).
+	defaultTZ string
 	// cache is the redirect cache to evict from on update/deactivate; may be nil
 	// (no cache wired) in which case eviction is skipped.
 	cache cacheEvictor
@@ -563,10 +571,60 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, view)
 }
 
+// listParamNames are the #0144 query parameters. When none is present List
+// serves the original response unchanged.
+var listParamNames = []string{"q", "campaign", "source", "medium", "status", "content_key", "sort", "window"}
+
+// listLinkItem is a list item in the #0144 enriched response: the usual link
+// fields plus content_key, label, campaign_slug (null when unassigned) and,
+// when a window was requested, clicks_window.
+type listLinkItem struct {
+	linkView
+	ContentKey   string  `json:"content_key"`
+	Label        string  `json:"label"`
+	CampaignSlug *string `json:"campaign_slug"`
+	ClicksWindow *int64  `json:"clicks_window,omitempty"`
+}
+
+// listWindowInfo describes the clicks_window span: civil days in tz, today
+// included, the same day model as the reports.
+type listWindowInfo struct {
+	Window string `json:"window"`
+	From   string `json:"from"`
+	To     string `json:"to"`
+	TZ     string `json:"tz"`
+}
+
+// enrichedListResponse is the GET /api/links body when any #0144 parameter is
+// present.
+type enrichedListResponse struct {
+	Links   []listLinkItem  `json:"links"`
+	Page    int             `json:"page"`
+	PerPage int             `json:"per_page"`
+	Total   int64           `json:"total"`
+	Window  *listWindowInfo `json:"window,omitempty"`
+}
+
+// WithDefaultTimezone sets the IANA zone (DEFAULT_TIMEZONE) used for the
+// window parameter when the request has no tz. Unset means UTC.
+func (h *LinksHandler) WithDefaultTimezone(tz string) *LinksHandler {
+	h.defaultTZ = tz
+	return h
+}
+
+func writeListParamError(w http.ResponseWriter, field, code, msg string) {
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": code, "field": field, "message": msg})
+}
+
 // List handles GET /api/links. It returns the caller's links most-recent-first,
 // paginated via ?page= (1-based, default 1) and ?per_page= (default 20, capped
 // at maxPerPage). Each item includes its click_count. Scoped to the caller in
 // the store.
+//
+// #0144: q, campaign, source, medium, status, content_key, sort and window
+// search, filter and order the list and switch the response to the enriched
+// shape (content_key, label, campaign_slug, clicks_window). With none of them
+// the response is exactly the original one.
 func (h *LinksHandler) List(w http.ResponseWriter, r *http.Request) {
 	u, ok := middleware.UserFromContext(r.Context())
 	if !ok {
@@ -576,6 +634,19 @@ func (h *LinksHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	page, perPage := parsePagination(r)
 	offset := (page - 1) * perPage
+
+	query := r.URL.Query()
+	enriched := false
+	for _, n := range listParamNames {
+		if query.Has(n) {
+			enriched = true
+			break
+		}
+	}
+	if enriched {
+		h.listEnriched(w, r, u.ID, page, perPage, offset)
+		return
+	}
 
 	rows, err := h.store.ListLinks(r.Context(), u.ID, perPage, offset)
 	if err != nil {
@@ -598,6 +669,107 @@ func (h *LinksHandler) List(w http.ResponseWriter, r *http.Request) {
 		PerPage: perPage,
 		Total:   total,
 	})
+}
+
+// listEnriched serves GET /api/links when a #0144 parameter is present.
+func (h *LinksHandler) listEnriched(w http.ResponseWriter, r *http.Request, userID int64, page, perPage, offset int) {
+	q := r.URL.Query()
+	get := func(n string) string { return strings.TrimSpace(q.Get(n)) }
+
+	status := get("status")
+	switch {
+	case !q.Has("status"):
+		status = links.StatusAll
+	case status == "":
+		status = links.StatusActive
+	case status != links.StatusActive && status != links.StatusInactive && status != links.StatusExpired && status != links.StatusAll:
+		writeListParamError(w, "status", "invalid_status", "status must be one of active, inactive, expired, all")
+		return
+	}
+
+	window := get("window")
+	if window != "" && window != "7d" && window != "30d" && window != "90d" {
+		writeListParamError(w, "window", "invalid_window", "window must be one of 7d, 30d, 90d")
+		return
+	}
+
+	sortBy := get("sort")
+	switch sortBy {
+	case "", links.SortCreated, links.SortCreatedAsc, links.SortClicks, links.SortTitle:
+	case links.SortClicksWindow:
+		if window == "" {
+			writeListParamError(w, "sort", "invalid_sort", "sort=clicks_window requires the window parameter (7d, 30d or 90d)")
+			return
+		}
+	default:
+		writeListParamError(w, "sort", "invalid_sort", "sort must be one of created, -created, clicks, clicks_window, title")
+		return
+	}
+
+	// campaign, source and medium share the reports' parsing and link-filter
+	// semantics (comma-separated OR lists, ~none, campaign=none); tz and the
+	// window go through the reports' day model, so a 7d window is today plus
+	// the six previous civil days in tz.
+	pv := url.Values{}
+	for _, n := range []string{"campaign", "source", "medium", "tz"} {
+		if v, ok := q[n]; ok {
+			pv[n] = v
+		}
+	}
+	pv.Set("compare", "none")
+	if window != "" {
+		pv.Set("range", window)
+	}
+	params, err := reports.ParseParams(pv, h.defaultTZ)
+	if err != nil {
+		var pe *reports.ParamError
+		if errors.As(err, &pe) {
+			writeListParamError(w, pe.Field, pe.Code, pe.Message)
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	now := time.Now()
+	opts := links.ListOptions{
+		Limit:      perPage,
+		Offset:     offset,
+		Query:      get("q"),
+		Filter:     params,
+		Status:     status,
+		ContentKey: get("content_key"),
+		Sort:       sortBy,
+		Now:        now,
+	}
+	var info *listWindowInfo
+	if window != "" {
+		win := reports.ResolveWindows(params, now, nil).Current
+		opts.HasWindow, opts.WindowStart, opts.WindowEnd = true, win.Start, win.End
+		info = &listWindowInfo{Window: window, From: win.From, To: win.To, TZ: win.TZName}
+	}
+
+	rows, total, err := h.store.ListLinksFiltered(r.Context(), userID, opts)
+	if err != nil {
+		slog.Error("links: filtered list failed", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	items := make([]listLinkItem, 0, len(rows))
+	for _, l := range rows {
+		it := listLinkItem{linkView: toLinkView(l), ContentKey: reports.ContentKey(l.DestinationURL)}
+		_, it.Label = reports.LinkLabel(l.Title, l.UTMSource)
+		if l.CampaignSlug != "" {
+			slug := l.CampaignSlug
+			it.CampaignSlug = &slug
+		}
+		if window != "" {
+			cw := l.ClicksWindow
+			it.ClicksWindow = &cw
+		}
+		items = append(items, it)
+	}
+	writeJSON(w, http.StatusOK, enrichedListResponse{Links: items, Page: page, PerPage: perPage, Total: total, Window: info})
 }
 
 // linkDetailView is the GET /api/links/{key} body: a single link's fields plus

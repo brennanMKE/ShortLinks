@@ -54,7 +54,12 @@ var idleLinksReport = Report{
 // placement fields from the shared filters (same OR-within, AND-across
 // semantics and ~none handling as Predicate). Bots are not a link property
 // and are ignored here. nextArg numbers the first placeholder.
-func (p Params) linkFilterSQL(nextArg int) (string, []any) {
+func (p Params) linkFilterSQL(nextArg int) (string, []any) { return p.LinkFilterSQL(nextArg) }
+
+// LinkFilterSQL is the exported form of linkFilterSQL for list queries outside
+// this package (#0144). The condition references the links table as l and
+// the owning user as $1.
+func (p Params) LinkFilterSQL(nextArg int) (string, []any) {
 	var conds []string
 	var args []any
 	if p.Campaign != "" {

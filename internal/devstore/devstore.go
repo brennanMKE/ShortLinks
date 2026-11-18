@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/links"
+	"github.com/brennanMKE/ShortLinks/internal/reports"
 )
 
 var logger = slog.Default()
@@ -1009,6 +1011,87 @@ func (s *Store) ListLinks(_ context.Context, userID int64, limit, offset int) ([
 	return owned[offset:end], nil
 }
 
+// ListLinksFiltered is the dev-mode twin of links.Store.ListLinksFiltered
+// (#0144). It applies q, campaign, source, medium, status and content_key and
+// the created/-created/title sorts. The dev store records no clicks, so every
+// click count is 0: sort=clicks and sort=clicks_window fall back to newest
+// first, and clicks_window is always 0.
+func (s *Store) ListLinksFiltered(_ context.Context, userID int64, opts links.ListOptions) ([]links.Link, int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	q := strings.ToLower(opts.Query)
+	var matched []links.Link
+	for i := len(s.links) - 1; i >= 0; i-- { // newest first
+		l := s.cloneLink(s.links[i])
+		if l.UserID != userID {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(l.Title), q) && !strings.Contains(strings.ToLower(l.Key), q) && !strings.Contains(strings.ToLower(l.DestinationURL), q) {
+			continue
+		}
+		expired := l.ExpiresAt != nil && !l.ExpiresAt.After(now)
+		switch opts.Status {
+		case links.StatusActive:
+			if !l.Active || l.DeniedReason != 0 || expired {
+				continue
+			}
+		case links.StatusInactive:
+			if (l.Active && l.DeniedReason == 0) || expired {
+				continue
+			}
+		case links.StatusExpired:
+			if !expired {
+				continue
+			}
+		}
+		if c := opts.Filter.Campaign; c != "" {
+			if c == reports.CampaignNone && l.CampaignSlug != "" || c != reports.CampaignNone && l.CampaignSlug != c {
+				continue
+			}
+		}
+		if !devValueIn(opts.Filter.Filters["source"], l.UTMSource) || !devValueIn(opts.Filter.Filters["medium"], l.UTMMedium) {
+			continue
+		}
+		if opts.ContentKey != "" && reports.ContentKey(l.DestinationURL) != opts.ContentKey {
+			continue
+		}
+		matched = append(matched, l)
+	}
+	if opts.Sort == links.SortCreatedAsc {
+		for i, j := 0, len(matched)-1; i < j; i, j = i+1, j-1 {
+			matched[i], matched[j] = matched[j], matched[i]
+		}
+	}
+	if opts.Sort == links.SortTitle {
+		sort.SliceStable(matched, func(a, b int) bool {
+			ta, tb := strings.TrimSpace(matched[a].Title), strings.TrimSpace(matched[b].Title)
+			if (ta == "") != (tb == "") {
+				return tb == ""
+			}
+			return strings.ToLower(ta) < strings.ToLower(tb)
+		})
+	}
+	return links.PageSlice(matched, opts.Limit, opts.Offset), int64(len(matched)), nil
+}
+
+// devValueIn reports whether v satisfies an OR-list of wanted values (empty
+// list = no filter; reports.NoneValue matches an empty v).
+func devValueIn(want []string, v string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for _, w := range want {
+		if w == reports.NoneValue && strings.TrimSpace(v) == "" || w == v {
+			return true
+		}
+	}
+	return false
+}
+
 // CountLinks returns the total number of links owned by userID.
 func (s *Store) CountLinks(_ context.Context, userID int64) (int64, error) {
 	s.mu.Lock()
@@ -1439,6 +1522,7 @@ var _ interface {
 	CreateDeniedLink(ctx context.Context, in links.NewLink, reasonCode int16, genKey func(exists func(key string) (bool, error)) (string, error)) (links.Link, error)
 	CreateLinksBatch(ctx context.Context, rows []links.NewLink, genKey func(exists func(key string) (bool, error)) (string, error)) ([]links.Link, error)
 	ListLinks(ctx context.Context, userID int64, limit, offset int) ([]links.Link, error)
+	ListLinksFiltered(ctx context.Context, userID int64, opts links.ListOptions) ([]links.Link, int64, error)
 	CountLinks(ctx context.Context, userID int64) (int64, error)
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
 	UpdateLink(ctx context.Context, userID int64, key string, upd links.LinkUpdate) (links.Link, error)

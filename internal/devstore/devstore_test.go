@@ -7,9 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
+	"github.com/brennanMKE/ShortLinks/internal/campaigns"
 	"github.com/brennanMKE/ShortLinks/internal/devstore"
 	"github.com/brennanMKE/ShortLinks/internal/links"
+	"github.com/brennanMKE/ShortLinks/internal/reports"
 )
 
 func TestNew_SeedsAdminAndLinks(t *testing.T) {
@@ -380,4 +383,68 @@ func TestCreateLinksBatch_GenKeyFailureRollsBackEarlierRows(t *testing.T) {
 	if created[0].ID != wantID {
 		t.Errorf("post-failure link id = %d, want %d (nextLinkID was not restored after the earlier failure)", created[0].ID, wantID)
 	}
+}
+
+// TestListLinksFiltered_DevStore pins dev mode's #0144 behaviour: filters work,
+// every click count is 0.
+func TestListLinksFiltered_DevStore(t *testing.T) {
+	s := devstore.New("admin@test.local")
+	ctx := context.Background()
+	all, total, err := s.ListLinksFiltered(ctx, 1, links.ListOptions{Limit: 10})
+	if err != nil || total != 2 || len(all) != 2 {
+		t.Fatalf("all: %v total=%d len=%d", err, total, len(all))
+	}
+	got, total, err := s.ListLinksFiltered(ctx, 1, links.ListOptions{Limit: 10, Query: all[0].Key, Status: links.StatusActive})
+	if err != nil || total < 1 || got[0].Key != all[0].Key || got[0].ClicksWindow != 0 {
+		t.Fatalf("q: %v total=%d %+v", err, total, got)
+	}
+	if _, total, _ = s.ListLinksFiltered(ctx, 2, links.ListOptions{Limit: 10}); total != 0 {
+		t.Errorf("other user total = %d, want 0", total)
+	}
+}
+
+// TestListLinksFiltered_DevStoreFilters covers campaign, source, medium,
+// content_key and the -created and title sorts.
+func TestListLinksFiltered_DevStoreFilters(t *testing.T) {
+	s := devstore.New("admin@test.local")
+	ctx := context.Background()
+	camp, err := s.CreateCampaign(ctx, campaigns.NewCampaign{UserID: 1, Name: "Spring"}, nil, audit.Entry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(key, dest, title, src, med string, cid *int64) {
+		if _, err := s.CreateLink(ctx, links.NewLink{UserID: 1, Key: key, DestinationURL: dest, Title: title, UTMSource: src, UTMMedium: med, CampaignID: cid}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("t1", "https://zz.example.com/x", "banana", "mastodon", "social", &camp.ID)
+	mk("t2", "http://ZZ.example.com/x/?utm_source=q", "Apple", "bluesky", "social", nil)
+	mk("t3", "https://zz.example.com/y", "", "newsletter", "email", &camp.ID)
+	keys := func(o links.ListOptions) []string {
+		o.Limit = 50
+		got, _, err := s.ListLinksFiltered(ctx, 1, o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, l := range got {
+			if len(l.Key) == 2 && l.Key[0] == 't' {
+				out = append(out, l.Key)
+			}
+		}
+		return out
+	}
+	eq := func(name string, got, want []string) {
+		t.Helper()
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
+	}
+	eq("campaign", keys(links.ListOptions{Filter: reports.Params{Campaign: camp.Slug}}), []string{"t3", "t1"})
+	eq("campaign none", keys(links.ListOptions{Filter: reports.Params{Campaign: "none"}}), []string{"t2"})
+	eq("source", keys(links.ListOptions{Filter: reports.Params{Filters: map[string][]string{"source": {"mastodon", "bluesky"}}}}), []string{"t2", "t1"})
+	eq("medium", keys(links.ListOptions{Filter: reports.Params{Filters: map[string][]string{"medium": {"email"}}}}), []string{"t3"})
+	eq("content_key", keys(links.ListOptions{ContentKey: "zz.example.com/x"}), []string{"t2", "t1"})
+	eq("-created", keys(links.ListOptions{Sort: links.SortCreatedAsc}), []string{"t1", "t2", "t3"})
+	eq("title", keys(links.ListOptions{Sort: links.SortTitle}), []string{"t2", "t1", "t3"})
 }

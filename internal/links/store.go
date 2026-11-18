@@ -95,8 +95,11 @@ type Link struct {
 	UTMTerm        string
 	UTMContent     string
 	Placement      string
-	CampaignName   string // populated only by GetLink; "" elsewhere
-	CampaignSlug   string // populated only by GetLink; "" elsewhere
+	CampaignName   string // populated only by GetLink; "" elsewhere (ListLinksFiltered sets only the slug)
+	CampaignSlug   string // populated only by GetLink and ListLinksFiltered; "" elsewhere
+	// ClicksWindow is the non-bot click count inside the requested window; set
+	// only by ListLinksFiltered when a window was requested (#0144).
+	ClicksWindow int64
 }
 
 // KeyExists reports whether any link already uses the given key. The key column

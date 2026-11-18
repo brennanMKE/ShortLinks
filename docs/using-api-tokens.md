@@ -122,7 +122,8 @@ receive. List the campaign's links first (below).
 
 | What | Request |
 |---|---|
-| Your links (paged) | `GET /api/links?page=1&per_page=20` |
+| Your links (paged, max `per_page` 100) | `GET /api/links?page=1&per_page=20` |
+| Find links | `GET /api/links?q=spring&campaign=spring-2026&status=active&sort=clicks_window&window=30d&per_page=100` (parameters: [docs/links.md](links.md#listing-searching-and-sorting--get-apilinks)) |
 | One link + click stats | `GET /api/links/{key}` |
 | Your campaigns | `GET /api/campaigns` |
 | One campaign + summary | `GET /api/campaigns/{slug}` |

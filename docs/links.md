@@ -129,6 +129,37 @@ which the handler maps to `409 Conflict`.
 
 ---
 
+## Listing, searching and sorting — `GET /api/links`
+
+Paged with `page` (1-based) and `per_page` (default 20, max 100). With none of
+the parameters below the response is the original shape, newest first, with
+all-time `click_count`. Adding any of them, even with an empty value such as `?q=`, returns the enriched response: each
+item also carries `content_key` and `label` (the #0140 content grouping),
+`campaign_slug` (`null` when unassigned) and, with `window`, `clicks_window`;
+`total` counts every link matching the filters, and a `window` object
+(`window`, `from`, `to`, `tz`) is included when `window` is set.
+
+| Param | Meaning |
+|---|---|
+| `q` | Case-insensitive substring of title, key or destination URL. `%`, `_` and `\` match literally. |
+| `campaign` | A campaign slug, or `none` for links in no campaign. |
+| `source`, `medium` | `utm_source` / `utm_medium`, comma-separated for several (`~none` matches empty). |
+| `status` | `active`, `inactive`, `expired` or `all`. Absent means `all`; present but empty means `active`. Each link is in exactly one: `expired` (`expires_at` has passed), else `inactive` (deactivated or filter-denied), else `active`. |
+| `content_key` | Links whose destination has this content key (scheme, `utm_*`, fragment and trailing slash ignored, host lower-cased), e.g. `www.example.com/guides/x`. |
+| `sort` | `created` (newest first, the default), `-created` (oldest first), `clicks` (all-time, most first), `clicks_window` (requires `window`), `title` (A-Z, untitled last). |
+| `window` | `7d`, `30d` or `90d`: adds `clicks_window`, the non-bot clicks over that many days, today included, in the zone below. |
+| `tz` | IANA zone for `window` days; defaults to the server's `DEFAULT_TIMEZONE`. |
+
+Errors are `400` with `{"error", "field", "message"}`: `invalid_sort` (unknown
+value, or `clicks_window` without `window`), `invalid_status`, `invalid_window`,
+`invalid_tz`. Results are always limited to the caller's own links. In
+`content_key` mode the server matches keys in Go over the links on that host,
+so `total` and paging stay exact. The in-memory dev server (no PostgreSQL)
+supports every parameter except click counts: it records no clicks, so
+`clicks`/`clicks_window` sorts fall back to newest first and `clicks_window` is 0.
+
+---
+
 ## Redirect path — `GET /u/{key}`
 
 Handler: `internal/handlers/redirect.go` `RedirectHandler.ServeHTTP`.
