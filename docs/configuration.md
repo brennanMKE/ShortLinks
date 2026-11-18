@@ -23,6 +23,7 @@ implemented in [`internal/config/config.go`](../internal/config/config.go).
 | `CACHE_MAX_COST` | optional | `10000` | Maximum cost budget for the in-memory Ristretto cache (redirect targets + filter rules). Units are arbitrary cost units passed to Ristretto. |
 | `CACHE_TTL_SECONDS` | optional | `300` | Default TTL in seconds for cache entries (5 minutes). |
 | `ADMIN_EMAIL` | **required** | — | Email address of the bootstrap admin user. On first startup with an empty database, this address is pre-authorized as admin when the user completes passkey registration. |
+| `DEFAULT_TIMEZONE` | optional | `UTC` | IANA time zone name (e.g. `America/Los_Angeles`) the reports API (`/api/reports`, #0139) uses to bucket clicks into days when a request has no `tz` parameter. Validated at load: an unknown zone name stops startup with an error naming `DEFAULT_TIMEZONE`. |
 
 **Required fields:** `BASE_URL`, `DATABASE_URL`, `WEBAUTHN_RP_ID`,
 `WEBAUTHN_RP_ORIGIN`, `SESSION_SECRET`, `ADMIN_EMAIL`. The loader collects all

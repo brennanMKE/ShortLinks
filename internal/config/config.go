@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -15,6 +16,7 @@ const (
 	defaultSESSmtpPort     = 587
 	defaultCacheMaxCost    = 10000
 	defaultCacheTTLSeconds = 300
+	defaultTimezone        = "UTC"
 )
 
 // Config holds all runtime configuration loaded from the environment.
@@ -60,6 +62,11 @@ type Config struct {
 
 	// Bootstrap
 	AdminEmail string
+
+	// DefaultTimezone (DEFAULT_TIMEZONE) is the IANA zone the reports API uses
+	// to bucket days when a request carries no tz parameter (#0139). Optional,
+	// validated at load, "UTC" when unset.
+	DefaultTimezone string
 }
 
 // DevMode reports whether the dev store should be used instead of Postgres.
@@ -111,6 +118,15 @@ func loadFromFile(path string) (*Config, error) {
 		CacheMaxCost:     getInt("CACHE_MAX_COST", defaultCacheMaxCost, &errs),
 		CacheTTLSeconds:  getInt("CACHE_TTL_SECONDS", defaultCacheTTLSeconds, &errs),
 		AdminEmail:       os.Getenv("ADMIN_EMAIL"),
+		DefaultTimezone:  defaultTimezone,
+	}
+
+	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {
+		if _, err := time.LoadLocation(tz); err != nil || tz == "Local" {
+			errs = append(errs, fmt.Sprintf("invalid IANA time zone for DEFAULT_TIMEZONE: %q", tz))
+		} else {
+			cfg.DefaultTimezone = tz
+		}
 	}
 
 	// Validate required fields. When STORAGE=json (dev mode) DATABASE_URL is

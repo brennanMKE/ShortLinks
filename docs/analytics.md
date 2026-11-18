@@ -462,6 +462,142 @@ result via `GROUP BY`.
 
 ---
 
+## Reports (#0139)
+
+`internal/reports` serves user-wide analytics: every report adds up clicks
+across **all of the caller's links** (`JOIN links l ON l.id = k.link_id WHERE
+l.user_id = $1`; the user comes from the session or API token, never from the
+query). The routes are behind `requireAPI`, so a browser session, a full token
+and a read-only token all work (both routes are `GET`). They are not mounted
+in `STORAGE=json` dev mode.
+
+- `GET /api/reports` returns the catalogue: `{"reports": [{name, description,
+  path, params}], "common_params": [...]}`. Each report lists only its *extra*
+  parameters; `common_params` applies to all of them.
+- `GET /api/reports/{name}` runs one report. An unknown name is `404
+  {"error":"report_not_found"}`; a bad parameter is `400` with
+  `{"error": "<code>", "field": "<param>", "message": "..."}` where the code
+  is `invalid_range`, `invalid_tz`, `invalid_date`, `invalid_compare`,
+  `invalid_include_bots` or `invalid_limit`.
+
+### Parameters (shared by every report)
+
+| Param | Values | Default |
+|---|---|---|
+| `range` | `7d`, `30d`, `90d`, `365d`, `all` | `30d` |
+| `from`, `to` | `YYYY-MM-DD`, inclusive days in `tz`; overrides `range`. `to` defaults to today and needs `from`; a `to` in the future is clamped to today, but a `from` in the future (in `tz`) is `400 invalid_date` | none |
+| `tz` | IANA zone, e.g. `America/Los_Angeles` | `DEFAULT_TIMEZONE`, else `UTC` |
+| `compare` | `previous` (same-length window immediately before), `none` | `previous` (no previous window for `range=all`) |
+| `campaign` | campaign slug, or `none` for clicks with no campaign | all |
+| `source`, `medium`, `utm_campaign`, `content`, `term`, `placement` | comma-separated (or repeated) values; `~none` matches empty/NULL | all |
+| `include_bots` | `true` / `false` | `false` |
+| `limit` | 1-500 | report-specific (`default_limit` in the catalogue) |
+
+Filters are **OR within a dimension, AND across dimensions**. `source`,
+`medium`, `utm_campaign`, `content` and `term` match the click's own `utm_*`
+value (trimmed, case-sensitive). `placement` is stored on the link, not the
+click, so it matches `links.placement`, trimmed and lower-cased the same way
+the campaign placement rollup groups it. `campaign` uses `clicks.campaign_id`
+(attribution at click time), like the campaign rollups.
+
+**Days and windows.** Days are bucketed with `date_trunc('day', clicked_at AT
+TIME ZONE tz)`. A window is whole civil days in `tz`, `[midnight of from,
+midnight after to)`, computed through the calendar rather than 24-hour steps,
+so a daylight-saving day of 23 or 25 hours still starts and ends at local
+midnight. The window **includes today as a partial day** and says so
+(`window.partial_last_day: true`). The previous window has the same number of
+days and ends the day before the current one starts.
+
+### Response envelope
+
+```json
+{
+  "report": "overview",
+  "window": {"from": "2026-10-20", "to": "2026-11-18", "tz": "America/Los_Angeles", "partial_last_day": true},
+  "previous_window": {"from": "2026-09-20", "to": "2026-10-19"},
+  "filters": {"campaign": "guides-2026-11", "source": ["mastodon", "bluesky"]},
+  "generated_at": "2026-11-18T20:41:07Z",
+  "highlights": ["1,284 clicks between 2026-10-20 and 2026-11-18, up 18% on the previous 30 days."],
+  "data": {}
+}
+```
+
+`previous_window` is `null` for `compare=none` and `range=all`. `filters`
+echoes only the filters that were applied. `highlights` is 1-5 plain-English
+sentences computed in Go from `data`, enough to answer simple questions
+without reading it. All queries of one request run in one `REPEATABLE READ`
+read-only transaction, so the numbers agree with each other.
+
+### `overview`
+
+No extra parameters. `limit` (default 50) caps the values in each facet.
+
+```json
+"data": {
+  "totals":   {"clicks": 1284, "visitor_days": 911, "excluded_bots": 64, "links_clicked": 37, "links_total": 58},
+  "previous": {"clicks": 1088, "visitor_days": 813},
+  "timeseries": [{"date": "2026-10-20", "clicks": 31}],
+  "previous_timeseries": [{"date": "2026-09-20", "clicks": 22}],
+  "best_day": {"date": "2026-11-10", "clicks": 96},
+  "campaigns": [{"slug": "guides-2026-11", "name": "Guides 2026-11", "clicks": 902}, {"slug": null, "name": "No campaign", "clicks": 71}],
+  "facets": {"source": [{"value": "mastodon", "clicks": 498}], "medium": [], "utm_campaign": [], "content": [], "term": [], "placement": []}
+}
+```
+
+- `timeseries` has one entry per day of the window (zero-filled);
+  `previous_timeseries` the same for the previous window (`[]` when none).
+  `previous` and `best_day` are `null` when there is no previous window or no
+  clicks.
+- `totals.excluded_bots` counts bot clicks left out (0 with
+  `include_bots=true`). `links_total` is every link the user owns;
+  `links_clicked` those with a counted click in the window.
+- `campaigns` lists every campaign with at least one counted click, sorted by
+  clicks. It applies the UTM filters but **not** the `campaign` filter, so a
+  focus-chip row does not collapse to the selected campaign. Clicks with no
+  campaign appear as `{"slug": null, "name": "No campaign"}`.
+- Each facet applies every filter **except its own dimension's**, so a
+  dropdown never offers a value that yields zero results. Empty values appear
+  as `~none`, which can be passed straight back as a filter.
+- `visitor_days` is `COUNT(DISTINCT (ip_hash, day))` over clicks with an
+  `ip_hash`. Because click detail is stripped after 90 days (see
+  [Visitor privacy and retention](#visitor-privacy-and-retention-0121)),
+  `previous.visitor_days` is `null` when the previous window starts before
+  that cutoff, and `highlights` says so; a current window that starts before
+  it gets a highlight that the figure undercounts.
+
+### Adding a report
+
+Register a `reports.Report` in `NewDefaultRegistry`:
+
+- `Name`, `Description`, `Params []ParamSpec` (the report's *extra* parameters;
+  `Required: true` marks one the caller must send) and `DefaultLimit` (what
+  `p.LimitOr` falls back to, shown in the catalogue as `default_limit`; the
+  common `limit` parameter is not repeated in `Params`).
+- `Run(ctx, *Request) (Output{Highlights, Data}, error)`. `Request` holds the
+  parsed `Params`, the resolved `Windows`, `Raw` (the full query), `Now`, `UserID`
+  and `Q`, the shared REPEATABLE READ transaction. `Service.Run` adds the
+  envelope. Extra parameters are read with `req.IntParam(name, def, min, max)`
+  (`invalid_<name>`), `req.EnumParam(name, def, allowed...)` (`invalid_<name>`)
+  and `req.RequiredString(name)` (`missing_<name>`); each returns a
+  `*ParamError`, which the handler turns into a 400.
+- `Windows` (optional) overrides the standard windows, which `Service.Run`
+  passes in as `req.Windows`. Return the windows the report should use and the
+  envelope reports them. `req.Params.RangeExplicit` is true when the caller
+  sent `range`, `from` or `to`, so a campaign report can default to the
+  campaign's own dates only when it is false.
+
+Build queries with `p.ScopedQuery(userID, window, ScopeOpts{Joins, Skip, Where})`.
+It returns `Scope{SQL, Args, Next}`: ` FROM clicks k JOIN links l ... WHERE
+l.user_id = $1 AND k.clicked_at >= $2 AND k.clicked_at < $3 AND (<filters>)`,
+the arguments for `$1..$4` (user, window start, window end, time zone) plus the
+filters', and the next free placeholder number. Append `GROUP BY` etc. to `SQL`
+and your own arguments after `Args`, numbered from `Next`. Use `DayExpr` to
+bucket by day, `Skip` (`SkipCampaign`, `SkipBots`, a dimension name) to leave a
+filter out, and `DimensionExpr(dim)` to group by a dimension. `p.Predicate` is
+the lower-level piece underneath.
+
+---
+
 ## SPA consumption
 
 The SPA fetches link detail — including both `utm_stats` and `timeseries` fields —
@@ -597,6 +733,7 @@ When `buckets` is empty or null, the component renders "No data." in faint text.
 | `migrations/000003_create_clicks.up.sql` | Original schema for the `clicks` table and its first two indexes |
 | `migrations/000012_clicks_campaign_and_bot.{up,down}.sql` | Adds `campaign_id`/`is_bot` and `idx_clicks_campaign_id`/`idx_clicks_campaign_time` (#0100) |
 | `migrations/000015_clicks_ip_hash.{up,down}.sql` | Replaces `ip_address INET` with `ip_hash BYTEA` (#0121); existing rows become NULL |
+| `internal/reports/` | User-wide reports: parameter model, windows, filter predicate, registry, `overview` (#0139) |
 | `internal/clicks/iphash.go` | `IPHasher`: keyed daily-salted IP hash (#0121) |
 | `internal/clicks/retention.go` | `Sweeper`, `DetailRetention`: strips `ip_hash`/`user_agent` after 90 days (#0121) |
 | `internal/clicks/recorder.go` | `Click` type, `Recorder`, `RecordClick` (fire-and-forget), `Record` (the #0100 UTM fallback + campaign_id resolution + #0101 bot classification) |

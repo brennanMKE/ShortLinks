@@ -156,3 +156,41 @@ func TestLoad_InvalidInteger(t *testing.T) {
 		})
 	}
 }
+
+// TestLoad_DefaultTimezone covers DEFAULT_TIMEZONE (#0139): unset and empty
+// default to UTC, a valid IANA name is kept, an unknown name fails Load.
+// It sets BASE_URL itself so it does not depend on the shared fixture.
+func TestLoad_DefaultTimezone(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{"unset", "", "UTC", false},
+		{"valid", "America/Los_Angeles", "America/Los_Angeles", false},
+		{"padded", "  Europe/Berlin ", "Europe/Berlin", false},
+		{"invalid", "Mars/Olympus", "", true},
+		{"Local rejected", "Local", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("BASE_URL", "https://example.com")
+			t.Setenv("DEFAULT_TIMEZONE", tc.env)
+			cfg, err := loadFromFile(noEnvFile)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "DEFAULT_TIMEZONE") {
+					t.Fatalf("err = %v, want DEFAULT_TIMEZONE error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.DefaultTimezone != tc.want {
+				t.Errorf("DefaultTimezone = %q, want %q", cfg.DefaultTimezone, tc.want)
+			}
+		})
+	}
+}

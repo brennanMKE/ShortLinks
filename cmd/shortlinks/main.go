@@ -24,6 +24,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
+	"github.com/brennanMKE/ShortLinks/internal/reports"
 	"github.com/brennanMKE/ShortLinks/web"
 )
 
@@ -196,6 +197,11 @@ func servePostgres(cfg *config.Config) error {
 	// before inserting anything.
 	campaignsH := handlers.NewCampaignsHandler(campaignStore, linkStore, auditLogger, statsStore, ruleCache, cfg.BaseURL)
 
+	// Analytics reports (#0139): GET /api/reports and /api/reports/{name},
+	// scoped to the caller's links, days bucketed in DEFAULT_TIMEZONE unless a
+	// request supplies tz.
+	reportsH := handlers.NewReportsHandler(reports.NewService(pool, cfg.DefaultTimezone))
+
 	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
 	// read straight off the RequireSession-attached context, so the Svelte SPA
 	// can gate the admin view. Stateless — no data-layer dependency.
@@ -221,7 +227,7 @@ func servePostgres(cfg *config.Config) error {
 
 	return mountAndServe(cfg, pool,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
-		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH, homeH, apiTokensH,
+		urlFiltersH, eventsH, redirectH, linksH, campaignsH, reportsH, meH, homeH, apiTokensH,
 		requireSession, requireAdmin, requireAPI, requireCookie, nil /* no outer middleware in production */)
 }
 
@@ -311,7 +317,7 @@ func serveDevMode(cfg *config.Config) error {
 
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
-		urlFiltersH, eventsH, redirectH, linksH, campaignsH, meH, homeH, apiTokensH,
+		urlFiltersH, eventsH, redirectH, linksH, campaignsH, nil /* no reports in dev mode */, meH, homeH, apiTokensH,
 		requireSession, requireAdmin, requireAPI, requireCookie, devAutoLogin)
 }
 
@@ -337,6 +343,7 @@ func mountAndServe(
 	redirectH *handlers.RedirectHandler,
 	linksH *handlers.LinksHandler,
 	campaignsH *handlers.CampaignsHandler,
+	reportsH *handlers.ReportsHandler,
 	meH *handlers.MeHandler,
 	homeH *handlers.HomeHandler,
 	apiTokensH *handlers.APITokensHandler,
@@ -466,6 +473,14 @@ func mountAndServe(
 		// /stats above, reusing that same clicks.StatsStore.CampaignRollup
 		// call so the two can never disagree.
 		mux.Handle("GET /api/campaigns/{slug}/export.csv", requireAPI(http.HandlerFunc(campaignsH.Export)))
+	}
+
+	// Analytics reports (#0139), mounted behind requireAPI so a cookie
+	// session, a full token and a read-only token all work (both are GET).
+	// Not mounted in dev mode: the in-memory store has no click table.
+	if reportsH != nil {
+		mux.Handle("GET /api/reports", requireAPI(http.HandlerFunc(reportsH.List)))
+		mux.Handle("GET /api/reports/{name}", requireAPI(http.HandlerFunc(reportsH.Get)))
 	}
 
 	// Current user profile (#0027) — behind RequireSession; returns the caller's
