@@ -114,9 +114,46 @@ curl -s -H "Authorization: Bearer $SHORTLINKS_TOKEN" \
      "$SHORTLINKS_URL/api/campaigns/spring-sale/links/batch"
 ```
 
-Batch create does **not** deduplicate. Sending the same batch twice creates
-two sets of links, so don't blindly retry a batch whose response you didn't
-receive. List the campaign's links first (below).
+Batch create does **not** deduplicate by itself. Sending the same batch twice
+creates two sets of links, unless you send an `Idempotency-Key` header (next
+section). Without one, don't blindly retry a batch whose response you didn't
+receive: list the campaign's links first (below).
+
+### Retry safely with `Idempotency-Key`
+
+Add an `Idempotency-Key` header to `POST /api/links`, `POST /api/campaigns` or
+`POST /api/campaigns/{slug}/links/batch` and the request becomes safe to retry
+after a timeout:
+
+```sh
+curl -s -H "Authorization: Bearer $SHORTLINKS_TOKEN" \
+     -H "Idempotency-Key: spring-sale-batch-1" \
+     -H "Content-Type: application/json" \
+     -d '{"rows":[{"destination_url":"https://example.com/spring"}]}' \
+     "$SHORTLINKS_URL/api/campaigns/spring-sale/links/batch"
+```
+
+- The key is 1-255 printable ASCII characters (otherwise `400
+  invalid_idempotency_key`). Use a fresh random value (a UUID) per logical
+  operation. Keys are private to your account, so two users can use the same
+  key, but all of one user's tokens and their browser session share a single
+  key namespace.
+- Idempotency errors use the body `{"error":"<code>","message":"<text>"}`.
+- The first request runs normally and its response is stored. Repeating it
+  with the **same key, method, path and body** returns the stored response
+  (status, body, `Content-Type`, `Location`) with `Idempotent-Replayed: true`,
+  and creates nothing new.
+- The same key with a different body or path returns `422
+  idempotency_key_reused`. Use a new key for a new request.
+- The same key while the first request is still running returns `409
+  idempotency_key_in_progress` (with `Retry-After: 1`). Wait and retry.
+- `2xx` and `4xx` responses are stored and replayed (a validation error replays
+  as the same error). A `5xx` is not stored, so retrying the same key runs the
+  request again. If a server crashed mid-request, its pending record is
+  reclaimable after 120 seconds (handlers are cut off after 90).
+- Keys are remembered for 24 hours; after that the key is treated as new.
+- Without the header nothing changes. The local dev server (`STORAGE=json`)
+  ignores the header.
 
 ### Read things
 
@@ -196,8 +233,10 @@ prompt. You can then give it instructions like these:
 > `Authorization: Bearer $SHORTLINKS_TOKEN`, and never print the token.
 > Start with `GET /api/me` to confirm access. Create campaigns with
 > `POST /api/campaigns` and links with `POST /api/links`, or with
-> `POST /api/campaigns/{slug}/links/batch` for several at once. Don't
-> retry a batch request without first checking
+> `POST /api/campaigns/{slug}/links/batch` for several at once. Send a
+> unique `Idempotency-Key` header on every create request and reuse the same
+> key when retrying one; replays carry `Idempotent-Replayed: true`. Without a
+> key, don't retry a batch request without first checking
 > `GET /api/campaigns/{slug}/links`. On `429`, wait for the number of seconds
 > in `Retry-After`. On `401`, stop and report that the token is invalid or
 > revoked.

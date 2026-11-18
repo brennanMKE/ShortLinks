@@ -22,6 +22,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/events"
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
+	"github.com/brennanMKE/ShortLinks/internal/idempotency"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 	"github.com/brennanMKE/ShortLinks/internal/reports"
@@ -157,7 +158,11 @@ func servePostgres(cfg *config.Config) error {
 	clickRecorder := clicks.NewRecorder(pool, ipHasher, slog.Default())
 	// #0121: strip ip_hash/user_agent from clicks older than 90 days, hourly.
 	// No graceful-shutdown ctx exists; process exit ends the goroutine.
-	go clicks.NewSweeper(pool, slog.Default()).Run(context.Background())
+	// The same job prunes expired Idempotency-Key records (#0147).
+	idemStore := idempotency.NewStore(pool)
+	go clicks.NewSweeper(pool, slog.Default()).
+		WithPrune("pruned expired idempotency keys", idemStore.Prune).
+		Run(context.Background())
 	statsStore := clicks.NewStatsStore(pool)
 	redirectH := handlers.NewRedirectHandler(resolver, handlers.NewClickRecorder(clickRecorder))
 
@@ -230,7 +235,8 @@ func servePostgres(cfg *config.Config) error {
 	return mountAndServe(cfg, pool,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
 		urlFiltersH, eventsH, redirectH, linksH, campaignsH, reportsH, meH, homeH, apiTokensH,
-		requireSession, requireAdmin, requireAPI, requireCookie, nil /* no outer middleware in production */)
+		requireSession, requireAdmin, requireAPI, requireCookie, nil, /* no outer middleware in production */
+		idempotency.Middleware(idemStore))
 }
 
 // serveDevMode boots the app without PostgreSQL using the in-memory dev store.
@@ -320,7 +326,8 @@ func serveDevMode(cfg *config.Config) error {
 	return mountAndServe(cfg, ds,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
 		urlFiltersH, eventsH, redirectH, linksH, campaignsH, nil /* no reports in dev mode */, meH, homeH, apiTokensH,
-		requireSession, requireAdmin, requireAPI, requireCookie, devAutoLogin)
+		requireSession, requireAdmin, requireAPI, requireCookie, devAutoLogin,
+		nil /* dev mode has no database: Idempotency-Key is ignored (#0147) */)
 }
 
 // mountAndServe registers all routes on a new ServeMux and starts listening.
@@ -354,7 +361,12 @@ func mountAndServe(
 	requireAPI func(http.Handler) http.Handler,
 	requireCookie func(http.Handler) http.Handler,
 	outerMiddleware func(http.Handler) http.Handler,
+	idem func(http.Handler) http.Handler,
 ) error {
+	// idem wraps the three create routes (#0147); nil (dev mode) is a no-op.
+	if idem == nil {
+		idem = func(h http.Handler) http.Handler { return h }
+	}
 	// Per-IP rate limiters for the abuse-prone public auth endpoints (PRD Phase
 	// 2). Burst equals the per-window allowance so a fresh IP gets its full
 	// quota immediately, then refills at the sustained rate.
@@ -433,7 +445,7 @@ func mountAndServe(
 	// Link CRUD API (#0022) — all behind RequireSession and scoped to the
 	// authenticated user in the store. Dedup (#0023), URL filtering (#0024), audit
 	// (#0025), and the #0026 SSE broadcast all layer onto the create path.
-	mux.Handle("POST /api/links", requireAPI(http.HandlerFunc(linksH.Create)))
+	mux.Handle("POST /api/links", requireAPI(idem(http.HandlerFunc(linksH.Create))))
 	mux.Handle("GET /api/links", requireAPI(http.HandlerFunc(linksH.List)))
 	mux.Handle("GET /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Get)))
 	mux.Handle("PATCH /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Patch)))
@@ -450,7 +462,7 @@ func mountAndServe(
 	// backing for campaigns).
 	if campaignsH != nil {
 		mux.Handle("GET /api/campaigns", requireAPI(http.HandlerFunc(campaignsH.List)))
-		mux.Handle("POST /api/campaigns", requireAPI(http.HandlerFunc(campaignsH.Create)))
+		mux.Handle("POST /api/campaigns", requireAPI(idem(http.HandlerFunc(campaignsH.Create))))
 		mux.Handle("GET /api/campaigns/{slug}", requireAPI(http.HandlerFunc(campaignsH.Get)))
 		mux.Handle("PATCH /api/campaigns/{slug}", requireAPI(http.HandlerFunc(campaignsH.Patch)))
 		mux.Handle("DELETE /api/campaigns/{slug}", requireAPI(http.HandlerFunc(campaignsH.Delete)))
@@ -465,7 +477,7 @@ func mountAndServe(
 		// Batch create (#0105): one destination URL, a row per channel, one
 		// short link per non-blank row, all assigned to this campaign in a
 		// single atomic request.
-		mux.Handle("POST /api/campaigns/{slug}/links/batch", requireAPI(http.HandlerFunc(campaignsH.BatchCreateLinks)))
+		mux.Handle("POST /api/campaigns/{slug}/links/batch", requireAPI(idem(http.HandlerFunc(campaignsH.BatchCreateLinks))))
 		// Bulk QR download (#0106): a zip archive of every assigned link's
 		// SVG + PNG QR codes, named so printed sheets can be matched back to
 		// their placements.

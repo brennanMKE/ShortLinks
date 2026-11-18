@@ -342,6 +342,31 @@ digests were stored). Clients would need new tokens after re-applying it.
 
 ---
 
+### `idempotency_keys` — `000018_create_idempotency_keys.up.sql`
+
+Stored responses for the `Idempotency-Key` request header on the three create
+endpoints (#0147, [using-api-tokens.md](using-api-tokens.md)).
+
+| Column | Type | Notes |
+|---|---|---|
+| `user_id` | `BIGINT` | FK → `users(id)` `ON DELETE CASCADE`; part of the primary key (keys are per user) |
+| `key` | `TEXT` | The client's key, 1-255 printable ASCII; part of the primary key |
+| `method`, `path` | `TEXT` | Not null; a repeat with a different method/path is `422 idempotency_key_reused` |
+| `request_sha256` | `BYTEA` | Not null; `sha256(method NUL path NUL body)` |
+| `claim_id` | `TEXT` | Not null; random token of the request that owns the pending row. Completing or releasing requires it, so a stale owner cannot clobber a reclaim |
+| `status` | `INTEGER` | `NULL` = still in flight (pending); otherwise the stored HTTP status (2xx/4xx only) |
+| `response_body` | `BYTEA` | Nullable until completed |
+| `response_content_type`, `response_location` | `TEXT` | Nullable; replayed when set |
+| `created_at` | `TIMESTAMPTZ` | Not null, default `now()`; reset when a stale pending row is reclaimed |
+
+Index: `idx_idempotency_keys_created_at` for the prune. A pending row older than
+120 s is treated as a crashed request and may be reclaimed by a repeat with the
+same hash; rows older than 24 h are deleted when the same key is next claimed, and
+by the hourly retention job (`clicks.Sweeper`). Rolling back drops the table: stored responses
+are forgotten, so a retry is processed again rather than replayed.
+
+---
+
 ### `settings` — `000006_create_settings.up.sql`
 
 Runtime configuration values that can be changed without a service restart.
@@ -462,6 +487,7 @@ users ──< links ──< clicks
   │
   ├──< sessions
   ├──< api_tokens (user_id; soft-revoked, never deleted)
+  ├──< idempotency_keys (user_id, ON DELETE CASCADE; 24 h, #0147)
   ├──< passkey_credentials
   ├──< pending_registrations ──< webauthn_challenges
   ├──< webauthn_challenges (via user_id)

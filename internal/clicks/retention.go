@@ -23,6 +23,22 @@ type Sweeper struct {
 	pool      *pgxpool.Pool
 	log       *slog.Logger
 	retention time.Duration
+	extra     []func(ctx context.Context, now time.Time) (int64, error)
+}
+
+// WithPrune registers an additional retention task (for example pruning
+// expired idempotency keys, #0147) that runs on every pass of the same job.
+func (s *Sweeper) WithPrune(name string, fn func(ctx context.Context, now time.Time) (int64, error)) *Sweeper {
+	s.extra = append(s.extra, func(ctx context.Context, now time.Time) (int64, error) {
+		n, err := fn(ctx, now)
+		if err != nil {
+			s.log.Error("retention: "+name+" failed", slog.Any("error", err))
+		} else if n > 0 {
+			s.log.Info("retention: "+name, slog.Int64("rows", n))
+		}
+		return n, err
+	})
+	return s
 }
 
 // NewSweeper constructs a Sweeper using DetailRetention. A nil log uses the default.
@@ -54,6 +70,9 @@ func (s *Sweeper) Run(ctx context.Context) {
 	pass := func() {
 		c, cancel := context.WithTimeout(ctx, sweepTimeout)
 		defer cancel()
+		for _, fn := range s.extra {
+			_, _ = fn(c, time.Now())
+		}
 		n, err := s.Sweep(c, time.Now())
 		if err != nil {
 			s.log.Error("clicks: retention sweep failed", slog.Any("error", err))
