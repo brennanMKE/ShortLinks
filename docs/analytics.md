@@ -639,6 +639,72 @@ every matching link. Each row has `key`, `short_url` (built from `BASE_URL`),
 and the source with the biggest share of clicks across all matching links (not
 only the listed rows).
 
+### `breakdown`
+
+Extra parameter `dimension` (required; `missing_dimension` / `invalid_dimension`
+otherwise): `source`, `medium`, `utm_campaign`, `content`, `term`, `referer`,
+`placement`, `campaign`, `link` or `content_group`. `limit` defaults to 20; the
+values beyond it are summed into `other` (`null` when everything fits). All
+filters apply, including one on the dimension itself.
+
+```json
+"data": {"dimension": "source", "total": 1284, "previous_total": 1088,
+  "rows": [{"value": "mastodon", "clicks": 498, "share": 0.388, "previous_clicks": 410}],
+  "other": {"clicks": 12, "values": 4}}
+```
+
+- `share` is clicks over `total` (all counted clicks, including `other`),
+  rounded to three decimals. `previous_clicks` and `previous_total` are `null`
+  without a previous window. Rows sort by clicks, then value.
+- Empty values are `~none` for the UTM dimensions and placement (usable as a
+  filter), `none` for `campaign` (a campaign slug otherwise; `label` is the
+  campaign name) and `(direct)` for `referer`.
+- `referer` is the referrer **hostname**, lower-cased: scheme, userinfo, port,
+  path and query are dropped, so `https://www.google.com/search?q=x` and
+  `http://www.google.com:8080/` both count as `www.google.com` (`www.` is not
+  stripped). Empty or missing is `(direct)`. A value with no parseable host is
+  reported as is. `clicks.referer` is cleared after 90 days (see
+  [Visitor privacy and retention](#visitor-privacy-and-retention-0121)), so older
+  clicks read as `(direct)`.
+- `link` values are link keys (`label` is the title); `content_group` values
+  are #0140 content keys (`label` is the content title), grouped in Go from the
+  per-link counts, so `truncated` and the 20,000-link cap apply as for
+  `top-content`.
+
+### `timeseries`
+
+Extra parameters `granularity` (`day` default, or `week`), `split_by` (any
+`breakdown` dimension) and `series_limit` (default 5, 1-50).
+
+```json
+"data": {"granularity": "day", "split_by": "source",
+  "series": [{"name": "mastodon", "clicks": 498, "points": [{"date": "2026-10-20", "clicks": 12}]}],
+  "previous": [{"date": "2026-09-20", "clicks": 9}]}
+```
+
+- Without `split_by` there is one series named `all`. With it, series are
+  ranked by clicks and those past `series_limit` are summed into one
+  `{"name": "other", "other": true}` series. Series that come from a campaign,
+  link or content group carry a `label`.
+- Every series has one point per bucket of the window (zero-filled).
+- Weeks start **Monday in `tz`**; a point's date is that Monday. The first and
+  last weeks of a window are partial (only the window's days count), so a
+  window starting on a Wednesday has a first point dated the Monday before.
+  Bucketing is calendar arithmetic on civil dates, so a daylight-saving week
+  is no different.
+- `previous` is the previous window's combined total with **exactly as many
+  buckets as the current series, aligned by position**: previous bucket i
+  covers the same day offsets within the previous window as current bucket i
+  covers within the current window, and its `date` is the first day of that
+  span (so with weekly buckets a partial first week lines up with an equally
+  partial previous bucket, not a calendar week). `null` when there is no
+  previous window.
+- Referrers are cleared after 90 days. For `dimension=referer` or
+  `split_by=referer`, a previous window that starts before that cutoff gives
+  `previous_clicks`, `previous_total` and `previous` as `null` (and a
+  highlight says so); a current window that starts before it gets a highlight
+  that older clicks show as `(direct)`.
+
 ### Adding a report
 
 Register a `reports.Report` in `NewDefaultRegistry`:

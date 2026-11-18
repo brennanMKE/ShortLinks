@@ -103,6 +103,7 @@ type click struct {
 	bot            bool
 	source, medium string
 	content        string
+	referer        string
 	ip             string // non-empty stores a 1-byte ip_hash
 }
 
@@ -125,9 +126,9 @@ func (f *fixture) clicks(n int, c click) {
 	}
 	for i := 0; i < n; i++ {
 		if _, err := f.pool.Exec(context.Background(),
-			`INSERT INTO clicks (link_id, campaign_id, clicked_at, is_bot, utm_source, utm_medium, utm_content, ip_hash)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-			c.link, camp, c.at, c.bot, nz(c.source), nz(c.medium), nz(c.content), ip); err != nil {
+			`INSERT INTO clicks (link_id, campaign_id, clicked_at, is_bot, utm_source, utm_medium, utm_content, ip_hash, referer)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			c.link, camp, c.at, c.bot, nz(c.source), nz(c.medium), nz(c.content), ip, nz(c.referer)); err != nil {
 			f.t.Fatalf("seed click: %v", err)
 		}
 	}
