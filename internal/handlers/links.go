@@ -62,6 +62,9 @@ type linkStore interface {
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
 	UpdateLink(ctx context.Context, userID int64, key string, upd links.LinkUpdate) (links.Link, error)
 	DeactivateLink(ctx context.Context, userID int64, key string) error
+	// ReactivateLink sets active=true (#0145); links.ErrLinkDenied for a
+	// filter-denied row.
+	ReactivateLink(ctx context.Context, userID int64, key, expectedDest string) error
 }
 
 // cacheEvictor is the slice of the redirect cache the links handler needs: the
@@ -994,6 +997,9 @@ type patchLinkRequest struct {
 	UTMTerm     *string `json:"utm_term"`
 	UTMContent  *string `json:"utm_content"`
 	Placement   *string `json:"placement"`
+	// Active (#0145): false deactivates (same as DELETE), true reactivates after
+	// re-running the URL filter. Applied after every other field.
+	Active *bool `json:"active"`
 	// expiresAtPresent records whether the JSON contained the expires_at key at
 	// all, so sending `"expires_at": null` clears it while omitting the field
 	// leaves it unchanged. Populated by UnmarshalJSON.
@@ -1084,6 +1090,32 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	setUTM(&upd.UTMContent, req.UTMContent)
 	setUTM(&upd.Placement, req.Placement)
 
+	// #0145: a reactivation that the filter would refuse must not save the
+	// accompanying edits. Check the effective destination (the edit if sent,
+	// otherwise the current one) BEFORE writing anything.
+	var filteredDest string
+	if req.Active != nil && *req.Active {
+		cur, gerr := h.store.GetLink(r.Context(), u.ID, key)
+		switch {
+		case gerr == nil:
+		case errors.Is(gerr, links.ErrLinkNotFound):
+			writeError(w, http.StatusNotFound, "link not found")
+			return
+		default:
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if !cur.Active {
+			filteredDest = cur.DestinationURL
+			if upd.DestinationURL != nil {
+				filteredDest = *upd.DestinationURL
+			}
+			if !h.checkReactivation(w, r, cur, filteredDest) {
+				return
+			}
+		}
+	}
+
 	link, err := h.store.UpdateLink(r.Context(), u.ID, key, upd)
 	switch {
 	case err == nil:
@@ -1102,7 +1134,139 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	// served stale either; if no cache is wired the call is skipped.
 	h.evict(key)
 
+	// #0145: the active change is applied LAST, after the field edits above, so
+	// a reactivation filters the destination as just edited.
+	if req.Active != nil {
+		if *req.Active {
+			if !link.Active && filteredDest != "" {
+				if !h.reactivate(w, r, u.ID, link, filteredDest) {
+					return
+				}
+			}
+		} else if err := h.deactivate(r, u.ID, key); err != nil {
+			if errors.Is(err, links.ErrLinkNotFound) {
+				writeError(w, http.StatusNotFound, "link not found")
+			} else {
+				writeError(w, http.StatusInternalServerError, "internal server error")
+			}
+			return
+		}
+		if link, err = h.store.GetLink(r.Context(), u.ID, key); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, toLinkView(link))
+}
+
+// checkReactivation decides whether link may be reactivated with dest as its
+// destination: a link denied at creation (denied_reason != 0) is always
+// refused, otherwise dest is run through the URL filter. On refusal it writes
+// the 422 destination_denied response (same {error, reason, label} shape as
+// Create's url_denied) and returns false. It writes nothing to the database.
+func (h *LinksHandler) checkReactivation(w http.ResponseWriter, r *http.Request, link links.Link, dest string) bool {
+	if link.DeniedReason != 0 {
+		writeDestinationDenied(w, int(link.DeniedReason))
+		return false
+	}
+	if h.rules != nil {
+		rules, err := h.rules.Rules(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return false
+		}
+		if code, _, matched := filters.Evaluate(rules, dest); matched {
+			writeDestinationDenied(w, code)
+			return false
+		}
+	}
+	return true
+}
+
+func writeDestinationDenied(w http.ResponseWriter, code int) {
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+		"error":  "destination_denied",
+		"reason": code,
+		"label":  filters.ReasonLabel(code),
+	})
+}
+
+// reactivate applies a reactivation already cleared by checkReactivation:
+// it sets active=true only if the destination is still the one that was
+// filtered (409 conflict otherwise), evicts the cache and writes
+// link.reactivated (#0145). expires_at is not changed.
+func (h *LinksHandler) reactivate(w http.ResponseWriter, r *http.Request, userID int64, link links.Link, filteredDest string) bool {
+	switch err := h.store.ReactivateLink(r.Context(), userID, link.Key, filteredDest); {
+	case err == nil:
+	case errors.Is(err, links.ErrLinkNotFound):
+		writeError(w, http.StatusNotFound, "link not found")
+		return false
+	case errors.Is(err, links.ErrLinkDenied):
+		writeDestinationDenied(w, int(link.DeniedReason))
+		return false
+	case errors.Is(err, links.ErrLinkChanged):
+		writeError(w, http.StatusConflict, "conflict")
+		return false
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return false
+	}
+	h.evict(link.Key)
+	if h.auditor != nil {
+		actor := userID
+		lid := link.ID
+		h.auditor.Record(r.Context(), audit.Entry{
+			ActorID:    &actor,
+			UserID:     &actor,
+			Action:     audit.ActionLinkReactivated,
+			TargetType: audit.TargetLink,
+			TargetID:   &lid,
+			Metadata: map[string]any{
+				"key":             link.Key,
+				"destination_url": link.DestinationURL,
+			},
+			IP: clientIP(r),
+		})
+	}
+	return true
+}
+
+// deactivate is the shared DELETE / PATCH {"active":false} path: it deactivates
+// the caller's link, evicts the redirect cache and writes link.deactivated.
+func (h *LinksHandler) deactivate(r *http.Request, userID int64, key string) error {
+	// Read the link (scoped to the caller) BEFORE deactivating so the audit
+	// metadata carries its id and destination_url. A miss here only weakens the
+	// audit entry; the deactivation below still runs and returns the right status.
+	existing, existingErr := h.store.GetLink(r.Context(), userID, key)
+
+	if err := h.store.DeactivateLink(r.Context(), userID, key); err != nil {
+		return err
+	}
+
+	// PRD: explicit cache key deletion so the next redirect re-reads the (now
+	// inactive) DB row and 404s. Skipped when no cache is wired.
+	h.evict(key)
+
+	// #0025 audit: link.deactivated for the user with {key, destination_url}. The
+	// row is already deactivated, so this is fire-and-forget.
+	if h.auditor != nil && existingErr == nil {
+		actor := userID
+		lid := existing.ID
+		h.auditor.Record(r.Context(), audit.Entry{
+			ActorID:    &actor,
+			UserID:     &actor,
+			Action:     audit.ActionLinkDeactivated,
+			TargetType: audit.TargetLink,
+			TargetID:   &lid,
+			Metadata: map[string]any{
+				"key":             existing.Key,
+				"destination_url": existing.DestinationURL,
+			},
+			IP: clientIP(r),
+		})
+	}
+	return nil
 }
 
 // Delete handles DELETE /api/links/{key}. Per the PRD, DELETE deactivates the
@@ -1124,12 +1288,7 @@ func (h *LinksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the link (scoped to the caller) BEFORE deactivating so the audit
-	// metadata carries its id and destination_url. A miss here only weakens the
-	// audit entry; the deactivation below still runs and returns the right status.
-	existing, existingErr := h.store.GetLink(r.Context(), u.ID, key)
-
-	err := h.store.DeactivateLink(r.Context(), u.ID, key)
+	err := h.deactivate(r, u.ID, key)
 	switch {
 	case err == nil:
 		// fall through.
@@ -1139,30 +1298,6 @@ func (h *LinksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
-	}
-
-	// PRD: explicit cache key deletion on DELETE /api/links/{key} so the next
-	// redirect re-reads the (now inactive) DB row and 404s. Skipped when no cache
-	// is wired.
-	h.evict(key)
-
-	// #0025 audit: link.deactivated for u.ID with {key, destination_url}. The row
-	// is already deactivated, so this is fire-and-forget.
-	if h.auditor != nil && existingErr == nil {
-		actor := u.ID
-		lid := existing.ID
-		h.auditor.Record(r.Context(), audit.Entry{
-			ActorID:    &actor,
-			UserID:     &actor,
-			Action:     audit.ActionLinkDeactivated,
-			TargetType: audit.TargetLink,
-			TargetID:   &lid,
-			Metadata: map[string]any{
-				"key":             existing.Key,
-				"destination_url": existing.DestinationURL,
-			},
-			IP: clientIP(r),
-		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Link deactivated"})

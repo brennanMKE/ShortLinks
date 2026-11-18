@@ -160,6 +160,43 @@ supports every parameter except click counts: it records no clicks, so
 
 ---
 
+## Deactivating and reactivating — `PATCH /api/links/{key}` (#0145)
+
+`PATCH` accepts `"active": true|false` alongside the other editable fields.
+
+- **`false`** is exactly `DELETE /api/links/{key}`: same code path, a
+  `link.deactivated` audit entry, and the redirect-cache entry evicted.
+- **`true`** reactivates. The URL filter is re-run against the link's current
+  destination, because rules may have changed since the link was made. On a
+  match the response is `422 {"error":"destination_denied","reason":<code>,"label":<label>}`
+  and the link stays inactive. On success the cache entry is evicted (so
+  `/u/{key}` works immediately) and a `link.reactivated` audit entry is written.
+- Reactivating an already-active link is a `200` no-op with no audit entry.
+- Read-only API tokens get `403 api_token_read_only`, as for any write.
+- **Order:** field edits (title, destination, expiry, UTM, placement) are
+  applied first, then the `active` change. For a reactivation of an inactive
+  link the filter check runs BEFORE anything is written, against the effective
+  destination (the edit if sent, otherwise the current one). A refused
+  `{"destination_url": ..., "active": true}` is a `422` that saves nothing: the
+  old destination stays and the link remains inactive.
+- **Race:** the final `UPDATE` also requires the destination to still be the
+  one that was filtered. If it changed in between, the response is
+  `409 {"error":"conflict"}`; retry.
+- **Duplicates:** reactivation does not check for duplicates, so a user can end
+  up with two active links to the same URL.
+- **Repeats:** repeating `active:false` writes another `link.deactivated`
+  entry (same as repeating `DELETE`); repeating `active:true` on an active link
+  writes nothing.
+- **Links denied at creation** (`denied_reason != 0`) are never reactivated,
+  even if no rule matches today: they get the same 422 with their original
+  reason. They are not part of dedup and were refused by policy; create a new
+  link instead (which is filtered afresh).
+- **Expiry:** reactivation does not change `expires_at`. An expired link that is
+  reactivated is active but still expired (redirects keep returning the expired
+  response) until `expires_at` is edited or cleared.
+- Note that `PATCH` of a changed destination alone still does not run the filter
+  ([#0109](../issues/0109.md)); only reactivation does.
+
 ## Redirect path — `GET /u/{key}`
 
 Handler: `internal/handlers/redirect.go` `RedirectHandler.ServeHTTP`.
@@ -258,7 +295,7 @@ calls `cache.Delete(key)` (via `h.evict`) immediately after:
 
 - **`DELETE /api/links/{key}`** (deactivation) — evict so the next redirect
   sees `active=false` and returns `404`.
-- **`PATCH /api/links/{key}`** (update) — evict so a changed destination URL
+- **`PATCH /api/links/{key}`** (update, including `active` true/false) — evict so a changed destination URL
   or expiry is reflected immediately rather than waiting for the TTL.
 
 `Cache.Delete` calls `ristretto.Cache.Del`. Because Ristretto's writes

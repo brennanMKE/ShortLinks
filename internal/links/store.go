@@ -18,6 +18,14 @@ import (
 // to another.
 var ErrLinkNotFound = errors.New("links: link not found")
 
+// ErrLinkChanged is returned by ReactivateLink when the link's destination is
+// no longer the one the caller filtered (a concurrent edit).
+var ErrLinkChanged = errors.New("links: link destination changed")
+
+// ErrLinkDenied is returned by ReactivateLink for a link that was denied by the
+// URL filter at creation (denied_reason != 0); such links are never reactivated.
+var ErrLinkDenied = errors.New("links: link was denied by the URL filter")
+
 // ErrKeyTaken is returned by CreateLink when a user-supplied custom alias is
 // already in use by any link (across all users — the key column is globally
 // UNIQUE). Custom aliases are never deduplicated, so a clash is a hard conflict
@@ -922,6 +930,33 @@ func (s *Store) DeactivateLink(ctx context.Context, userID int64, key string) er
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrLinkNotFound
+	}
+	return nil
+}
+
+// ReactivateLink sets active = TRUE on the user's own link (#0145). It refuses
+// a filter-denied row (denied_reason != 0): those are never reactivated, so
+// ErrLinkDenied is returned. Scoped to userID (ErrLinkNotFound otherwise).
+// It also requires destination_url = expectedDest (the destination the caller
+// filtered), returning ErrLinkChanged on a mismatch. expires_at is left untouched. Redirect-cache eviction is the handler's job.
+func (s *Store) ReactivateLink(ctx context.Context, userID int64, key, expectedDest string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE links SET active = TRUE WHERE user_id = $1 AND key = $2 AND denied_reason = 0 AND destination_url = $3`,
+		userID, key, expectedDest,
+	)
+	if err != nil {
+		return fmt.Errorf("links: reactivating link: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Distinguish a denied row from a missing one.
+		l, gerr := s.GetLink(ctx, userID, key)
+		if gerr != nil {
+			return gerr
+		}
+		if l.DeniedReason != 0 {
+			return ErrLinkDenied
+		}
+		return ErrLinkChanged
 	}
 	return nil
 }

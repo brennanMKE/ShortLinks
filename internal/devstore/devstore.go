@@ -1219,6 +1219,26 @@ func (s *Store) DeactivateLink(_ context.Context, userID int64, key string) erro
 	return links.ErrLinkNotFound
 }
 
+// ReactivateLink sets active=true on the user's own link, refusing a
+// filter-denied one (links.ErrLinkDenied). expires_at is untouched.
+func (s *Store) ReactivateLink(_ context.Context, userID int64, key, expectedDest string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, l := range s.links {
+		if l.UserID == userID && l.Key == key {
+			if l.DeniedReason != 0 {
+				return links.ErrLinkDenied
+			}
+			if l.DestinationURL != expectedDest {
+				return links.ErrLinkChanged
+			}
+			s.links[i].Active = true
+			return nil
+		}
+	}
+	return links.ErrLinkNotFound
+}
+
 // ── LinkResolver (handlers.RedirectHandler) ──────────────────────────────────
 
 // ResolveByKey looks up a link by key for the redirect handler. Not user-scoped.

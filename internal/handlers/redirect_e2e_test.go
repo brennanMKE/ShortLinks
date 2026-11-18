@@ -11,9 +11,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/brennanMKE/ShortLinks/internal/auth"
 	"github.com/brennanMKE/ShortLinks/internal/cache"
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
 	"github.com/brennanMKE/ShortLinks/internal/links"
+	"github.com/brennanMKE/ShortLinks/internal/middleware"
 )
 
 // redirectE2EMux wires the REAL resolver (cache→DB) and the REAL clicks recorder
@@ -25,6 +27,13 @@ func redirectE2EMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 		t.Fatalf("cache: %v", err)
 	}
 	t.Cleanup(c.Close)
+	return redirectE2EMuxWithCache(t, pool, c)
+}
+
+// redirectE2EMuxWithCache is redirectE2EMux over a caller-supplied cache, so a
+// test can share it with a LinksHandler and observe eviction.
+func redirectE2EMuxWithCache(t *testing.T, pool *pgxpool.Pool, c *cache.Cache) http.Handler {
+	t.Helper()
 	resolver := links.NewResolver(c, links.NewStore(pool))
 	recorder := clicks.NewRecorder(pool, nil, nil)
 	h := NewRedirectHandler(resolver, NewClickRecorder(recorder))
@@ -226,4 +235,50 @@ func bucketCount(buckets []clicks.Bucket, value string) int64 {
 		}
 	}
 	return -1
+}
+
+// TestRedirectE2E_ActiveToggleEvictsCache proves PATCH active:false/true evicts
+// the shared redirect cache: the redirect flips 302 -> 404 -> 302 immediately.
+func TestRedirectE2E_ActiveToggleEvictsCache(t *testing.T) {
+	pool := filterTestPool(t)
+	c, err := cache.New(100, time.Minute)
+	if err != nil {
+		t.Fatalf("cache: %v", err)
+	}
+	t.Cleanup(c.Close)
+
+	authStore := auth.NewStore(pool)
+	lh := NewLinksHandler(links.NewStore(pool), c, newFilterRuleCache(pool), nil, nil, nil, nil, testBaseURL)
+	guard := middleware.RequireSessionOrAPIToken(authStore, authStore, middleware.APITokenLimits{})
+	mux := http.NewServeMux()
+	mux.Handle("PATCH /api/links/{key}", guard(http.HandlerFunc(lh.Patch)))
+	mux.Handle("GET /u/{key}", redirectE2EMuxWithCache(t, pool, c))
+
+	alice := seedUser(t, pool, "alice@example.com")
+	tok := mintToken(t, pool, alice, "rw", false)
+	seedLink(t, pool, alice, "k", "https://example.com/")
+
+	status := func() int {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/u/k", nil))
+		c.Wait()
+		return rec.Code
+	}
+	if got := status(); got != http.StatusFound {
+		t.Fatalf("initial /u/k = %d, want 302", got)
+	}
+	if rec := patchActive(t, mux, "k", tok, `{"active":false}`); rec.Code != 200 {
+		t.Fatalf("deactivate = %d", rec.Code)
+	}
+	c.Wait()
+	if got := status(); got != http.StatusNotFound {
+		t.Fatalf("after deactivate /u/k = %d, want 404", got)
+	}
+	if rec := patchActive(t, mux, "k", tok, `{"active":true}`); rec.Code != 200 {
+		t.Fatalf("reactivate = %d", rec.Code)
+	}
+	c.Wait()
+	if got := status(); got != http.StatusFound {
+		t.Fatalf("after reactivate /u/k = %d, want 302", got)
+	}
 }

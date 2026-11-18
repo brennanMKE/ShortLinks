@@ -122,6 +122,28 @@ func TestDeactivateLink(t *testing.T) {
 	}
 }
 
+func TestReactivateLink(t *testing.T) {
+	s := devstore.New("")
+	ctx := context.Background()
+
+	l0, _ := s.GetLink(ctx, 1, "wiki")
+	if err := s.DeactivateLink(ctx, 1, "wiki"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReactivateLink(ctx, 1, "wiki", "https://changed.example"); !errors.Is(err, links.ErrLinkChanged) {
+		t.Errorf("mismatch err = %v, want ErrLinkChanged", err)
+	}
+	if err := s.ReactivateLink(ctx, 1, "wiki", l0.DestinationURL); err != nil {
+		t.Fatalf("ReactivateLink: %v", err)
+	}
+	if l, _ := s.GetLink(ctx, 1, "wiki"); !l.Active {
+		t.Error("link should be active after ReactivateLink")
+	}
+	if err := s.ReactivateLink(ctx, 1, "nope", "x"); !errors.Is(err, links.ErrLinkNotFound) {
+		t.Errorf("missing key err = %v, want ErrLinkNotFound", err)
+	}
+}
+
 func TestSettings(t *testing.T) {
 	s := devstore.New("")
 	ctx := context.Background()
