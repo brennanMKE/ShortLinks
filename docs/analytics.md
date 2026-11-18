@@ -565,6 +565,80 @@ No extra parameters. `limit` (default 50) caps the values in each facet.
   that cutoff, and `highlights` says so; a current window that starts before
   it gets a highlight that the figure undercounts.
 
+### Content grouping (#0140)
+
+One piece of content is often shared as several links (one per platform or
+campaign). `internal/reports/content.go` groups them in Go with pure functions:
+
+- `ContentKey(destination)`: the destination with the scheme, every `utm_*`
+  parameter (any case), the fragment and any trailing slash removed and the
+  host lower-cased, e.g. `www.opencircuitsf.com/guides/measuring-current`.
+  Default ports (`:443` on https, `:80` on http) are dropped. Other query
+  parameters are kept, sorted by name, since they can select different
+  content. An opaque URL such as `mailto:` is returned trimmed and unchanged. Two links share a group if and only if their keys match.
+  `ContentPath` gives the display path (`/guides/measuring-current`, `/` for
+  the root).
+- `LinkLabel(title, utmSource)` cuts the title at its last ` — `, ` – `, ` | `
+  or ` - ` when the **whole tail** is channel tokens, matched as whole words,
+  case-insensitively: a platform word (mastodon, bluesky, instagram, facebook,
+  threads, x, twitter, linkedin, newsletter, email, poster, flyer, qr), the
+  link's own `utm_source`, a channel word (guide, post, posts, flyer, poster,
+  qr, newsletter, link, story, reel, thread, issue, edition), a number, `#`,
+  `No.` or a month name; at least one must be a platform/source or channel
+  word. So "- Poster QR 3" and "— November newsletter" are cut but "- Threads
+  in Go" and "- Email marketing for makers" are not. (This is stricter than the
+  original issue text, which cut on any tail that started with a platform word
+  or contained post/flyer/...; that mis-cut real titles.) It returns the head
+  and the tail, the link's `label`, and uses only the link's own fields, so
+  labels and titles never depend on the window or filters.
+- `ContentTitle(members, destination)`: the most common non-empty head across a
+  group's links (ties go to the lexically smaller head). With no head left it
+  uses the last path segment, dashes and underscores turned into spaces, then
+  the host.
+
+Grouping runs on per-link counts: SQL aggregates counted clicks per link and
+click `utm_source` (current and previous window, at most 20,000 rows each,
+busiest first; when a cap is hit `data.truncated` is `true` and a highlight
+says counts may be incomplete), then Go groups by key. Previous-window counts are summed per
+group and per link; `previous_clicks` and `change_pct` are `null` when there is
+no previous window, and `change_pct` is also `null` when the previous count is
+zero. `change_pct` is rounded to one decimal.
+
+### `top-content`
+
+Extra parameter `sort`: `clicks` (default), `change` (clicks minus previous
+clicks, largest first) or `newest` (newest link in the group first). `limit`
+defaults to 10 and caps `groups`; `total_groups` counts all of them. A group
+appears when at least one member had a counted click in the window, or with
+`sort=newest`, which lists every link's group (zero-click ones too; the click
+filters still apply to the counts, not to which links are listed).
+
+```json
+"data": {"groups": [{
+  "content_key": "www.opencircuitsf.com/guides/measuring-current",
+  "title": "Measuring current without blowing the fuse",
+  "path": "/guides/measuring-current",
+  "clicks": 164, "previous_clicks": 150, "change_pct": 9.3,
+  "by_source": [{"value": "mastodon", "clicks": 90}, {"value": "bluesky", "clicks": 52}, {"value": "~none", "clicks": 22}],
+  "links": [{"key": "HaQRwV", "label": "Mastodon guide post 84", "utm_source": "mastodon", "utm_medium": "social", "campaign_slug": "guides-2026-11", "clicks": 90}]
+}], "total_groups": 23}
+```
+
+`by_source` uses the clicks' own `utm_source`. `highlights` names the top
+content, the source with the biggest share of its clicks across all its links and how many links it
+is shared as.
+
+### `top-links`
+
+Extra parameter `sort` as above; `limit` defaults to 20, `total_links` counts
+every matching link. Each row has `key`, `short_url` (built from `BASE_URL`),
+`title`, `label`, `content_key`, `content_title`, `destination`,
+`campaign_slug`, `utm_source`/`utm_medium`/`utm_campaign`/`utm_content`/
+`utm_term` and `placement` (the link's own fields), `active`, `created_at`,
+`clicks`, `previous_clicks` and `change_pct`. `highlights` names the top link
+and the source with the biggest share of clicks across all matching links (not
+only the listed rows).
+
 ### Adding a report
 
 Register a `reports.Report` in `NewDefaultRegistry`:

@@ -60,6 +60,8 @@ type Request struct {
 	Windows ResolvedWindows
 	Now     time.Time
 	Q       Querier
+	// BaseURL is the deployment's public base URL, for building short URLs.
+	BaseURL string
 }
 
 // IntParam reads a report-specific integer parameter in [min, max].
@@ -191,6 +193,8 @@ func (r *Registry) Catalogue() Catalogue {
 func NewDefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register(overviewReport)
+	r.Register(topContentReport)
+	r.Register(topLinksReport)
 	return r
 }
 
@@ -244,6 +248,7 @@ type Service struct {
 	Pool      *pgxpool.Pool
 	Registry  *Registry
 	DefaultTZ string
+	BaseURL   string           // BASE_URL; used for short_url fields
 	Now       func() time.Time // nil means time.Now
 }
 
@@ -293,7 +298,7 @@ func (s *Service) Run(ctx context.Context, userID int64, name string, raw url.Va
 	}
 	wins := ResolveWindows(p, now, earliest)
 
-	req := &Request{UserID: userID, Params: p, Raw: raw, Windows: wins, Now: now, Q: tx}
+	req := &Request{UserID: userID, Params: p, Raw: raw, Windows: wins, Now: now, Q: tx, BaseURL: s.BaseURL}
 	if rep.Windows != nil {
 		if wins, err = rep.Windows(ctx, req); err != nil {
 			return nil, err

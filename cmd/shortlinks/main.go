@@ -200,7 +200,9 @@ func servePostgres(cfg *config.Config) error {
 	// Analytics reports (#0139): GET /api/reports and /api/reports/{name},
 	// scoped to the caller's links, days bucketed in DEFAULT_TIMEZONE unless a
 	// request supplies tz.
-	reportsH := handlers.NewReportsHandler(reports.NewService(pool, cfg.DefaultTimezone))
+	reportsSvc := reports.NewService(pool, cfg.DefaultTimezone)
+	reportsSvc.BaseURL = cfg.BaseURL
+	reportsH := handlers.NewReportsHandler(reportsSvc)
 
 	// Current user profile (#0027): GET /api/me returns {id, email, is_admin}
 	// read straight off the RequireSession-attached context, so the Svelte SPA
