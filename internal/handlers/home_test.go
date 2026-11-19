@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/brennanMKE/ShortLinks/internal/auth"
@@ -16,12 +18,24 @@ type fakeHomeReader struct {
 	enabledErr error
 	url        string
 	urlErr     error
+	// extra overrides per-key values for the #0174 settings; a key absent from
+	// the map falls through to url/urlErr (the behaviour #0125 tested).
+	extra map[string]string
 }
 
 func (f fakeHomeReader) RegistrationsEnabled(context.Context) (bool, error) {
 	return f.enabled, f.enabledErr
 }
-func (f fakeHomeReader) GetSetting(context.Context, string) (string, error) {
+func (f fakeHomeReader) GetSetting(_ context.Context, key string) (string, error) {
+	if key != settingHomeRedirectURL {
+		if v, ok := f.extra[key]; ok {
+			return v, nil
+		}
+		if f.urlErr != nil && !errors.Is(f.urlErr, auth.ErrSettingNotFound) {
+			return "", f.urlErr
+		}
+		return "", auth.ErrSettingNotFound
+	}
 	return f.url, f.urlErr
 }
 
@@ -35,7 +49,7 @@ func serveHome(f fakeHomeReader) *httptest.ResponseRecorder {
 	return rec
 }
 
-func TestHomeHandler_TwoKeysNoStoreNoAuth(t *testing.T) {
+func TestHomeHandler_ExactKeysNoStoreNoAuth(t *testing.T) {
 	rec := serveHome(fakeHomeReader{enabled: false, url: "https://www.example.com/"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -47,11 +61,48 @@ func TestHomeHandler_TwoKeysNoStoreNoAuth(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(m) != 2 {
-		t.Errorf("keys = %v, want exactly 2", m)
+	// The key set is pinned: nothing else from settings may leak. No activity
+	// key outside activity mode (#0175).
+	want := []string{"about", "hero", "mode", "redirect_url", "registrations_enabled", "title"}
+	var got []string
+	for k := range m {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("keys = %v, want %v", got, want)
 	}
 	if m["redirect_url"] != "https://www.example.com/" || m["registrations_enabled"] != false {
 		t.Errorf("body = %v", m)
+	}
+	// Unset home settings: default mode, empty text, no hero.
+	if m["mode"] != "default" || m["title"] != "" || m["about"] != "" {
+		t.Errorf("home content = %v, want default/empty/empty", m)
+	}
+	if v, ok := m["hero"]; !ok || v != nil {
+		t.Errorf("hero = %v (present=%v), want null", v, ok)
+	}
+}
+
+func TestHomeHandler_ReturnsConfiguredContent(t *testing.T) {
+	rec := serveHome(fakeHomeReader{enabled: true, extra: map[string]string{
+		"home_mode": "activity", "home_title": "Maker links", "home_about": "Hello\n\nhttps://example.org",
+	}})
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if m["mode"] != "activity" || m["title"] != "Maker links" || m["about"] != "Hello\n\nhttps://example.org" {
+		t.Errorf("body = %v", m)
+	}
+}
+
+func TestHomeHandler_UnknownStoredModeFallsBackToDefault(t *testing.T) {
+	rec := serveHome(fakeHomeReader{extra: map[string]string{"home_mode": "bogus"}})
+	var m map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &m)
+	if m["mode"] != "default" {
+		t.Errorf("mode = %v, want default", m["mode"])
 	}
 }
 

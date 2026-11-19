@@ -64,7 +64,8 @@ func resetSettings(t *testing.T, pool *pgxpool.Pool) {
 	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO settings (key, value, updated_at)
-		 VALUES ('registrations_enabled', 'false', now()), ('home_redirect_url', '', now())`); err != nil {
+		 VALUES ('registrations_enabled', 'false', now()), ('home_redirect_url', '', now()),
+		        ('home_mode', 'default', now()), ('home_title', '', now()), ('home_about', '', now())`); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
 }
@@ -243,6 +244,14 @@ func TestAdminSettings_GetReturnsSeeded(t *testing.T) {
 	}
 	if v, ok := settings["home_redirect_url"]; !ok || v != "" {
 		t.Errorf("home_redirect_url = %q (present=%v), want empty seed", v, ok)
+	}
+	if v, ok := settings["home_mode"]; !ok || v != "default" {
+		t.Errorf("home_mode = %q (present=%v), want default seed", v, ok)
+	}
+	for _, k := range []string{"home_title", "home_about"} {
+		if v, ok := settings[k]; !ok || v != "" {
+			t.Errorf("%s = %q (present=%v), want empty seed", k, v, ok)
+		}
 	}
 }
 

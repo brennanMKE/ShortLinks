@@ -384,6 +384,9 @@ Rows are seeded by migrations 6 and 16.
 |---|---|---|
 | `registrations_enabled` | `'false'` | Gate controlling whether new user registration is open. Defaults closed; admin toggles it via **Admin → Settings**. |
 | `home_redirect_url` | `''` | The signed-out home page's primary URL (`000016_seed_home_redirect_url`, #0125). Empty means unset: visitors get the sign-in screen. There is no default; each operator sets their own (e.g. `https://www.example.com/`) via **Admin → Settings → Primary URL**. The down migration deletes the row. |
+| `home_mode` | `'default'` | What the signed-out home page shows: `default`, `about` or `activity` (`000021_seed_home_page_settings`, #0174). The down migration deletes the three `home_*` rows it added. |
+| `home_title` | `''` | Public page title, at most 80 characters. Empty falls back to the instance host. |
+| `home_about` | `''` | Public about text, plain text, at most 2,000 characters. |
 
 The migration inserts this row with `ON CONFLICT DO NOTHING` so re-running
 migrations on an existing database does not overwrite an admin's setting.

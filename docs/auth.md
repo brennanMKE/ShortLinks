@@ -203,7 +203,7 @@ which middleware each route group carries.
 | `GET /auth/recover/verify` | Verify recovery token |
 | `POST /auth/recover/finish` | Complete recovery, issue session |
 | `GET /` (catch-all) | Svelte SPA static assets |
-| `GET /api/public/home` | Signed-out home info (#0125): `{"redirect_url":"…","registrations_enabled":bool}`, nothing else; `Cache-Control: no-store` |
+| `GET /api/public/home` | Signed-out home info (#0125, #0174): `redirect_url`, `registrations_enabled`, `mode`, `title`, `about`, `hero`, nothing else; `Cache-Control: no-store` |
 
 **Authenticated (RequireSession)**
 
@@ -302,6 +302,17 @@ which returns an error whose message is the `400` body:
   `home_redirect_url must not point at this instance`. Example:
   `https://www.example.com/` on an instance at `https://go.example.com`.
 
+- `home_mode` (#0174) — what the signed-out home page shows: `default`,
+  `about` or `activity`. Anything else is `400 home_mode must be one of
+  default, about, activity`.
+- `home_title` (#0174) — plain text, at most 80 characters (counted as
+  characters, not bytes), no control characters or newlines. Empty means the
+  page falls back to the instance host.
+- `home_about` (#0174) — plain text, at most 2,000 characters, no control
+  characters except newlines. Blank lines separate paragraphs and bare
+  `https://` URLs are linked by the page (escape first, link second). No HTML
+  or Markdown.
+
 Unknown keys return `400` (the store's `ErrSettingNotFound`); arbitrary key
 creation is forbidden.
 
@@ -310,17 +321,38 @@ recording `{key, old_value, new_value}` and the acting admin's `actor_id` and
 IP address. A primary URL change appears as `settings.updated` with
 `key=home_redirect_url`.
 
-#### Public home info (`GET /api/public/home`)
+#### Public home page modes and `GET /api/public/home`
+
+`home_mode` picks what a signed-out visitor at `/` sees. The modes, in order of
+how much they show:
+
+| Mode | Behaviour |
+|---|---|
+| `default` | Today's behaviour (#0125): the sign-in screen, or the redirect page when registration is closed and `home_redirect_url` is set. `home_redirect_url` applies **only** in this mode. |
+| `about` | A public page with the hero image if set (#0176), the title, the about text, **Sign in**, and **Register** when `registrations_enabled`. |
+| `activity` | Everything in `about`, plus the site-wide 7-day activity summary (#0175). |
+
+Precedence: `home_mode` decides first; `home_redirect_url` is ignored unless the
+mode is `default`. A stored mode that is not one of the three is served as
+`default`. Deep links and `/#/login` are unaffected by every mode.
 
 `HomeHandler` (`internal/handlers/home.go`) is deliberately **unauthenticated**
 (mounted without `requireAPI`): the SPA calls it before anyone signs in, to
-decide whether to show the signed-out home page and whether Login offers
-Register. The body has exactly two keys, `redirect_url` and
-`registrations_enabled`; no other setting is exposed. It reads fresh on every
-request and sends `Cache-Control: no-store`. A missing `home_redirect_url` row
-(database not yet migrated) is treated as `""`. `/admin/settings` stays
-admin-only. The server-side registration gate in `/auth/register/start` is
-unchanged; hiding Register on Login is UX only.
+decide what to show and whether Login offers Register. The body has exactly
+these keys and no other setting is exposed (a handler test pins the set):
+
+```json
+{"redirect_url":"","registrations_enabled":false,
+ "mode":"default","title":"","about":"","hero":null}
+```
+
+`hero` is `null` until #0176 stores an image, then
+`{"url","alt","width","height"}`. #0175 adds an `activity` object, present only
+when `mode` is `activity`. The handler reads fresh on every request and sends
+`Cache-Control: no-store`. Missing setting rows (database not yet migrated) are
+treated as unset. `/admin/settings` stays admin-only. The server-side
+registration gate in `/auth/register/start` is unchanged; hiding Register is UX
+only.
 
 ---
 

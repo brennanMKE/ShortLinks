@@ -135,6 +135,9 @@ func New(adminEmail string) *Store {
 	s.settings = []auth.Setting{
 		{Key: "registrations_enabled", Value: "true"},
 		{Key: "home_redirect_url", Value: ""},
+		{Key: "home_mode", Value: "default"},
+		{Key: "home_title", Value: ""},
+		{Key: "home_about", Value: ""},
 	}
 
 	logger.Info("devstore: seeded in-memory store", "admin_email", adminEmail, "links", len(s.links))

@@ -141,3 +141,11 @@ the process environment and the local `.env` file.
 invalidates all active sessions, requiring users to sign in again. It also
 changes the click-IP hashing key, which only means hashes from before and
 after the change are not comparable; analytics are unaffected.
+
+## Public home page settings (#0174)
+
+These live in the `settings` table and are edited by an admin, not set through
+environment variables. `home_mode` (`default`, `about`, `activity`), `home_title`
+and `home_about` choose what signed-out visitors see at `/`; `home_redirect_url`
+applies only in `default` mode. Modes, validation and the public
+`GET /api/public/home` body are described in [auth.md](auth.md#public-home-page-modes-and-get-apipublichome).

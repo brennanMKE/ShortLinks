@@ -106,8 +106,9 @@ paths:
       operationId: getPublicHome
       summary: Signed-out home page information
       description: |
-        Needs no credentials. Exposes only whether registrations are open and
-        the optional redirect for the site root.
+        Needs no credentials. Exposes only whether registrations are open, the
+        optional redirect for the site root, and the public home page content
+        (`mode`, `title`, `about`, `hero`). No other setting is returned.
       security: []
       responses:
         "200":
@@ -1155,10 +1156,27 @@ components:
             read_only: { type: boolean }
     PublicHome:
       type: object
-      required: [redirect_url, registrations_enabled]
+      required: [redirect_url, registrations_enabled, mode, title, about, hero]
       properties:
-        redirect_url: { type: string, description: Where the site root redirects, or empty. }
+        redirect_url: { type: string, description: Where the site root redirects, or empty. Applies only in `default` mode. }
         registrations_enabled: { type: boolean }
+        mode:
+          type: string
+          enum: [default, about, activity]
+          description: What the signed-out home page shows.
+        title: { type: string, description: "Page title, at most 80 characters; empty means use the instance host." }
+        about: { type: string, description: "Plain text, at most 2,000 characters. Blank lines separate paragraphs." }
+        hero:
+          description: The hero image, or null when none is set.
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [url, alt, width, height]
+              properties:
+                url: { type: string }
+                alt: { type: string }
+                width: { type: integer }
+                height: { type: integer }
     Link:
       type: object
       required:

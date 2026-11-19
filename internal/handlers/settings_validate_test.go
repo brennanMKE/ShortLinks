@@ -39,6 +39,18 @@ func TestValidateSettingValue(t *testing.T) {
 		{"home_redirect_url", "https://GO.EXAMPLE.COM/anything"},
 		{"home_redirect_url", "http://go.example.com:8080/"},
 		{"home_redirect_url", "https://go.example.com./"}, // trailing-dot FQDN is the same host
+		{"home_mode", ""},
+		{"home_mode", "Activity"},
+		{"home_mode", "hero"},
+		{"home_title", strings.Repeat("é", 81)},
+		{"home_title", "two\nlines"},
+		{"home_title", "tab\there"},
+		{"home_title", "nul\x00"},
+		{"home_about", strings.Repeat("a", 2001)},
+		{"home_about", "bell\x07"},
+		{"home_about", "tab\there"},
+		{"home_about", "del\x7f"},
+		{"home_about", "c1\u0085"},
 	}
 	for _, c := range bad {
 		if err := validateSettingValue(c.key, c.value, base); err == nil {

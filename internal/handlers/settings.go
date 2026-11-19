@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/auth"
@@ -191,9 +193,55 @@ func validateSettingValue(key, value, baseURL string) error {
 		return errors.New("invalid value")
 	case settingHomeRedirectURL:
 		return validHomeRedirectURL(value, baseURL)
+	case settingHomeMode:
+		return validHomeMode(value)
+	case settingHomeTitle:
+		return validHomeText(settingHomeTitle, value, maxHomeTitleLen, false)
+	case settingHomeAbout:
+		return validHomeText(settingHomeAbout, value, maxHomeAboutLen, true)
 	default:
 		return nil
 	}
+}
+
+// Public home page settings (#0174).
+const (
+	settingHomeMode  = "home_mode"
+	settingHomeTitle = "home_title"
+	settingHomeAbout = "home_about"
+
+	homeModeDefault  = "default"
+	homeModeAbout    = "about"
+	homeModeActivity = "activity"
+
+	maxHomeTitleLen = 80
+	maxHomeAboutLen = 2000
+)
+
+// validHomeMode accepts exactly default, about or activity.
+func validHomeMode(value string) error {
+	switch value {
+	case homeModeDefault, homeModeAbout, homeModeActivity:
+		return nil
+	}
+	return fmt.Errorf("%s must be one of default, about, activity", settingHomeMode)
+}
+
+// validHomeText bounds a free-text home page setting by characters (not bytes)
+// and rejects control characters. Newlines are allowed only when multiline.
+func validHomeText(key, value string, max int, multiline bool) error {
+	if utf8.RuneCountInString(value) > max {
+		return fmt.Errorf("%s must be at most %d characters", key, max)
+	}
+	for _, r := range value {
+		if multiline && (r == '\n' || r == '\r') {
+			continue
+		}
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%s must not contain control characters", key)
+		}
+	}
+	return nil
 }
 
 // validHomeRedirectURL checks the primary URL rules (#0125). Empty clears it.
