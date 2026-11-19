@@ -36,6 +36,8 @@
     color: var(--text);
     cursor: pointer;
     user-select: none;
+    white-space: nowrap;
+    flex: none;
   }
   .btn:hover:not(:disabled) { background: var(--bg-header); }
   .btn:active:not(:disabled) { background: var(--border); }

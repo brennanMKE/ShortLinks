@@ -94,11 +94,12 @@
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
           Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-  --fs-sm:   12px;
-  --fs-base: 13px;
+  --fs-sm:   12.5px;
+  --fs-base: 14px;
   --fs-md:   15px;
   --fs-lg:   18px;
   --fs-xl:   22px;
+  --fs-title: 20px;   /* page title (#0155) */
   --lh:      1.45;
 
   /* Shape */
@@ -292,14 +293,14 @@ table {
 
 thead th {
   text-align: left;
-  background: var(--bg-header);
+  background: transparent;
   color: var(--text-muted);
   font-weight: 600;
   font-size: var(--fs-sm);
   text-transform: uppercase;
   letter-spacing: 0.03em;
   padding: var(--space-2) var(--space-3);
-  border-bottom: var(--border-w) solid var(--border);
+  border-bottom: var(--border-w) solid var(--border-strong);
 }
 
 tbody td {
@@ -351,6 +352,35 @@ tbody tr:last-child td { border-bottom: none; }
   color: var(--text-muted);
 }
 
+/* Page title (#0155): 20px, one per view. */
+.page-title {
+  font-size: var(--fs-title);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 0;
+}
+
+/*
+ * Status tags (#0155, docs/ui-redesign.md principle 8): shown ONLY for
+ * abnormal states (inactive, denied). A normal row carries no tag at all.
+ */
+.tag {
+  display: inline-block;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  border: var(--border-w) solid var(--border);
+  white-space: nowrap;
+}
+.tag-denied {
+  background: var(--danger-subtle);
+  color: var(--danger);
+  border-color: transparent;
+}
+
 /* Screenreader-only */
 .sr-only {
   position: absolute;
@@ -377,6 +407,9 @@ tbody tr:last-child td { border-bottom: none; }
  * scrolling on iOS Safari.
  */
 .table-scroll {
+  /* position: relative so absolutely-positioned .sr-only cells (e.g. a hidden
+     "Actions" header) are clipped here instead of widening the page (#0103). */
+  position: relative;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
