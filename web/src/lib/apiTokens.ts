@@ -89,6 +89,37 @@ export function sortTokens(tokens: ApiToken[]): ApiToken[] {
   return [...tokens].sort((a, b) => rank[a.status] - rank[b.status]);
 }
 
+/** A token whose expiry is this many days away (or fewer) gets a warning tag (#0170). */
+export const EXPIRY_WARNING_DAYS = 14;
+
+/**
+ * Days until an active token expires, rounded up, or null when it never
+ * expires / is not active. 0 means it is already inside its last moments.
+ */
+export function daysUntilExpiry(token: ApiToken, now: Date = new Date()): number | null {
+  if (token.status !== 'active' || token.expires_at === null) return null;
+  const ms = new Date(token.expires_at).getTime() - now.getTime();
+  if (Number.isNaN(ms)) return null;
+  return Math.max(0, Math.ceil(ms / 86_400_000));
+}
+
+/** Warning copy ("Expires in 12 days") when expiry is within 14 days, else null. */
+export function expiryWarning(token: ApiToken, now: Date = new Date()): string | null {
+  const d = daysUntilExpiry(token, now);
+  if (d === null || d > EXPIRY_WARNING_DAYS) return null;
+  if (d <= 1) return 'Expires within a day';
+  return `Expires in ${d} days`;
+}
+
+/** Split into tokens still usable and revoked/expired ones (for the disclosure). */
+export function splitTokens(tokens: ApiToken[]): { active: ApiToken[]; inactive: ApiToken[] } {
+  const sorted = sortTokens(tokens);
+  return {
+    active: sorted.filter((t) => t.status === 'active'),
+    inactive: sorted.filter((t) => t.status !== 'active'),
+  };
+}
+
 /** The sample request shown beside a freshly minted token. */
 export function curlExample(origin: string, token: string): string {
   return `curl -H "Authorization: Bearer ${token}" ${origin}/api/me`;

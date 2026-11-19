@@ -17,7 +17,8 @@
     createErrorMessage,
     expiryLabel,
     statusLabel,
-    sortTokens,
+    splitTokens,
+    expiryWarning,
     curlExample,
     type ExpiryChoice,
   } from './apiTokens';
@@ -25,11 +26,12 @@
   import type { ApiToken } from './types';
   import Button from './Button.svelte';
   import Panel from './Panel.svelte';
+  import AccountRowMenu from './AccountRowMenu.svelte';
 
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let tokens = $state<ApiToken[]>([]);
-  const sorted = $derived(sortTokens(tokens));
+  const split = $derived(splitTokens(tokens));
 
   let showForm = $state(false);
   let name = $state('');
@@ -158,6 +160,44 @@
   onMount(load);
 </script>
 
+{#snippet tokenRow(token: ApiToken)}
+  {@const warning = expiryWarning(token)}
+  <li class="token" class:inactive={token.status !== 'active'}>
+    <div class="token-main">
+      <div class="token-line">
+        <span class="token-name">{token.name}</span>
+        {#if token.read_only}<span class="tag">Read-only</span>{/if}
+        {#if token.status !== 'active'}<span class="tag">{statusLabel(token)}</span>{/if}
+        <code class="mono prefix">{token.prefix}…</code>
+        <span class="text-muted last-used">
+          {#if token.status === 'revoked' && token.revoked_at}
+            Revoked {formatDate(token.revoked_at)}
+          {:else if token.status === 'expired'}
+            {expiryLabel(token)}
+          {:else if token.last_used_at}
+            Used {lastUsedLabel(token.last_used_at)}{token.last_used_ip ? ` from ${token.last_used_ip}` : ''}
+          {:else}
+            Never used
+          {/if}
+        </span>
+      </div>
+      {#if warning}
+        <div class="tag tag-warn" title="Expires {formatDate(token.expires_at)}">⚠ {warning}</div>
+      {/if}
+      {#if rowErrors[token.id]}
+        <p class="text-error" role="alert">{rowErrors[token.id]}</p>
+      {/if}
+    </div>
+    {#if token.status === 'active'}
+      <AccountRowMenu
+        label="Actions for {token.name}"
+        busy={revokingId === token.id}
+        items={[{ label: 'Revoke', danger: true, onselect: () => handleRevoke(token) }]}
+      />
+    {/if}
+  </li>
+{/snippet}
+
 <Panel title="API tokens">
   <p class="text-muted intro">
     An API token lets a script or agent use the API as you: create campaigns and
@@ -253,57 +293,34 @@
     <p class="text-error" role="alert">{loadError}</p>
     <Button variant="primary" onclick={load}>Retry</Button>
   {:else if tokens.length > 0}
-    <ul class="tokens">
-      {#each sorted as token (token.id)}
-        <li class="token" class:inactive={token.status !== 'active'}>
-          <div class="token-main">
-            <div class="name-row">
-              <span class="token-name">{token.name}</span>
-              <span class="badge badge-{token.status}">{statusLabel(token)}</span>
-              {#if token.read_only}<span class="badge">Read-only</span>{/if}
-            </div>
-            <dl class="meta">
-              <div>
-                <dt>Token</dt>
-                <dd class="mono">{token.prefix}…</dd>
-              </div>
-              <div>
-                <dt>Created</dt>
-                <dd>{formatDate(token.created_at)}</dd>
-              </div>
-              <div>
-                <dt>Expires</dt>
-                <dd>{expiryLabel(token)}</dd>
-              </div>
-              <div>
-                <dt>Last used</dt>
-                <dd>
-                  {lastUsedLabel(token.last_used_at)}
-                  {#if token.last_used_ip}<span class="text-muted">· {token.last_used_ip}</span>{/if}
-                </dd>
-              </div>
-              {#if token.revoked_at}
-                <div>
-                  <dt>Revoked</dt>
-                  <dd>{formatDate(token.revoked_at)}</dd>
-                </div>
-              {/if}
-            </dl>
-            {#if rowErrors[token.id]}
-              <p class="text-error" role="alert">{rowErrors[token.id]}</p>
-            {/if}
-          </div>
-          {#if token.status !== 'revoked'}
-            <div class="token-actions">
-              <Button variant="danger" disabled={revokingId === token.id} onclick={() => handleRevoke(token)}>
-                {revokingId === token.id ? 'Revoking…' : 'Revoke'}
-              </Button>
-            </div>
-          {/if}
-        </li>
-      {/each}
-    </ul>
+    {#if split.active.length > 0}
+      <ul class="tokens">
+        {#each split.active as token (token.id)}
+          {@render tokenRow(token)}
+        {/each}
+      </ul>
+    {:else}
+      <p class="text-muted small">No active tokens.</p>
+    {/if}
+    {#if split.inactive.length > 0}
+      <details class="inactive-tokens">
+        <summary>
+          {split.inactive.length} revoked or expired {split.inactive.length === 1 ? 'token' : 'tokens'}
+        </summary>
+        <ul class="tokens">
+          {#each split.inactive as token (token.id)}
+            {@render tokenRow(token)}
+          {/each}
+        </ul>
+      </details>
+    {/if}
   {/if}
+  <p class="text-muted small docs-link">
+    Using a token from an agent?
+    <a href="https://github.com/brennanMKE/ShortLinks/blob/main/docs/mcp.md" target="_blank" rel="noopener">
+      Read the MCP setup guide
+    </a>.
+  </p>
 </Panel>
 
 <style>
@@ -381,71 +398,72 @@
     list-style: none;
     margin: var(--space-3) 0 0;
     padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
   }
   .token {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    border: var(--border-w) solid var(--border);
-    border-radius: var(--radius);
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-2) var(--space-3);
     background: var(--bg-subtle);
   }
+  .token + .token {
+    border-top: var(--border-w) solid var(--border);
+  }
   .token.inactive {
-    opacity: 0.65;
+    opacity: 0.7;
   }
   .token-main {
     flex: 1;
     min-width: 0;
   }
-  .name-row {
+  .token-line {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     flex-wrap: wrap;
-    gap: var(--space-2);
-    margin-bottom: var(--space-2);
+    gap: var(--space-1) var(--space-3);
   }
   .token-name {
     font-weight: 600;
     overflow-wrap: anywhere;
   }
-  .badge {
+  .prefix {
+    font-size: var(--fs-sm);
+    color: var(--text-muted);
+  }
+  .last-used {
+    font-size: var(--fs-sm);
+  }
+  .tag {
+    display: inline-block;
     font-size: var(--fs-sm);
     border: var(--border-w) solid var(--border-strong);
     border-radius: 999px;
     padding: 0 var(--space-2);
     color: var(--text-muted);
   }
-  .badge-active {
-    color: var(--text);
+  .tag-warn {
+    margin-top: var(--space-1);
+    color: var(--warning);
+    border-color: var(--warning);
   }
-  .meta {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-    gap: var(--space-2) var(--space-4);
-    margin: 0;
+  .inactive-tokens {
+    margin-top: var(--space-3);
   }
-  .meta dt {
+  .inactive-tokens summary {
+    cursor: pointer;
     color: var(--text-muted);
-    font-weight: 600;
     font-size: var(--fs-sm);
   }
-  .meta dd {
-    margin: 0;
-    font-size: var(--fs-base);
-    overflow-wrap: anywhere;
+  .docs-link {
+    margin-top: var(--space-3);
   }
-  .token-actions {
-    flex-shrink: 0;
+  .docs-link a {
+    color: var(--accent);
   }
   @media (max-width: 480px) {
-    .token {
-      flex-direction: column;
-    }
     .secret-row {
       flex-direction: column;
       align-items: stretch;

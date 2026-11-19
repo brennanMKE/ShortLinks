@@ -7,6 +7,9 @@ import {
   sortTokens,
   curlExample,
   MAX_TOKEN_NAME_LEN,
+  daysUntilExpiry,
+  expiryWarning,
+  splitTokens,
 } from './apiTokens';
 import { ApiError } from './api';
 import type { ApiToken } from './types';
@@ -77,5 +80,28 @@ describe('display helpers', () => {
     expect(curlExample('https://go.example', 'slk_x')).toBe(
       'curl -H "Authorization: Bearer slk_x" https://go.example/api/me',
     );
+  });
+});
+
+describe('expiry warning (#0170)', () => {
+  const inDays = (d: number) => new Date(now.getTime() + d * 86_400_000 - 1000).toISOString();
+  it('warns inside 14 days only', () => {
+    expect(expiryWarning(token({ expires_at: inDays(12) }), now)).toBe('Expires in 12 days');
+    expect(expiryWarning(token({ expires_at: inDays(14) }), now)).toBe('Expires in 14 days');
+    expect(expiryWarning(token({ expires_at: inDays(15) }), now)).toBeNull();
+    expect(expiryWarning(token({ expires_at: inDays(0.5) }), now)).toBe('Expires within a day');
+  });
+  it('never warns for no-expiry or inactive tokens', () => {
+    expect(daysUntilExpiry(token({ expires_at: null }), now)).toBeNull();
+    expect(expiryWarning(token({ status: 'revoked', expires_at: inDays(3) }), now)).toBeNull();
+  });
+  it('splits active from revoked/expired', () => {
+    const r = splitTokens([
+      token({ id: 1, status: 'revoked' }),
+      token({ id: 2 }),
+      token({ id: 3, status: 'expired' }),
+    ]);
+    expect(r.active.map((t) => t.id)).toEqual([2]);
+    expect(r.inactive.map((t) => t.id)).toEqual([3, 1]);
   });
 });

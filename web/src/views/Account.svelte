@@ -27,6 +27,7 @@
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import ApiTokens from '../lib/ApiTokens.svelte';
+  import Preferences from '../lib/Preferences.svelte';
 
   let loading = $state(true);
   let loadError = $state<string | null>(null);
@@ -256,10 +257,6 @@
                   <dt>Last used</dt>
                   <dd>{lastUsedLabel(cred.last_used_at)}</dd>
                 </div>
-                <div>
-                  <dt>Sign count</dt>
-                  <dd class="num">{cred.sign_count}</dd>
-                </div>
               </dl>
 
               {#if rowErrors[cred.id]}
@@ -283,6 +280,8 @@
   </Panel>
 
   <ApiTokens />
+
+  <Preferences />
 </div>
 
 <style>
@@ -356,9 +355,6 @@
     margin: 0;
     font-size: var(--fs-base);
     overflow-wrap: anywhere;
-  }
-  .num {
-    font-variant-numeric: tabular-nums;
   }
   .cred-actions {
     flex-shrink: 0;
