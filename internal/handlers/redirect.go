@@ -174,22 +174,34 @@ func buildClickInfo(key string, r *http.Request, at time.Time) ClickInfo {
 	}
 }
 
-// clientIP derives the originating client IP. Behind Apache's reverse proxy the
-// real client is in X-Forwarded-For (first hop); otherwise fall back to the
+// clientIP derives the originating client IP. Behind Apache's reverse proxy on
+// loopback the real client is the LAST X-Forwarded-For entry (the one Apache
+// appended; earlier entries are client-supplied); otherwise fall back to the
 // connection's RemoteAddr with the port stripped.
 func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if p := net.ParseIP(host); p != nil {
+		host = p.String() // normalise so ::ffff:a.b.c.d and a.b.c.d share a key
+	}
+	// Only the loopback reverse proxy (Apache) is trusted to supply
+	// X-Forwarded-For; a direct client could send anything.
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// X-Forwarded-For is a comma-separated list; the first entry is the
-		// original client.
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			return strings.TrimSpace(xff[:i])
+		if p := net.ParseIP(host); p != nil && p.IsLoopback() {
+			// Apache's mod_proxy APPENDS the address it saw, so leading entries
+			// are client-controlled and only the last is trustworthy (#0178).
+			last := xff
+			if i := strings.LastIndexByte(xff, ','); i >= 0 {
+				last = xff[i+1:]
+			}
+			if ip := net.ParseIP(strings.TrimSpace(last)); ip != nil {
+				return ip.String()
+			}
 		}
-		return strings.TrimSpace(xff)
 	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
-	}
-	return r.RemoteAddr
+	return host
 }
 
 // mergeUTM merges the inbound utm_* query parameters onto the destination URL.

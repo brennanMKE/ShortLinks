@@ -184,7 +184,8 @@ func TestUTMParamsMergedAndRecorded(t *testing.T) {
 		"/u/abc123?utm_source=email&utm_medium=newsletter&utm_campaign=launch&utm_term=go&utm_content=hero", nil)
 	req.Header.Set("User-Agent", "test-agent")
 	req.Header.Set("Referer", "https://referrer.example")
-	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+	req.RemoteAddr = "127.0.0.1:4321" // Apache on loopback
+	req.Header.Set("X-Forwarded-For", "10.0.0.1, 203.0.113.7")
 
 	rec := serve(h, req)
 
@@ -228,7 +229,7 @@ func TestUTMParamsMergedAndRecorded(t *testing.T) {
 		t.Errorf("click Referer = %q, want https://referrer.example", info.Referer)
 	}
 	if info.IPAddress != "203.0.113.7" {
-		t.Errorf("click IPAddress = %q, want 203.0.113.7 (first XFF hop)", info.IPAddress)
+		t.Errorf("click IPAddress = %q, want 203.0.113.7 (last XFF entry, appended by Apache)", info.IPAddress)
 	}
 }
 

@@ -24,6 +24,12 @@ implemented in [`internal/config/config.go`](../internal/config/config.go).
 | `CACHE_TTL_SECONDS` | optional | `300` | Default TTL in seconds for cache entries (5 minutes). |
 | `ADMIN_EMAIL` | **required** | — | Email address of the bootstrap admin user. On first startup with an empty database, this address is pre-authorized as admin when the user completes passkey registration. |
 | `DEFAULT_TIMEZONE` | optional | `UTC` | IANA time zone name (e.g. `America/Los_Angeles`) the reports API (`/api/reports`, #0139) uses to bucket clicks into days when a request has no `tz` parameter. Validated at load: an unknown zone name stops startup with an error naming `DEFAULT_TIMEZONE`. |
+| `REDIRECT_RATE_PER_MIN` | optional | `120` | Per-client-IP limit on all `GET /u/{key}` requests per minute (#0178). Must be at least 1. |
+| `REDIRECT_MISS_RATE_PER_MIN` | optional | `20` | Stricter per-IP limit on `/u/{key}` requests that answer 404 or 410, per minute, with a burst of half this value (default 10). When it is exhausted, every `/u/*` request from that IP gets `429` with `Retry-After` until it refills, even for live keys. Hits under `REDIRECT_RATE_PER_MIN` are unaffected, so a poster scanned by many people behind one NAT keeps working. 429s are not recorded as clicks. Must be at least 1. |
+
+The per-IP key is the **last** `X-Forwarded-For` entry (the one Apache appends; earlier entries are client-supplied and ignored), and only honoured when the connection comes from loopback (Apache); otherwise the connection address is used. IPv6 clients are bucketed by their /64. If you put a CDN or another proxy in front of Apache, every visitor will appear as the proxy's address (or the proxy's own XFF handling must be reconfigured), so the limiter would throttle everyone together; revisit before doing so.
+
+**Trade-off:** the miss limit is per IP, so a venue where many people share one NAT and several scan stale or mistyped links can exhaust that IP's miss bucket and lock out everyone there (including valid links) until it refills (about 3 seconds per token at the default). Raise `REDIRECT_MISS_RATE_PER_MIN` if that is a problem. Also, a request holds a miss token until its response is known, so more than about 10 requests in flight at once from one IP can get a `429` even if they would all have been hits. `REDIRECT_MISS_RATE_PER_MIN` must not exceed `REDIRECT_RATE_PER_MIN`.
 
 **Required fields:** `BASE_URL`, `DATABASE_URL`, `WEBAUTHN_RP_ID`,
 `WEBAUTHN_RP_ORIGIN`, `SESSION_SECRET`, `ADMIN_EMAIL`. The loader collects all

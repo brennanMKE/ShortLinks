@@ -12,11 +12,13 @@ import (
 
 // Default values applied when an optional variable is unset.
 const (
-	defaultPort            = 8080
-	defaultSESSmtpPort     = 587
-	defaultCacheMaxCost    = 10000
-	defaultCacheTTLSeconds = 300
-	defaultTimezone        = "UTC"
+	defaultPort             = 8080
+	defaultSESSmtpPort      = 587
+	defaultCacheMaxCost     = 10000
+	defaultCacheTTLSeconds  = 300
+	defaultTimezone         = "UTC"
+	defaultRedirectRate     = 120
+	defaultRedirectMissRate = 20
 )
 
 // Config holds all runtime configuration loaded from the environment.
@@ -67,6 +69,11 @@ type Config struct {
 	// to bucket days when a request carries no tz parameter (#0139). Optional,
 	// validated at load, "UTC" when unset.
 	DefaultTimezone string
+
+	// RedirectRatePerMin / RedirectMissRatePerMin (#0178) cap GET /u/{key}
+	// per client IP: all requests, and 404/410 responses only.
+	RedirectRatePerMin     int
+	RedirectMissRatePerMin int
 }
 
 // DevMode reports whether the dev store should be used instead of Postgres.
@@ -119,6 +126,18 @@ func loadFromFile(path string) (*Config, error) {
 		CacheTTLSeconds:  getInt("CACHE_TTL_SECONDS", defaultCacheTTLSeconds, &errs),
 		AdminEmail:       os.Getenv("ADMIN_EMAIL"),
 		DefaultTimezone:  defaultTimezone,
+
+		RedirectRatePerMin:     getInt("REDIRECT_RATE_PER_MIN", defaultRedirectRate, &errs),
+		RedirectMissRatePerMin: getInt("REDIRECT_MISS_RATE_PER_MIN", defaultRedirectMissRate, &errs),
+	}
+	if cfg.RedirectRatePerMin < 1 {
+		errs = append(errs, "REDIRECT_RATE_PER_MIN must be at least 1")
+	}
+	if cfg.RedirectMissRatePerMin > cfg.RedirectRatePerMin {
+		errs = append(errs, "REDIRECT_MISS_RATE_PER_MIN must not exceed REDIRECT_RATE_PER_MIN")
+	}
+	if cfg.RedirectMissRatePerMin < 1 {
+		errs = append(errs, "REDIRECT_MISS_RATE_PER_MIN must be at least 1")
 	}
 
 	if tz := strings.TrimSpace(os.Getenv("DEFAULT_TIMEZONE")); tz != "" {

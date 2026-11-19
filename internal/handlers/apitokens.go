@@ -103,7 +103,7 @@ type createAPITokenRequest struct {
 // createAPITokenResponse carries the plaintext token — the only time it is
 // ever sent.
 type createAPITokenResponse struct {
-	Token  string       `json:"token"`
+	Token    string       `json:"token"`
 	APIToken apiTokenView `json:"api_token"`
 }
 

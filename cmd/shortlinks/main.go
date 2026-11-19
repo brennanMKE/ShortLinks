@@ -422,7 +422,10 @@ func buildMux(
 
 	// Public redirect path (#0009): resolve key → 302 to destination with inbound
 	// UTM merged, recording the click asynchronously (#0030). No session required.
-	mux.Handle("GET /u/{key}", redirectH)
+	// Per-IP scan protection (#0178): strict on misses, generous on hits.
+	redirectLimiter := middleware.NewRedirectLimiter(cfg.RedirectRatePerMin, cfg.RedirectMissRatePerMin)
+	go redirectLimiter.Run(context.Background()) // background sweep of idle entries
+	mux.Handle("GET /u/{key}", redirectLimiter.Middleware(redirectH))
 	mux.Handle("POST /auth/register/start", registerLimiter.Middleware(http.HandlerFunc(authH.RegisterStart)))
 	mux.HandleFunc("GET /auth/register/verify", authH.RegisterVerify)
 	mux.HandleFunc("POST /auth/register/finish", authH.RegisterFinish)

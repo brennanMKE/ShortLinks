@@ -186,7 +186,7 @@ func TestLinksGet_UTMStats(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	var body struct {
-		ClickCount int64           `json:"click_count"`
+		ClickCount int64            `json:"click_count"`
 		UTMStats   *clicks.UTMStats `json:"utm_stats"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {

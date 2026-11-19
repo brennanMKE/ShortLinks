@@ -27,6 +27,8 @@ func do(h http.Handler, xff, remoteAddr string) *httptest.ResponseRecorder {
 	}
 	if remoteAddr != "" {
 		req.RemoteAddr = remoteAddr
+	} else if xff != "" {
+		req.RemoteAddr = "127.0.0.1:9999" // X-Forwarded-For is trusted only from the loopback proxy
 	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -92,17 +94,30 @@ func TestRateLimiterUsesXForwardedFor(t *testing.T) {
 	h := rl.Middleware(okHandler())
 
 	const client = "192.0.2.55"
-	if got := do(h, client, "10.0.0.1:1111").Code; got != http.StatusOK {
+	if got := do(h, client, "127.0.0.1:1111").Code; got != http.StatusOK {
 		t.Fatalf("XFF request 1: status = %d, want 200", got)
 	}
 	// Different RemoteAddr, same XFF client → same bucket → throttled.
-	if got := do(h, client, "10.0.0.2:2222").Code; got != http.StatusTooManyRequests {
+	if got := do(h, client, "127.0.0.1:2222").Code; got != http.StatusTooManyRequests {
 		t.Fatalf("XFF request 2: status = %d, want 429 (XFF not honored for bucketing)", got)
 	}
 
-	// A first-hop list "client, proxy1, proxy2" buckets on the leftmost entry.
-	if got := do(h, client+", 10.0.0.9", "10.0.0.3:3333").Code; got != http.StatusTooManyRequests {
-		t.Fatalf("XFF list request: status = %d, want 429 (leftmost XFF entry not used)", got)
+	// A list "spoofed, client" buckets on the LAST entry (the one Apache appended, #0178).
+	if got := do(h, "198.51.100.9, "+client, "127.0.0.1:3333").Code; got != http.StatusTooManyRequests {
+		t.Fatalf("XFF list request: status = %d, want 429 (last XFF entry not used)", got)
+	}
+}
+
+// TestRateLimiterIgnoresXFFFromNonLoopback confirms a direct (non-proxy) peer
+// cannot choose its bucket with a forged X-Forwarded-For.
+func TestRateLimiterIgnoresXFFFromNonLoopback(t *testing.T) {
+	rl := NewRateLimiter(rate.Every(time.Minute), 1)
+	h := rl.Middleware(okHandler())
+	if got := do(h, "198.51.100.1", "203.0.113.5:1").Code; got != http.StatusOK {
+		t.Fatalf("request 1 = %d, want 200", got)
+	}
+	if got := do(h, "198.51.100.2", "203.0.113.5:2").Code; got != http.StatusTooManyRequests {
+		t.Fatalf("request 2 = %d, want 429 (forged XFF honoured)", got)
 	}
 }
 

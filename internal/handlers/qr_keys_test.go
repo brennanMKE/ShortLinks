@@ -92,7 +92,7 @@ func TestCampaignsHandler_QRZip_KeysFilter(t *testing.T) {
 	})
 	t.Run("another user's link is refused", func(t *testing.T) {
 		bobCampaign := createCampaign(t, srv, "bob-token", `{"name":"Bob Zip"}`)
-		seedLinkWithCampaignAndPlacement(t, pool, bobID,bobCampaign.ID, "bobk", "https://bob.example.com", "")
+		seedLinkWithCampaignAndPlacement(t, pool, bobID, bobCampaign.ID, "bobk", "https://bob.example.com", "")
 		status, _ := qrZipNames(t, srv, "alice-token", base+"?keys=ka,bobk")
 		if status != http.StatusNotFound {
 			t.Errorf("status = %d, want 404", status)
