@@ -2,7 +2,7 @@
 // (#0103). Same discipline as utm.ts/charts.ts/linkDetail.ts — every function
 // here is unit-testable without a DOM or Svelte; see campaigns.test.ts.
 
-import type { Campaign, CampaignStats, CampaignWithCounts, Link, LinkBucket, PlacementBucket, UTMBucket } from './types';
+import type { Campaign, CampaignStatus, DayBucket, CampaignStats, CampaignWithCounts, Link, LinkBucket, PlacementBucket, UTMBucket } from './types';
 import { shortUrl } from './links';
 import { sortBuckets } from './linkDetail';
 import { composeUtmUrl, emptyUtmParams, type UtmParams } from './utm';
@@ -705,4 +705,110 @@ export function hasNamedPlacement(rows: PlacementBucket[] | undefined | null): b
 /** Sum of the Clicks column; equals the campaign's "Clicks in window". */
 export function placementClickTotal(rows: PlacementBucket[] | undefined | null): number {
   return (rows ?? []).reduce((sum, r) => sum + r.count, 0);
+}
+
+// ── Campaigns list (#0166) ──────────────────────────────────────────────────
+
+const MS_DAY = 86_400_000;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Label for the status tag. */
+export function campaignStatusLabel(status: CampaignStatus): string {
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+/** The browser's current calendar date as UTC midnight ms, comparable with date-only values. */
+function todayUtcMs(now: Date): number {
+  return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+/** A date-only ISO value as UTC-midnight ms (read via UTC accessors, see above); null if unset/invalid. */
+function dateOnlyMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? null : t - (t % MS_DAY);
+}
+
+function plural(n: number, unit: string): string {
+  return `${n} ${unit}${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * Compact date range: "Nov 1 – 30" within a month, "Oct 5 – Nov 8" within a
+ * year; the year is added when a date is outside the current year. Open ends
+ * read "From Nov 1" / "Until Nov 30"; neither set reads "No dates".
+ */
+export function compactDateRange(
+  c: Pick<Campaign, 'starts_at' | 'ends_at'>,
+  now: Date = new Date(),
+): string {
+  const s = dateOnlyMs(c.starts_at);
+  const e = dateOnlyMs(c.ends_at);
+  const year = now.getFullYear();
+  const md = (ms: number) => `${MONTHS[new Date(ms).getUTCMonth()]} ${new Date(ms).getUTCDate()}`;
+  const full = (ms: number) => {
+    const y = new Date(ms).getUTCFullYear();
+    return y === year ? md(ms) : `${md(ms)}, ${y}`;
+  };
+  if (s === null && e === null) return 'No dates';
+  if (s === null) return `Until ${full(e as number)}`;
+  if (e === null) return `From ${full(s)}`;
+  if (s === e) return full(s);
+  const ds = new Date(s);
+  const de = new Date(e);
+  if (ds.getUTCFullYear() === de.getUTCFullYear() && ds.getUTCMonth() === de.getUTCMonth()) {
+    const tail = ds.getUTCFullYear() === year ? '' : `, ${ds.getUTCFullYear()}`;
+    return `${md(s)} – ${de.getUTCDate()}${tail}`;
+  }
+  return `${full(s)} – ${full(e)}`;
+}
+
+/** Second line of the Dates cell: "12 days left", "Starts in 3 days", or "". */
+export function campaignTimingLine(
+  c: Pick<CampaignWithCounts, 'status' | 'starts_at' | 'ends_at'>,
+  now: Date = new Date(),
+): string {
+  const today = todayUtcMs(now);
+  if (c.status === 'scheduled') {
+    const s = dateOnlyMs(c.starts_at);
+    if (s === null) return '';
+    const n = Math.round((s - today) / MS_DAY);
+    return n <= 1 ? 'Starts tomorrow' : `Starts in ${plural(n, 'day')}`;
+  }
+  if (c.status === 'live') {
+    const e = dateOnlyMs(c.ends_at);
+    if (e === null) return '';
+    const n = Math.round((e - today) / MS_DAY);
+    return n <= 0 ? 'Last day' : `${plural(n, 'day')} left`;
+  }
+  return '';
+}
+
+/**
+ * Second line of the Campaign cell: the description when there is one,
+ * otherwise "Ended 10 days ago" for an ended campaign.
+ */
+export function campaignSubline(
+  c: Pick<CampaignWithCounts, 'status' | 'description' | 'ends_at'>,
+  now: Date = new Date(),
+): string {
+  const d = c.description.trim();
+  if (d !== '') return d;
+  if (c.status === 'ended') {
+    const e = dateOnlyMs(c.ends_at);
+    if (e === null) return 'Ended';
+    const n = Math.round((todayUtcMs(now) - e) / MS_DAY);
+    return n <= 1 ? 'Ended yesterday' : `Ended ${plural(n, 'day')} ago`;
+  }
+  return '';
+}
+
+/** The API's 30-integer sparkline (oldest first, today last) as dated buckets ending today. */
+export function sparklineDays(sparkline: number[] | null | undefined, now: Date = new Date()): DayBucket[] {
+  const vals = sparkline ?? [];
+  const end = todayUtcMs(now);
+  return vals.map((count, i) => ({
+    date: new Date(end - (vals.length - 1 - i) * MS_DAY).toISOString().slice(0, 10),
+    count,
+  }));
 }

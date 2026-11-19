@@ -1,35 +1,43 @@
 <!--
-  Campaigns list view (#0103). Two halves, mirroring Dashboard.svelte's shape:
+  Campaigns list view (#0103, redesigned in #0166 per docs/ui-redesign.md 3.5).
 
-  1. A create-campaign FORM (name required — mirrors the backend's 255-rune
-     cap, internal/handlers/campaigns.go maxCampaignNameLength — optional
-     description and start/end dates). On submit it POSTs to /api/campaigns
-     and prepends the new campaign to the list. There is no other UI path to
-     create a campaign anywhere in the app (#0098/#0099/#0102 shipped API +
-     the create-form's "assign to existing campaign" dropdown only), so this
-     form is what makes the rest of the feature reachable.
+  The list is the page: a DataTable ranked by recent activity
+  (GET /api/campaigns?sort=activity, #0146) with columns Campaign (name and a
+  status tag, then the description or "Ended 10 days ago"), Dates, Links,
+  30 days (InlineBar, all-time total as a second line) and Trend (Sparkline of
+  the API's 30 daily counts). "+ New campaign" opens a <dialog> (name and
+  dates; description and default UTM parameters under "More"). "Show archived
+  (N)" is a toggle. Below 900px DataTable turns rows into cards.
 
-  2. A LIST of the user's campaigns: name, date range, link count, total
-     clicks (ALL-TIME — labelled as such, since the detail view also shows a
-     WINDOWED number and the two must stay visually distinct per #0102's
-     "four numbers, two time scales" constraint), and a sparkline slot left
-     empty for #0104. Archived campaigns are filtered out by default (AC) and
-     reachable via an explicit "Show archived" checkbox — nothing is ever
-     deleted from this list, so the checkbox is the only thing that changes.
+  default_utm_campaign is PINNED at creation (#0098: it never changes even if
+  the campaign is renamed later), so the dialog is the only place a campaign
+  can get non-slug UTM defaults (#0103 nit 11).
 
-  Clicking a row opens the campaign detail view by navigating to
-  /campaigns/{slug} (#0120 — the slug is now a route param, not a store).
+  A campaign opens /campaigns/{slug} (#0120).
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { currentUser } from '../lib/stores';
   import { listCampaigns, createCampaign, ApiError, type CreateCampaignInput } from '../lib/api';
-  import { visibleCampaigns, campaignDateRangeLabel, toIsoDate } from '../lib/campaigns';
+  import {
+    visibleCampaigns,
+    toIsoDate,
+    compactDateRange,
+    campaignTimingLine,
+    campaignSubline,
+    campaignStatusLabel,
+    sparklineDays,
+  } from '../lib/campaigns';
   import type { CampaignWithCounts } from '../lib/types';
+  import type { Column } from '../lib/dataTable';
+  import { navigate } from '../lib/hashRouter.svelte';
+  import { getChartTimeZone } from '../lib/preferences';
   import Button from '../lib/Button.svelte';
-  import Panel from '../lib/Panel.svelte';
+  import DataTable from '../lib/DataTable.svelte';
+  import TwoLineCell from '../lib/TwoLineCell.svelte';
+  import InlineBar from '../lib/InlineBar.svelte';
+  import Sparkline from '../lib/Sparkline.svelte';
   import UtmField from '../lib/UtmField.svelte';
-  import Link from '../lib/Link.svelte';
 
   const MAX_NAME_LENGTH = 255; // mirrors maxCampaignNameLength (internal/handlers/campaigns.go), counted in code points to match utf8.RuneCountInString.
 
@@ -41,12 +49,22 @@
 
   const visible = $derived(visibleCampaigns(campaigns, showArchived));
   const archivedCount = $derived(campaigns.filter((c) => c.archived).length);
+  const maxClicks = $derived(Math.max(0, ...visible.map((c) => c.clicks_30d)));
+  const now = new Date();
+
+  const columns: Column<CampaignWithCounts>[] = [
+    { key: 'name', label: 'Campaign', mobile: 'title' },
+    { key: 'dates', label: 'Dates', width: '150px', mobile: 'meta' },
+    { key: 'links', label: 'Links', width: '70px', align: 'right' },
+    { key: 'clicks', label: '30 days', width: '160px', align: 'right', mobile: 'metric' },
+    { key: 'trend', label: 'Trend', width: '150px' },
+  ];
 
   async function load() {
     loading = true;
     loadError = null;
     try {
-      const res = await listCampaigns();
+      const res = await listCampaigns('activity', getChartTimeZone());
       campaigns = res.campaigns;
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -59,20 +77,17 @@
     }
   }
 
-  // ── Create form ────────────────────────────────────────────────────────
+  // ── Create dialog ──────────────────────────────────────────────────────
+  let dialogEl: HTMLDialogElement | undefined = $state();
+  let nameInput: HTMLInputElement | undefined = $state();
   let newName = $state('');
   let newDescription = $state('');
   let newStartsAt = $state('');
   let newEndsAt = $state('');
   let creating = $state(false);
   let createError = $state<string | null>(null);
-  let utmOpen = $state(false);
-  // The five default_utm_* fields — the API accepts them on POST /api/campaigns
-  // and default_utm_campaign is PINNED at creation (#0098: it never changes
-  // even if the campaign is renamed later), so this create form is the ONLY
-  // place a campaign can ever get non-slug UTM defaults from any UI (#0103
-  // nit 11 — this was previously omitted, meaning every campaign created here
-  // fell back to the slug-derived default_utm_campaign forever).
+  let moreOpen = $state(false);
+  // The five default_utm_* fields — the API accepts them on POST /api/campaigns.
   let defaultUtm = $state({
     utm_source: '',
     utm_medium: '',
@@ -80,7 +95,9 @@
     utm_term: '',
     utm_content: '',
   });
-  const hasDefaultUtm = $derived(Object.values(defaultUtm).some((v) => v.trim() !== ''));
+  const hasMore = $derived(
+    newDescription.trim() !== '' || Object.values(defaultUtm).some((v) => v.trim() !== ''),
+  );
 
   const nameLength = $derived([...newName.trim()].length);
   const nameTooLong = $derived(nameLength > MAX_NAME_LENGTH);
@@ -88,6 +105,16 @@
     newStartsAt !== '' && newEndsAt !== '' && newEndsAt < newStartsAt,
   );
   const canCreate = $derived(!creating && newName.trim() !== '' && !nameTooLong && !datesInvalid);
+
+  async function openDialog() {
+    createError = null;
+    dialogEl?.showModal();
+    await tick();
+    nameInput?.focus();
+  }
+  function closeDialog() {
+    dialogEl?.close();
+  }
 
   async function handleCreate() {
     if (!canCreate) return;
@@ -113,13 +140,16 @@
       if (content !== '') input.default_utm_content = content;
 
       const created = await createCampaign(input);
-      campaigns = [{ ...created, link_count: 0, total_clicks: 0 }, ...campaigns];
       newName = '';
       newDescription = '';
       newStartsAt = '';
       newEndsAt = '';
       defaultUtm = { utm_source: '', utm_medium: '', utm_campaign: '', utm_term: '', utm_content: '' };
-      utmOpen = false;
+      moreOpen = false;
+      closeDialog();
+      // A new campaign has no clicks and would sort last by activity, out of
+      // sight; open it instead.
+      navigate('/campaigns/' + encodeURIComponent(created.slug));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
@@ -136,155 +166,283 @@
 </script>
 
 <div class="app-shell">
-  <h1 class="page-title">Campaigns</h1>
-  <Panel title="Create a campaign">
-    <form
-      onsubmit={(e) => {
-        e.preventDefault();
-        handleCreate();
-      }}
-    >
-      <div class="field">
-        <label for="campaign-name">Name</label>
-        <input
-          id="campaign-name"
-          type="text"
-          placeholder="Summer fair"
-          bind:value={newName}
-          disabled={creating}
-          required
-          aria-invalid={nameTooLong}
-          class:input-error={nameTooLong}
-        />
-        {#if nameTooLong}
-          <p class="text-error" role="alert">Name must be at most {MAX_NAME_LENGTH} characters.</p>
-        {/if}
-      </div>
-
-      <div class="field">
-        <label for="campaign-description">Description <span class="text-faint">(optional)</span></label>
-        <input
-          id="campaign-description"
-          type="text"
-          placeholder="What this campaign promotes"
-          bind:value={newDescription}
-          disabled={creating}
-        />
-      </div>
-
-      <div class="date-row">
-        <div class="field">
-          <label for="campaign-starts">Starts <span class="text-faint">(optional)</span></label>
-          <input id="campaign-starts" type="date" bind:value={newStartsAt} disabled={creating} />
-        </div>
-        <div class="field">
-          <label for="campaign-ends">Ends <span class="text-faint">(optional)</span></label>
-          <input
-            id="campaign-ends"
-            type="date"
-            bind:value={newEndsAt}
-            disabled={creating}
-            aria-invalid={datesInvalid}
-            class:input-error={datesInvalid}
-          />
-        </div>
-      </div>
-      {#if datesInvalid}
-        <p class="text-error" role="alert">End date must not be before the start date.</p>
-      {/if}
-
-      <div class="utm-section">
-        <button type="button" class="utm-toggle" aria-expanded={utmOpen} onclick={() => (utmOpen = !utmOpen)}>
-          <span class="utm-toggle-chevron" class:open={utmOpen}>▶</span>
-          Default UTM parameters
-          {#if hasDefaultUtm && !utmOpen}<span class="badge">filled</span>{/if}
+  <div class="page-head">
+    <h1 class="page-title">Campaigns</h1>
+    <div class="page-actions">
+      {#if archivedCount > 0}
+        <button
+          type="button"
+          class="toggle-btn"
+          class:on={showArchived}
+          onclick={() => (showArchived = !showArchived)}
+        >
+          {showArchived ? 'Hide' : 'Show'} archived ({archivedCount})
         </button>
-        {#if utmOpen}
-          <div class="utm-fields">
-            <p class="text-faint utm-intro">
-              Prefills the UTM builder whenever this campaign is selected on a link — every value stays
-              editable there, nothing here locks a field. <span class="mono">default_utm_campaign</span> is fixed
-              at creation and will not change even if this campaign is renamed later.
-            </p>
-            <UtmField fieldKey="utm_source" id="campaign-default-utm-source" bind:value={defaultUtm.utm_source} disabled={creating} />
-            <UtmField fieldKey="utm_medium" id="campaign-default-utm-medium" bind:value={defaultUtm.utm_medium} disabled={creating} />
-            <UtmField fieldKey="utm_campaign" id="campaign-default-utm-campaign" bind:value={defaultUtm.utm_campaign} disabled={creating} />
-            <UtmField fieldKey="utm_term" id="campaign-default-utm-term" bind:value={defaultUtm.utm_term} disabled={creating} />
-            <UtmField fieldKey="utm_content" id="campaign-default-utm-content" bind:value={defaultUtm.utm_content} disabled={creating} />
-          </div>
-        {/if}
-      </div>
-
-      {#if createError}
-        <p class="text-error" role="alert">{createError}</p>
       {/if}
+      <Button variant="primary" onclick={openDialog}>+ New campaign</Button>
+    </div>
+  </div>
 
+  {#if loadError}
+    <div class="error-box">
+      <p class="text-error" role="alert">{loadError}</p>
+      <Button variant="subtle" onclick={load}>Retry</Button>
+    </div>
+  {:else}
+    <div class="table-panel">
+      <DataTable
+        {columns}
+        rows={visible}
+        rowKey={(c) => String(c.id)}
+        caption="Campaigns, most recently active first"
+        {loading}
+        rowClass={(c) => (c.archived ? 'row-archived' : '')}
+      >
+        {#snippet cell(c, col)}
+          {#if col.key === 'name'}
+            <TwoLineCell
+              title={c.name}
+              meta={campaignSubline(c, now)}
+              href={'#/campaigns/' + encodeURIComponent(c.slug)}
+              tag={campaignStatusLabel(c.status)}
+              dim={c.status === 'archived'}
+            />
+          {:else if col.key === 'dates'}
+            <div class="two">
+              <span class="l1">{compactDateRange(c, now)}</span>
+              {#if campaignTimingLine(c, now)}<span class="l2">{campaignTimingLine(c, now)}</span>{/if}
+            </div>
+          {:else if col.key === 'links'}
+            <span class="num">{c.link_count.toLocaleString('en-US')}</span>
+          {:else if col.key === 'clicks'}
+            <div class="two">
+              <InlineBar value={c.clicks_30d} max={maxClicks} />
+              <span class="l2 r">{c.total_clicks.toLocaleString('en-US')} total</span>
+            </div>
+          {:else if col.key === 'trend'}
+            <Sparkline days={sparklineDays(c.sparkline, now)} partialLast label="Last 30 days" />
+          {/if}
+        {/snippet}
+        {#snippet empty()}
+          {#if campaigns.length === 0}
+            <p class="text-muted">No campaigns yet. Create your first one with + New campaign.</p>
+          {:else}
+            <p class="text-muted">No campaigns to show. Try Show archived.</p>
+          {/if}
+        {/snippet}
+      </DataTable>
+    </div>
+  {/if}
+</div>
+
+<dialog
+  bind:this={dialogEl}
+  class="new-dialog"
+  aria-labelledby="new-campaign-title"
+  onclose={() => (createError = null)}
+  oncancel={(e) => {
+    if (creating) e.preventDefault();
+  }}
+  onclick={(e) => {
+    if (e.target === dialogEl && !creating) closeDialog();
+  }}
+>
+  <form
+    class="dialog-form"
+    onsubmit={(e) => {
+      e.preventDefault();
+      handleCreate();
+    }}
+  >
+    <h2 id="new-campaign-title" class="dialog-title">New campaign</h2>
+
+    <div class="field">
+      <label for="campaign-name">Name</label>
+      <input
+        id="campaign-name"
+        type="text"
+        placeholder="Summer fair"
+        bind:this={nameInput}
+        bind:value={newName}
+        disabled={creating}
+        required
+        aria-invalid={nameTooLong}
+        class:input-error={nameTooLong}
+      />
+      {#if nameTooLong}
+        <p class="text-error" role="alert">Name must be at most {MAX_NAME_LENGTH} characters.</p>
+      {/if}
+    </div>
+
+    <div class="date-row">
+      <div class="field">
+        <label for="campaign-starts">Starts <span class="text-faint">(optional)</span></label>
+        <input id="campaign-starts" type="date" bind:value={newStartsAt} disabled={creating} />
+      </div>
+      <div class="field">
+        <label for="campaign-ends">Ends <span class="text-faint">(optional)</span></label>
+        <input
+          id="campaign-ends"
+          type="date"
+          bind:value={newEndsAt}
+          disabled={creating}
+          aria-invalid={datesInvalid}
+          class:input-error={datesInvalid}
+        />
+      </div>
+    </div>
+    {#if datesInvalid}
+      <p class="text-error" role="alert">End date must not be before the start date.</p>
+    {/if}
+
+    <div class="more-section">
+      <button type="button" class="more-toggle" aria-expanded={moreOpen} onclick={() => (moreOpen = !moreOpen)}>
+        <span class="more-chevron" class:open={moreOpen} aria-hidden="true">▶</span>
+        More
+        {#if hasMore && !moreOpen}<span class="badge">filled</span>{/if}
+      </button>
+      {#if moreOpen}
+        <div class="more-fields">
+          <div class="field">
+            <label for="campaign-description">Description <span class="text-faint">(optional)</span></label>
+            <input
+              id="campaign-description"
+              type="text"
+              placeholder="What this campaign promotes"
+              bind:value={newDescription}
+              disabled={creating}
+            />
+          </div>
+          <p class="text-faint more-intro">
+            Default UTM parameters prefill the UTM builder whenever this campaign is selected on a link; every
+            value stays editable there. <span class="mono">default_utm_campaign</span> is fixed at creation and will
+            not change even if this campaign is renamed later.
+          </p>
+          <UtmField fieldKey="utm_source" id="campaign-default-utm-source" bind:value={defaultUtm.utm_source} disabled={creating} />
+          <UtmField fieldKey="utm_medium" id="campaign-default-utm-medium" bind:value={defaultUtm.utm_medium} disabled={creating} />
+          <UtmField fieldKey="utm_campaign" id="campaign-default-utm-campaign" bind:value={defaultUtm.utm_campaign} disabled={creating} />
+          <UtmField fieldKey="utm_term" id="campaign-default-utm-term" bind:value={defaultUtm.utm_term} disabled={creating} />
+          <UtmField fieldKey="utm_content" id="campaign-default-utm-content" bind:value={defaultUtm.utm_content} disabled={creating} />
+        </div>
+      {/if}
+    </div>
+
+    {#if createError}
+      <p class="text-error" role="alert">{createError}</p>
+    {/if}
+
+    <div class="dialog-actions">
       <Button type="submit" variant="primary" disabled={!canCreate}>
         {creating ? 'Creating…' : 'Create campaign'}
       </Button>
-    </form>
-  </Panel>
-
-  <Panel title="Your campaigns" noPadding={!loading && !loadError}>
-    {#if loading}
-      <p class="text-muted">Loading your campaigns…</p>
-    {:else if loadError}
-      <p class="text-error" role="alert">{loadError}</p>
-      <Button variant="subtle" onclick={load}>Retry</Button>
-    {:else}
-      {#if archivedCount > 0}
-        <div class="archive-toggle">
-          <label class="row">
-            <input type="checkbox" bind:checked={showArchived} />
-            Show archived ({archivedCount})
-          </label>
-        </div>
-      {/if}
-
-      {#if visible.length === 0}
-        <p class="text-muted empty-msg">
-          {campaigns.length === 0
-            ? 'No campaigns yet — create your first one above.'
-            : 'No campaigns to show — try "Show archived".'}
-        </p>
-      {:else}
-        <div class="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Date range</th>
-                <th scope="col">Links</th>
-                <th scope="col">Total clicks <span class="text-faint">(all-time)</span></th>
-                <th scope="col">Trend</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each visible as c (c.id)}
-                <tr>
-                  <td>
-                    <Link to={'/campaigns/' + encodeURIComponent(c.slug)} class="row-link campaign-name">
-                      {c.name}
-                    </Link>
-                    {#if c.archived}<span class="badge badge-muted">Archived</span>{/if}
-                  </td>
-                  <td class="text-muted">{campaignDateRangeLabel(c)}</td>
-                  <td class="num">{c.link_count}</td>
-                  <td class="num">{c.total_clicks}</td>
-                  <td class="text-faint sparkline-slot"><!-- Sparkline: #0104 --> —</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    {/if}
-  </Panel>
-</div>
+      <Button disabled={creating} onclick={closeDialog}>Cancel</Button>
+    </div>
+  </form>
+</dialog>
 
 <style>
-  /* .nav-tabs/.nav-tab are global — see app.css (#0120). */
+  .page-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-4);
+  }
+  .page-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .toggle-btn {
+    background: none;
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-3);
+    font: inherit;
+    font-size: var(--fs-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    min-height: 32px;
+  }
+  .toggle-btn:hover {
+    color: var(--text);
+    background: var(--bg-subtle);
+  }
+  .toggle-btn.on {
+    background: var(--accent-subtle);
+    color: var(--text);
+  }
+  .table-panel {
+    background: var(--bg-panel);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .error-box {
+    padding: var(--space-4);
+    background: var(--bg-panel);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+  }
 
+  /* Two-line cells for Dates and 30 days (TwoLineCell covers the first column). */
+  .two {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .l1 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .l2 {
+    font-size: var(--fs-sm);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .l2.r {
+    text-align: right;
+    padding-right: var(--space-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+  :global(tr.row-archived) .l1 {
+    color: var(--text-muted);
+  }
+
+  /* ── New campaign dialog ── */
+  .new-dialog {
+    width: min(480px, calc(100vw - 2 * var(--space-4)));
+    max-height: calc(100dvh - 2 * var(--space-4));
+    overflow-y: auto;
+    /* Padding lives on .dialog-form, not here: a click in the dialog's own
+       padding targets the <dialog> and would count as a backdrop click. */
+    padding: 0;
+    background: var(--bg-panel);
+    color: var(--text);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+  }
+  .new-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.4);
+  }
+  .dialog-form {
+    padding: var(--space-5);
+  }
+  .dialog-title {
+    font-size: var(--fs-lg);
+    font-weight: 600;
+    margin: 0 0 var(--space-4);
+  }
+  .dialog-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+  }
   .date-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -295,20 +453,17 @@
       grid-template-columns: 1fr;
     }
   }
-
   .input-error {
     border-color: var(--danger) !important;
   }
 
-  /* ── Default UTM parameters (#0103 nit 11) — mirrors Dashboard.svelte's
-     UTM builder toggle so the two collapsible sections look/behave the same. */
-  .utm-section {
+  .more-section {
     margin-bottom: var(--space-3);
     border: var(--border-w) solid var(--border);
     border-radius: var(--radius);
     overflow: hidden;
   }
-  .utm-toggle {
+  .more-toggle {
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -323,75 +478,28 @@
     cursor: pointer;
     text-align: left;
   }
-  .utm-toggle:hover {
+  .more-toggle:hover {
     background: var(--bg-header);
     color: var(--text);
   }
-  .utm-toggle-chevron {
+  .more-chevron {
     font-size: 9px;
     display: inline-block;
     transition: transform 0.15s ease;
     color: var(--text-faint);
   }
-  .utm-toggle-chevron.open {
+  .more-chevron.open {
     transform: rotate(90deg);
   }
-  .utm-fields {
+  .more-fields {
     padding: var(--space-3) var(--space-3) var(--space-2);
     border-top: var(--border-w) solid var(--border);
-    background: var(--bg-panel);
   }
-  .utm-intro {
+  .more-intro {
     margin: 0 0 var(--space-3);
     font-size: var(--fs-sm);
   }
   .mono {
     font-family: var(--font-mono);
-  }
-
-  .archive-toggle {
-    padding: var(--space-3) var(--space-4);
-    border-bottom: var(--border-w) solid var(--border);
-    font-size: var(--fs-sm);
-    color: var(--text-muted);
-  }
-  .archive-toggle input {
-    width: auto;
-  }
-
-  .empty-msg {
-    padding: var(--space-4);
-  }
-
-  /*
-   * The name cell's Link (#0120, replacing a <button onclick> — #0103 fix 5)
-   * is the click target: natively focusable, Enter-activated, and a genuine
-   * anchor. :global() because Link.svelte renders the <a> itself; see
-   * app.css's ".nav-tab" comment for why a scoped rule here can't reach it.
-   */
-  :global(.row-link) {
-    background: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    font: inherit;
-    font-weight: 600;
-    color: inherit;
-    cursor: pointer;
-    text-align: left;
-    text-decoration: none;
-    display: inline-block;
-  }
-  :global(.row-link):hover,
-  :global(.row-link):focus-visible {
-    color: var(--accent);
-    text-decoration: underline;
-  }
-  .num {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-  .sparkline-slot {
-    min-width: 60px;
   }
 </style>

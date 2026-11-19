@@ -198,8 +198,11 @@ export function deactivateLink(key: string): Promise<{ message: string }> {
  * CampaignsList filters those client-side by default). Each item carries its
  * real, ALL-TIME link_count/total_clicks (#0102).
  */
-export function listCampaigns(): Promise<{ campaigns: CampaignWithCounts[] }> {
-  return apiGet('/api/campaigns');
+export function listCampaigns(
+  sort: 'activity' | 'created' | 'name' = 'activity',
+  tz?: string,
+): Promise<{ campaigns: CampaignWithCounts[] }> {
+  return apiGet('/api/campaigns?sort=' + sort + (tz ? '&tz=' + encodeURIComponent(tz) : ''));
 }
 
 /** Body accepted by POST /api/campaigns. Only name is required — see internal/handlers/campaigns.go createCampaignRequest. */

@@ -21,7 +21,7 @@
     position: relative;
     display: block;
     text-align: right;
-    padding: 2px var(--space-2);
+    padding: 2px calc(var(--space-2) + 4px) 2px var(--space-2);
     border-radius: 2px;
     overflow: hidden;
   }
@@ -29,7 +29,6 @@
     position: absolute;
     inset: 0 auto 0 0;
     background: var(--accent-subtle);
-    border-right: 2px solid var(--accent);
     opacity: 0.9;
   }
   .num {

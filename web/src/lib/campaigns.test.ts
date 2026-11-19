@@ -37,6 +37,11 @@ import {
   buildBatchCreateRows,
   MAX_BATCH_CREATE_ROWS_PER_REQUEST,
   type BatchChannelRow,
+  compactDateRange,
+  campaignTimingLine,
+  campaignSubline,
+  campaignStatusLabel,
+  sparklineDays,
 } from './campaigns';
 
 // #0117: copyAllShortUrlsText builds its URLs from the signed-in profile's
@@ -69,6 +74,9 @@ function campaign(overrides: Partial<CampaignWithCounts> = {}): CampaignWithCoun
     updated_at: '2026-06-01T00:00:00Z',
     link_count: 0,
     total_clicks: 0,
+    clicks_30d: 0,
+    sparkline: [],
+    status: 'live',
     ...overrides,
   };
 }
@@ -1074,5 +1082,52 @@ describe('hasNamedPlacement / placementClickTotal (#0122)', () => {
     expect(placementClickTotal([])).toBe(0);
     expect(placementClickTotal(undefined)).toBe(0);
     expect(placementClickTotal([shop, none])).toBe(7);
+  });
+});
+
+// ── Campaigns list helpers (#0166) ──────────────────────────────────────────
+
+describe('campaigns list helpers', () => {
+  const now = new Date(2026, 10, 18, 12, 0, 0); // Nov 18 2026, local
+
+  it('compactDateRange', () => {
+    const r = (s: string | null, e: string | null) =>
+      compactDateRange({ starts_at: s, ends_at: e }, now);
+    expect(r('2026-11-01T00:00:00Z', '2026-11-30T00:00:00Z')).toBe('Nov 1 – 30');
+    expect(r('2026-10-05T00:00:00Z', '2026-11-08T00:00:00Z')).toBe('Oct 5 – Nov 8');
+    expect(r('2026-12-20T00:00:00Z', '2027-01-10T00:00:00Z')).toBe('Dec 20 – Jan 10, 2027');
+    expect(r('2025-03-01T00:00:00Z', '2025-03-09T00:00:00Z')).toBe('Mar 1 – 9, 2025');
+    expect(r('2026-11-01T00:00:00Z', null)).toBe('From Nov 1');
+    expect(r(null, '2026-11-30T00:00:00Z')).toBe('Until Nov 30');
+    expect(r('2026-11-05T00:00:00Z', '2026-11-05T00:00:00Z')).toBe('Nov 5');
+    expect(r(null, null)).toBe('No dates');
+  });
+
+  it('campaignTimingLine', () => {
+    expect(campaignTimingLine({ status: 'live', starts_at: null, ends_at: '2026-11-30T00:00:00Z' }, now)).toBe('12 days left');
+    expect(campaignTimingLine({ status: 'live', starts_at: null, ends_at: '2026-11-18T00:00:00Z' }, now)).toBe('Last day');
+    expect(campaignTimingLine({ status: 'live', starts_at: null, ends_at: null }, now)).toBe('');
+    expect(campaignTimingLine({ status: 'scheduled', starts_at: '2026-11-21T00:00:00Z', ends_at: null }, now)).toBe('Starts in 3 days');
+    expect(campaignTimingLine({ status: 'ended', starts_at: null, ends_at: '2026-11-08T00:00:00Z' }, now)).toBe('');
+  });
+
+  it('campaignSubline prefers the description, else says when it ended', () => {
+    expect(campaignSubline({ status: 'live', description: ' Monthly guides ', ends_at: null }, now)).toBe('Monthly guides');
+    expect(campaignSubline({ status: 'ended', description: '', ends_at: '2026-11-08T00:00:00Z' }, now)).toBe('Ended 10 days ago');
+    expect(campaignSubline({ status: 'ended', description: '', ends_at: '2026-11-17T00:00:00Z' }, now)).toBe('Ended yesterday');
+    expect(campaignSubline({ status: 'live', description: '', ends_at: null }, now)).toBe('');
+  });
+
+  it('campaignStatusLabel capitalises', () => {
+    expect(campaignStatusLabel('archived')).toBe('Archived');
+  });
+
+  it('sparklineDays dates the counts ending today', () => {
+    expect(sparklineDays([1, 2, 3], now)).toEqual([
+      { date: '2026-11-16', count: 1 },
+      { date: '2026-11-17', count: 2 },
+      { date: '2026-11-18', count: 3 },
+    ]);
+    expect(sparklineDays(null, now)).toEqual([]);
   });
 });

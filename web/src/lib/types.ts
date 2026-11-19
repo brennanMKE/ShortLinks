@@ -149,7 +149,15 @@ export interface Campaign {
 export interface CampaignWithCounts extends Campaign {
   link_count: number;
   total_clicks: number;
+  /** Bot-excluded clicks in the last 30 civil days, today included (#0146). */
+  clicks_30d: number;
+  /** Daily clicks for those 30 days, oldest first, today last (#0146). */
+  sparkline: number[];
+  /** Derived from the dates and the archived flag (#0146). */
+  status: CampaignStatus;
 }
+
+export type CampaignStatus = 'live' | 'scheduled' | 'ended' | 'archived';
 
 /**
  * Campaign-scoped click analytics (internal/clicks/stats.go `CampaignStats`).
