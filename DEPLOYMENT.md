@@ -206,6 +206,12 @@ only worked by accident will now fail at startup. Each instance has
 its own key, secret and schema; accounts are not shared. The full variable list
 is in [docs/configuration.md](docs/configuration.md#embedded-portiko-provider-id).
 
+To copy the instance's existing users and passkeys into the provider, run
+`shortlinks portiko-import --dry-run` and then `shortlinks portiko-import` with
+the same environment as the service (see
+[docs/configuration.md](docs/configuration.md#importing-existing-accounts-and-passkeys-portiko-import)).
+It is idempotent and a no-op while `PORTIKO_ENABLED` is off.
+
 ---
 
 ## 4. Build

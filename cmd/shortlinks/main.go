@@ -60,6 +60,10 @@ func main() {
 		if err := seed(); err != nil {
 			log.Fatalf("shortlinks: %v", err)
 		}
+	case "portiko-import":
+		if err := portikoImport(os.Args[2:], os.Stdout); err != nil {
+			log.Fatalf("shortlinks: %v", err)
+		}
 	default:
 		fmt.Printf("shortlinks %s\n", version)
 	}

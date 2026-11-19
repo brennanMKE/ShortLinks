@@ -64,6 +64,27 @@ provider and registers the client. The provider's `users` and
 provider's health check is `/id/health`; `/health` stays ShortLinks'. Apache's
 `ProxyPass /` already carries `/id/...`, so no vhost change is needed.
 
+### Importing existing accounts and passkeys (`portiko-import`)
+
+Run once per instance, against that instance's own database and environment
+(#0131), after the provider is enabled and has started once:
+
+```bash
+shortlinks portiko-import --dry-run   # counts only; writes nothing
+shortlinks portiko-import             # copies users and passkeys into Portiko
+```
+
+For each user it creates a Portiko account with a new opaque `subject`, adds the
+email as a verified identifier, copies every passkey whose `user_handle` was
+captured (#0127) and records the subject in `users.subject`. Passkeys with no
+captured handle are listed per user and are not imported; those people recover
+through Portiko. It is safe to re-run: accounts are found again by their
+recorded subject or email, existing credentials are left alone, and handles
+captured since the last run are imported. It writes only `users.subject` and
+one `account.portiko_imported` audit row per user it changed; it never alters
+passkeys, sessions or any other ShortLinks table. With `PORTIKO_ENABLED` off it
+does nothing.
+
 ---
 
 ## How configuration is loaded

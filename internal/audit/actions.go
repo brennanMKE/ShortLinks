@@ -17,6 +17,9 @@ const (
 	// the constants are defined here so #0028 can use the same API trivially.
 	ActionAccountDeactivated = "account.deactivated"
 	ActionAccountReactivated = "account.reactivated"
+	// account.portiko_imported is written by `shortlinks portiko-import` (#0131)
+	// once per user whose account was copied into the embedded Portiko provider.
+	ActionAccountPortikoImported = "account.portiko_imported"
 
 	// Credential lifecycle.
 	ActionCredentialAdded   = "credential.added"
