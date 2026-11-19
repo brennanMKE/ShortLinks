@@ -21,7 +21,7 @@
   `ongotologin` are the two ways control hands back to App.svelte.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { pendingVerifyToken, currentUser } from '../lib/stores';
   import { registerVerify, registerFinish, getMe, ApiError } from '../lib/api';
   import {
@@ -31,13 +31,21 @@
   import { get } from 'svelte/store';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
-  import { APP_NAME } from '../lib/branding';
+  import AuthBrand from '../lib/AuthBrand.svelte';
+  import StepIndicator from '../lib/StepIndicator.svelte';
+  import {
+    verifySteps,
+    newLinkPath,
+    ACTION_LABELS,
+    PASSKEY_PROMPT_HELP,
+    type NextAction,
+  } from '../lib/authScreens';
 
   interface Props {
     /** Called once the session is confirmed — hands control to App.svelte, which enters the hash router at '/'. */
     onverified: () => void;
-    /** Called from the error state's "Back to sign in" action. */
-    ongotologin: () => void;
+    /** Called from the error state's actions. `path` defaults to /login. */
+    ongotologin: (path?: string) => void;
   }
 
   let { onverified, ongotologin }: Props = $props();
@@ -47,11 +55,23 @@
   let status = $state<Status>('verifying');
   let errorMessage = $state<string | null>(null);
   let token = $state<string | null>(null);
+  // The next action the error state offers inline (#0172).
+  let errorAction = $state<NextAction>('sign-in');
+  // Whether the link was accepted, so a failure is shown on the right step.
+  let linkAccepted = false;
+  let panelEl: HTMLDivElement | undefined = $state();
 
-  onMount(async () => {
+  const steps = $derived(verifySteps(status, linkAccepted ? 1 : 0));
+
+  async function run() {
+    status = 'verifying';
+    errorMessage = null;
+    errorAction = 'sign-in';
+    linkAccepted = false;
     token = get(pendingVerifyToken);
     if (!token) {
       status = 'error';
+      errorAction = 'new-link';
       errorMessage = 'No verification token found. Please check your email link and try again.';
       return;
     }
@@ -62,11 +82,14 @@
       serverOptions = await registerVerify(token);
     } catch (err) {
       status = 'error';
+      errorAction = 'retry';
       if (err instanceof ApiError) {
         if (err.status === 410 || err.status === 400) {
+          errorAction = 'new-link';
           errorMessage =
             'This verification link has expired or is invalid. Please request a new one.';
         } else if (err.status === 401) {
+          errorAction = 'new-link';
           errorMessage = 'Verification failed. Please request a new registration email.';
         } else {
           errorMessage = `Verification error: ${err.message}`;
@@ -77,6 +100,15 @@
       return;
     }
 
+    linkAccepted = true;
+    await create(serverOptions);
+  }
+
+  /** Steps 2-4: the passkey prompt, finish, then the session. */
+  async function create(serverOptions: Awaited<ReturnType<typeof registerVerify>>) {
+    const tok = token;
+    if (!tok) return;
+
     // Step 2 — run the browser credential-creation ceremony.
     status = 'creating';
     let credential: PublicKeyCredential | null = null;
@@ -85,11 +117,13 @@
       credential = (await navigator.credentials.create({ publicKey })) as PublicKeyCredential | null;
     } catch (err) {
       status = 'error';
+      errorAction = 'retry';
       if (err instanceof DOMException) {
         if (err.name === 'NotAllowedError') {
           errorMessage =
             'Passkey creation was cancelled. Please try again when you are ready.';
         } else if (err.name === 'InvalidStateError') {
+          errorAction = 'sign-in';
           errorMessage =
             'A passkey for this account is already registered on this device.';
         } else {
@@ -103,6 +137,7 @@
 
     if (!credential) {
       status = 'error';
+      errorAction = 'retry';
       errorMessage = 'No passkey was created. Please try again.';
       return;
     }
@@ -111,11 +146,13 @@
     status = 'finishing';
     try {
       const attestation = serializeAttestation(credential);
-      await registerFinish(token, attestation);
+      await registerFinish(tok, attestation);
     } catch (err) {
       status = 'error';
+      errorAction = 'retry';
       if (err instanceof ApiError) {
         if (err.status === 400) {
+          errorAction = 'new-link';
           errorMessage =
             'Registration could not be completed. The link may have expired — please request a new one.';
         } else {
@@ -139,37 +176,63 @@
       onverified();
     } catch {
       status = 'error';
+      errorAction = 'sign-in';
       errorMessage =
         'Your account was created but we could not load your profile. Try signing in.';
     }
-  });
+  }
 
-  function goToLogin() {
+  // Try again re-runs verify, which checks the token first: an expired link
+  // fails fast with "Send a new link" before any passkey is created. Focus then
+  // returns to the card so a keyboard or screen-reader user is not left on a
+  // removed button.
+  async function retry() {
+    const pending = run();
+    await tick();
+    panelEl?.focus();
+    await pending;
+  }
+
+  onMount(run);
+
+  function goToLogin(path?: string) {
     pendingVerifyToken.set(null);
     // Fixes the pathname back to '/' first, so the address bar doesn't end up
     // '/register/verify#/login' once ongotologin() sets the hash.
     history.replaceState({}, '', '/');
-    ongotologin();
+    ongotologin(path);
   }
 </script>
 
 <main class="verify-shell">
-  <header class="brand">
-    <h1 class="brand-title">{APP_NAME}</h1>
-  </header>
+  <AuthBrand />
 
   <Panel>
+    <div class="card-body" tabindex="-1" bind:this={panelEl}>
+    <StepIndicator {steps} />
     {#if status === 'verifying'}
-      <p class="text-muted">Verifying your link…</p>
+      <p class="text-muted">Checking your link…</p>
     {:else if status === 'creating'}
-      <p>Creating your passkey…</p>
-      <p class="text-muted">Follow the prompt from your device to register a passkey.</p>
+      <p>Create your passkey</p>
+      <p class="text-muted">{PASSKEY_PROMPT_HELP}</p>
     {:else if status === 'finishing'}
       <p class="text-muted">Finishing registration…</p>
     {:else if status === 'error'}
       <p class="text-error" role="alert">{errorMessage}</p>
-      <Button onclick={goToLogin}>Back to sign in</Button>
+      <div class="next">
+        {#if errorAction === 'retry'}
+          <Button variant="primary" onclick={retry}>{ACTION_LABELS.retry}</Button>
+        {:else if errorAction === 'new-link'}
+          <Button variant="primary" onclick={() => goToLogin(newLinkPath('register'))}>
+            {ACTION_LABELS['new-link']}
+          </Button>
+        {/if}
+        <Button variant={errorAction === 'sign-in' ? 'primary' : 'subtle'} onclick={() => goToLogin()}>
+          {ACTION_LABELS['sign-in']}
+        </Button>
+      </div>
     {/if}
+    </div>
   </Panel>
 </main>
 
@@ -180,14 +243,14 @@
     padding: 0 var(--space-4);
     width: 100%;
   }
-  .brand {
-    text-align: center;
-    margin-bottom: var(--space-5);
+  .card-body:focus {
+    outline: none;
   }
-  .brand-title {
-    font-size: var(--fs-xl);
-    font-weight: 600;
-    margin: 0;
+  .next {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
   }
 
   @media (max-width: 480px) {

@@ -173,9 +173,9 @@
     <p class="text-muted">Loading…</p>
   </div>
 {:else if mode === 'verify-register'}
-  <RegisterVerify onverified={() => enterApp('/')} ongotologin={() => enterApp('/login')} />
+  <RegisterVerify onverified={() => enterApp('/')} ongotologin={(path) => enterApp(path ?? '/login')} />
 {:else if mode === 'verify-recover'}
-  <RecoverVerify onverified={() => enterApp('/')} ongotologin={() => enterApp('/login')} />
+  <RecoverVerify onverified={() => enterApp('/')} ongotologin={(path) => enterApp(path ?? '/login')} />
 {:else if showHome && homeInfo}
   <Home info={homeInfo} />
 {:else if $currentUser !== null && getRoute().path !== '/login'}

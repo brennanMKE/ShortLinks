@@ -9,7 +9,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import Link from '../lib/Link.svelte';
-  import { APP_NAME } from '../lib/branding';
+  import AuthBrand from '../lib/AuthBrand.svelte';
   import { HOME_REDIRECT_DELAY_MS, redirectHost, type HomeInfo } from '../lib/home';
 
   let { info }: { info: HomeInfo } = $props();
@@ -28,12 +28,10 @@
 </script>
 
 <main class="home-shell">
-  <header class="brand">
-    <h1 class="brand-title">{APP_NAME}</h1>
-    <p class="text-muted tagline" role="status" aria-live="polite">
-      Taking you to {redirectHost(info.redirect_url)}…
-    </p>
-  </header>
+  <AuthBrand />
+  <p class="text-muted tagline" role="status" aria-live="polite">
+    Taking you to {redirectHost(info.redirect_url)}…
+  </p>
 
   <p class="go">
     <a href={info.redirect_url} rel="noopener" class="btn-link btn-link-primary">Go now</a>
@@ -50,16 +48,8 @@
     width: 100%;
     text-align: center;
   }
-  .brand {
-    margin-bottom: var(--space-4);
-  }
-  .brand-title {
-    font-size: var(--fs-xl);
-    font-weight: 600;
-    margin: 0;
-  }
   .tagline {
-    margin: var(--space-1) 0 0;
+    margin: calc(-1 * var(--space-3)) 0 var(--space-4);
   }
   .go {
     margin: 0 0 var(--space-5);

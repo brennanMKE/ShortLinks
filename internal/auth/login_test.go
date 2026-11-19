@@ -706,3 +706,37 @@ func TestLogin_ValidationFailureLogsDevInfo(t *testing.T) {
 		t.Errorf("log record does not name the received origin: %s", logged)
 	}
 }
+
+// TestStartLogin_UsernamelessChallengeForPasskeyAutofill pins the server side of
+// the sign-in screen's passkey autofill (#0172). The browser's conditional
+// mediation request is made with no email, so login/start must hand back a
+// challenge with no allowCredentials (any resident credential may answer), and
+// must look the same for an unknown email so account existence never leaks.
+func TestStartLogin_UsernamelessChallengeForPasskeyAutofill(t *testing.T) {
+	pool := testPool(t)
+	setRegistrationsEnabled(t, pool, true)
+	regSvc := newService(t, pool, &recordingMailer{}, "")
+	loginSvc := newLoginService(t, pool)
+
+	const email = "autofill@example.com"
+	registerWithAuthenticator(t, regSvc, pool, email)
+
+	for _, tc := range []struct{ name, email string }{
+		{"no email", ""},
+		{"whitespace only", "   "},
+		{"unknown email", "nobody@example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertion, err := loginSvc.StartLogin(context.Background(), tc.email)
+			if err != nil {
+				t.Fatalf("StartLogin(%q): %v", tc.email, err)
+			}
+			if n := len(assertion.Response.AllowedCredentials); n != 0 {
+				t.Errorf("allowCredentials = %d entries, want none (usernameless)", n)
+			}
+			if len(assertion.Response.Challenge) == 0 {
+				t.Error("challenge is empty")
+			}
+		})
+	}
+}

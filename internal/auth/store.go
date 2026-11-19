@@ -225,13 +225,40 @@ func (s *Store) LookupPendingRegistration(ctx context.Context, token string, now
 // handle issued to the browser at the verify step; it is stored so the finish
 // leg can replay it and persist it on the credential row.
 func (s *Store) SaveRegistrationChallenge(ctx context.Context, challenge []byte, token string, handle []byte, now time.Time) error {
-	if _, err := s.pool.Exec(ctx,
+	return s.replaceTokenChallenge(ctx, token, "registration",
 		`INSERT INTO webauthn_challenges
 		     (challenge, user_id, pending_registration_token, purpose, expires_at, user_handle)
 		 VALUES ($1, NULL, $2, 'registration', $3, $4)`,
-		challenge, token, now.Add(registrationTTL), handle,
-	); err != nil {
-		return fmt.Errorf("auth: saving registration challenge: %w", err)
+		challenge, token, now.Add(registrationTTL), handle)
+}
+
+// replaceTokenChallenge deletes any earlier challenge of the given purpose for
+// the token and inserts the new one in one transaction, so exactly one exists.
+// The verify step can run more than once for a token (the browser's create step
+// failed and the user retried), and finish's DELETE ... RETURNING would
+// otherwise pick an arbitrary, possibly stale, row (#0172).
+func (s *Store) replaceTokenChallenge(ctx context.Context, token, purpose, insertSQL string, args ...any) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("auth: saving %s challenge: %w", purpose, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// Lock the token's pending row so two simultaneous verify calls serialize:
+	// without it both could delete nothing and both insert.
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM pending_registrations WHERE token = $1 FOR UPDATE`, token); err != nil {
+		return fmt.Errorf("auth: saving %s challenge: %w", purpose, err)
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM webauthn_challenges WHERE pending_registration_token = $1 AND purpose = $2`,
+		token, purpose); err != nil {
+		return fmt.Errorf("auth: saving %s challenge: %w", purpose, err)
+	}
+	if _, err := tx.Exec(ctx, insertSQL, args...); err != nil {
+		return fmt.Errorf("auth: saving %s challenge: %w", purpose, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("auth: saving %s challenge: %w", purpose, err)
 	}
 	return nil
 }
@@ -391,15 +418,11 @@ func (s *Store) LookupRecoveryToken(ctx context.Context, token string, now time.
 // purpose is 'recovery' so it is consumed only by the recovery finish path and
 // never collides with a registration challenge for the same token.
 func (s *Store) SaveRecoveryChallenge(ctx context.Context, challenge []byte, userID int64, token string, handle []byte, now time.Time) error {
-	if _, err := s.pool.Exec(ctx,
+	return s.replaceTokenChallenge(ctx, token, "recovery",
 		`INSERT INTO webauthn_challenges
 		     (challenge, user_id, pending_registration_token, purpose, expires_at, user_handle)
 		 VALUES ($1, $2, $3, 'recovery', $4, $5)`,
-		challenge, userID, token, now.Add(recoveryTTL), handle,
-	); err != nil {
-		return fmt.Errorf("auth: saving recovery challenge: %w", err)
-	}
-	return nil
+		challenge, userID, token, now.Add(recoveryTTL), handle)
 }
 
 // ConsumeRecoveryChallenge atomically deletes and returns the recovery challenge
