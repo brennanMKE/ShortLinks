@@ -318,8 +318,8 @@ for exactly that exposure.
 The size cost that normally discourages picking the highest level doesn't
 apply here: the payload is always a short URL under our own domain. At
 level H that's QR version 4 (41×41 modules including the quiet zone) for a
-typical 6-character generated key, and no worse than version 5 (45×45) even
-at `links.key`'s `VARCHAR(12)` maximum length (pinned by
+typical 6-character generated key, version 5 (45×45) for a 12-character key, and no worse than version 6 (49×49) even
+at `links.key`'s `VARCHAR(32)` maximum length (pinned by
 `TestLevel_TypicalShortURLStaysSmall`). Paying for maximum resilience costs
 nothing meaningful in size or scannability at this content length.
 

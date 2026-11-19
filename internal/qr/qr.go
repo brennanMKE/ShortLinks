@@ -75,8 +75,8 @@ func ShortURL(base, key string) string {
 // apply here: the encoded payload is always a short URL under our own
 // domain (`{BASE_URL}/u/{key}`), and at H that stays at QR
 // version 4 (41x41 modules including the quiet zone) for a typical 6-char
-// generated key (links.KeyLength), and no worse than version 5 (45x45) even
-// at links.key's VARCHAR(12) maximum length — see qr_test.go's
+// generated key (links.KeyLength), version 5 (45x45) for a 12-character key,
+// and no worse than version 6 (49x49) even at links.key's VARCHAR(32) maximum length — see qr_test.go's
 // TestLevel_TypicalShortURLStaysSmall, which pins that upper bound so a
 // future change to the key format is forced to re-examine this comment
 // rather than silently regress code density. Paying for maximum resilience

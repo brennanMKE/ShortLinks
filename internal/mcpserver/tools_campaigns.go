@@ -59,6 +59,7 @@ type batchRowIn struct {
 type batchCreateIn struct {
 	Slug           string       `json:"slug" jsonschema:"The campaign to add the new links to"`
 	Rows           []batchRowIn `json:"rows" jsonschema:"One entry per link to create, usually one per channel. All are created together or none are"`
+	KeyLength      int          `json:"key_length,omitempty" jsonschema:"Length of each generated key, 6 to 32 (default 6). Use 12 or more for links that must not be guessable"`
 	IdempotencyKey string       `json:"idempotency_key,omitempty" jsonschema:"A unique string for this batch. Retrying with the same value returns the first result instead of creating the links again"`
 }
 
@@ -189,8 +190,12 @@ func registerCampaignTools(b *Builder) {
 		if r := requiredSeg("slug", in.Slug); r != nil {
 			return r, nil
 		}
+		body := map[string]any{"rows": in.Rows}
+		if in.KeyLength != 0 {
+			body["key_length"] = in.KeyLength
+		}
 		return proxy(ctx, c, http.MethodPost, "/api/campaigns/"+pathSeg(in.Slug)+"/links/batch", nil,
-			map[string]any{"rows": in.Rows}, idemHeader(in.IdempotencyKey), func(m map[string]any) string {
+			body, idemHeader(in.IdempotencyKey), func(m map[string]any) string {
 				items, _ := m["links"].([]any)
 				s := fmt.Sprintf("Created %d links in campaign %s", len(items), in.Slug)
 				for _, it := range items {

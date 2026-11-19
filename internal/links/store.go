@@ -149,6 +149,11 @@ type NewLink struct {
 	UTMTerm     string
 	UTMContent  string
 	Placement   string
+	// MinKeyLength (#0179), when > 0, restricts the generated-key dedup in
+	// CreateOrReactivateLink to existing links whose key is at least this long,
+	// so a request for a longer key never gets a shorter existing one back. A
+	// shorter match is ignored and a new link is inserted. Zero means no limit.
+	MinKeyLength int
 }
 
 // CreateLink inserts a new active, non-denied link and returns the full row
@@ -354,7 +359,7 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	// Dedup lookup: an existing non-denied link for this user + destination. The
 	// row is locked FOR UPDATE so a concurrent create of the same URL serializes
 	// behind this one rather than racing to a second insert.
-	existing, err := s.lockExisting(ctx, tx, in.UserID, in.DestinationURL)
+	existing, err := s.lockExisting(ctx, tx, in.UserID, in.DestinationURL, in.MinKeyLength)
 	switch {
 	case err == nil:
 		// A match exists. Active → forward-merge requested metadata, return;
@@ -653,15 +658,17 @@ func applyRequestedMetadataTx(ctx context.Context, tx pgx.Tx, existing Link, in 
 // click_count excludes is_bot = TRUE clicks (#0101), matching
 // clicks.UTMStatsForLink's ClickCount so a link never carries two
 // contradictory totals across the API surface.
-func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, destinationURL string) (Link, error) {
+func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, destinationURL string, minKeyLength int) (Link, error) {
 	row := q.QueryRow(ctx,
 		`SELECT `+linkColumns+`,
 		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id AND c.is_bot = FALSE) AS click_count
 		   FROM links l
 		  WHERE l.user_id = $1 AND l.destination_url = $2 AND l.denied_reason = 0
+		    AND length(l.key) >= $3
+		  ORDER BY l.id
 		  LIMIT 1
 		  FOR UPDATE`,
-		userID, destinationURL,
+		userID, destinationURL, minKeyLength,
 	)
 	return scanLink(row)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -264,6 +265,9 @@ type createLinkRequest struct {
 	UTMTerm        string     `json:"utm_term"`
 	UTMContent     string     `json:"utm_content"`
 	Placement      string     `json:"placement"`
+	// KeyLength (#0179) is the length of the generated key, 6..32 (default 6).
+	// It is ignored when a custom key is supplied.
+	KeyLength *int `json:"key_length"`
 }
 
 // customKey returns the user-supplied alias from whichever field carried it, or
@@ -290,8 +294,10 @@ type listLinksResponse struct {
 
 // Create handles POST /api/links. It validates the destination URL, resolves a
 // key (a user-supplied custom alias if present and free, otherwise a freshly
-// generated unique 6-char key), inserts the link, and returns 201 with the full
-// link object carrying "duplicate": false.
+// generated unique key, 6 characters unless key_length asks for more), inserts
+// the link, and returns 201 with the full link object carrying
+// "duplicate": false. A generated-key request reuses an existing link for the
+// same destination only if its key is at least key_length long.
 //
 // SEAMS — the layered issues slot into this method in the following ORDER,
 // between request validation and the insert. None are implemented here:
@@ -342,6 +348,18 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	customKey := strings.TrimSpace(req.customKey())
+
+	keyLength := links.KeyLength
+	// key_length only applies to generated keys: it is not validated (or used)
+	// when a custom key is sent.
+	if req.KeyLength != nil && customKey == "" {
+		if !links.ValidKeyLength(*req.KeyLength) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("key_length must be between %d and %d", links.MinKeyLength, links.MaxKeyLength))
+			return
+		}
+		keyLength = *req.KeyLength
+	}
+	genKey := links.KeyGenerator(keyLength)
 
 	// ───────────────────────────────────────────────────────────────────────
 	// #0099 CAMPAIGN RESOLUTION — an optional campaign_id or campaign_slug is
@@ -396,6 +414,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		UTMTerm:        strings.TrimSpace(req.UTMTerm),
 		UTMContent:     strings.TrimSpace(req.UTMContent),
 		Placement:      strings.TrimSpace(req.Placement),
+		MinKeyLength:   keyLength,
 	}
 
 	// ───────────────────────────────────────────────────────────────────────
@@ -414,7 +433,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if code, ruleID, matched := filters.Evaluate(rules, dest); matched {
-			denied, err := h.store.CreateDeniedLink(r.Context(), in, int16(code), links.GenerateUniqueKey)
+			denied, err := h.store.CreateDeniedLink(r.Context(), in, int16(code), genKey)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal server error")
 				return
@@ -469,7 +488,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		// Custom aliases are NOT deduplicated (PRD) — attempt the insert with the
 		// supplied key directly; a clash surfaces as ErrKeyTaken → 409 below.
 		if !validKey(customKey) {
-			writeError(w, http.StatusBadRequest, "custom key must be 1-12 url-safe characters")
+			writeError(w, http.StatusBadRequest, "custom key must be 1-32 url-safe characters")
 			return
 		}
 		in.Key = customKey
@@ -493,7 +512,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		// any write atomically and reports which branch it took. Key generation
 		// happens inside that transaction (only on the no-match/insert branch).
 		// ───────────────────────────────────────────────────────────────────
-		link, outcome, err := h.store.CreateOrReactivateLink(r.Context(), in, links.GenerateUniqueKey)
+		link, outcome, err := h.store.CreateOrReactivateLink(r.Context(), in, genKey)
 		switch {
 		case err == nil:
 			created = link
@@ -1422,12 +1441,12 @@ func validDestinationURL(s string) bool {
 	return u.Host != ""
 }
 
-// validKey reports whether a user-supplied custom alias is acceptable: 1–12
+// validKey reports whether a user-supplied custom alias is acceptable: 1–32
 // characters drawn from the same url-safe alphabet as generated keys plus a few
-// conventional separators. The 12-char ceiling matches the links.key column
-// (VARCHAR(12)).
+// conventional separators. The 32-char ceiling matches the links.key column
+// (VARCHAR(32), migration 000022).
 func validKey(s string) bool {
-	if len(s) == 0 || len(s) > 12 {
+	if len(s) == 0 || len(s) > links.MaxKeyLength {
 		return false
 	}
 	for _, c := range s {

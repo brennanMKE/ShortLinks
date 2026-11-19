@@ -296,6 +296,15 @@ func TestRoundTrip_InitializeListAndEveryTool(t *testing.T) {
 		t.Errorf("second create (duplicate) = %s", textOf(res))
 	}
 
+	// #0179: key_length makes a longer generated key; out of range is an error.
+	long := ok(t, cs, "create_link", map[string]any{"destination_url": "https://example.com/long", "key_length": 16})
+	if k, _ := long["key"].(string); len(k) != 16 {
+		t.Errorf("create_link key_length=16 key = %q, want 16 chars", k)
+	}
+	if res := call(t, cs, "create_link", map[string]any{"destination_url": "https://example.com/bad", "key_length": 99}); !res.IsError {
+		t.Errorf("create_link key_length=99 should be an error, got %s", textOf(res))
+	}
+
 	got := ok(t, cs, "get_link", map[string]any{"key": key})
 	if got["short_url"] != testBase+"/u/"+key || got["title"] != "One" {
 		t.Errorf("get_link = %v", got)

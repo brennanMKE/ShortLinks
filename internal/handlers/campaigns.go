@@ -105,7 +105,7 @@ type campaignLinksProvider interface {
 // unbounded name produces a 500 ("index row size exceeds btree version 4
 // maximum") instead of a clean validation error. Chosen generously relative
 // to that ~2704-byte limit — 255 mirrors the conventional bound used
-// elsewhere (e.g. links.key's VARCHAR(12), scaled up for a free-text name).
+// elsewhere (e.g. links.key's VARCHAR(32), scaled up for a free-text name).
 // Counted in RUNES (utf8.RuneCountInString), not bytes: len() would reject a
 // 100-character CJK name (300 bytes) as "over 255 characters", which is both
 // wrong and a confusing error for #0103's form. 255 runes is still at most
@@ -1271,6 +1271,9 @@ func (r batchCreateLinkRow) duplicateKey() string {
 // batchCreateLinksRequest is the POST /api/campaigns/{slug}/links/batch body.
 type batchCreateLinksRequest struct {
 	Rows []batchCreateLinkRow `json:"rows"`
+	// KeyLength (#0179) is the generated key length for every row, 6..32
+	// (default 6).
+	KeyLength *int `json:"key_length"`
 }
 
 // indexedBatchRow pairs a trimmed, non-blank batchCreateLinkRow with
@@ -1343,6 +1346,15 @@ func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Reque
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	keyLength := links.KeyLength
+	if req.KeyLength != nil {
+		if !links.ValidKeyLength(*req.KeyLength) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("key_length must be between %d and %d", links.MinKeyLength, links.MaxKeyLength))
+			return
+		}
+		keyLength = *req.KeyLength
 	}
 
 	c, err := h.store.GetCampaignBySlug(r.Context(), u.ID, slug)
@@ -1512,7 +1524,7 @@ func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Reque
 		})
 	}
 
-	created, err := h.links.CreateLinksBatch(r.Context(), newLinks, links.GenerateUniqueKey)
+	created, err := h.links.CreateLinksBatch(r.Context(), newLinks, links.KeyGenerator(keyLength))
 	switch {
 	case err == nil:
 		// fall through.

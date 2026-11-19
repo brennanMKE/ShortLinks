@@ -117,7 +117,7 @@ described in the PRD.
 |---|---|---|
 | `id` | `BIGSERIAL` | Primary key |
 | `user_id` | `BIGINT` | FK → `users(id)`, not null |
-| `key` | `VARCHAR(12)` | Unique short code used in redirect URLs (`/u/{key}`). UNIQUE constraint is the redirect-lookup index. |
+| `key` | `VARCHAR(32)` | Unique short code used in redirect URLs (`/u/{key}`). Widened from `VARCHAR(12)` by `000022_widen_links_key` (#0179); existing keys are unchanged, and the down migration fails if a key longer than 12 characters exists. UNIQUE constraint is the redirect-lookup index. |
 | `destination_url` | `TEXT` | Full destination URL, not null. Always the composed URL (UTM params baked in, if any) — see `docs/utm.md` |
 | `title` | `TEXT` | Optional display title |
 | `created_at` | `TIMESTAMPTZ` | Default `now()` |

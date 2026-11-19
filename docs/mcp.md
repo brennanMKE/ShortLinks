@@ -115,6 +115,7 @@ answer `405`, which clients treat as "no server-to-client stream".
 | "Which links got no clicks in the last 30 days?" | `get_idle_links` |
 | "Compare the spring-launch and summer-sale campaigns." | `compare_campaigns` |
 | "Make a short link to https://example.com/pricing with the key `pricing`." | `create_link` |
+| "Make an unguessable invite link to https://example.com/join/42, with a 16-character key." | `create_link` (`key_length: 16`) |
 | "Create one link per channel (email, twitter, print) for the launch page in the `spring-launch` campaign." | `batch_create_campaign_links` |
 | "Turn off the `old-promo` link." | `deactivate_link` |
 | "Give me the QR code for `pricing`." | `get_link_qr` |
@@ -153,7 +154,7 @@ answer `405`, which clients treat as "no server-to-client stream".
 | `list_links` | `GET /api/links` (all the [links.md](links.md) search params) | read-only |
 | `get_link` | `GET /api/links/{key}` | read-only |
 | `get_link_qr` | `GET /api/links/{key}/qr.png`, returned as image content | read-only |
-| `create_link` | `POST /api/links` | write |
+| `create_link` | `POST /api/links`. `key` sets a custom key (1-32 characters), `key_length` (6-32, default 6) makes a longer generated one for links that must not be guessable | write |
 | `update_link` | `PATCH /api/links/{key}` | write, idempotent |
 | `deactivate_link` | `PATCH /api/links/{key}` `{"active":false}` | write, destructive |
 | `reactivate_link` | `PATCH /api/links/{key}` `{"active":true}` | write, idempotent |
@@ -161,7 +162,7 @@ answer `405`, which clients treat as "no server-to-client stream".
 | `create_campaign` | `POST /api/campaigns` | write |
 | `update_campaign` | `PATCH /api/campaigns/{slug}` | write, idempotent |
 | `delete_campaign` | `DELETE /api/campaigns/{slug}` | write, destructive |
-| `batch_create_campaign_links` | `POST /api/campaigns/{slug}/links/batch` | write |
+| `batch_create_campaign_links` | `POST /api/campaigns/{slug}/links/batch`. `key_length` (6-32) applies to every row | write |
 | `assign_links_to_campaign`, `remove_link_from_campaign` | the campaign link routes | write, idempotent |
 | `list_reports` | `GET /api/reports` | read-only |
 | `get_overview`, `get_top_content`, `get_top_links`, `get_breakdown`, `get_timeseries`, `get_movers`, `get_idle_links`, `compare_campaigns`, `get_campaign_performance`, `get_link_performance` | `GET /api/reports/{name}`, but they call `internal/reports` directly | read-only |

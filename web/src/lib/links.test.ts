@@ -214,7 +214,7 @@ describe('noticeForError', () => {
   });
 
   it('maps the 400 about the custom alias to the key field, not the URL field', () => {
-    const msg = 'custom key must be 1-12 url-safe characters';
+    const msg = 'custom key must be 1-32 url-safe characters';
     const n = noticeForError(new ApiError(400, msg, { error: msg }));
     expect(n.kind).toBe('error');
     if (n.kind === 'error') {
@@ -296,14 +296,13 @@ describe('isValidKey', () => {
   it('accepts letters, digits, hyphen and underscore up to the cap', () => {
     expect(isValidKey('launch')).toBe(true);
     expect(isValidKey('a-b_C9')).toBe(true);
+    expect(isValidKey('soldering0903')).toBe(true); // 13: over the old 12 cap (#0179)
     expect(isValidKey('a'.repeat(MAX_KEY_LENGTH))).toBe(true);
   });
 
   // The reported case (#0118): both aliases the user tried were over the cap
   // by one and two characters, and the failure was reported on the URL field.
-  it('rejects an alias past the 12-character cap', () => {
-    expect(isValidKey('soldering0903')).toBe(false); // 13
-    expect(isValidKey('soldering-0903')).toBe(false); // 14
+  it('rejects an alias past the 32-character cap', () => {
     expect(isValidKey('a'.repeat(MAX_KEY_LENGTH + 1))).toBe(false);
   });
 

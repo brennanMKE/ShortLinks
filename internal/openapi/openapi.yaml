@@ -280,7 +280,7 @@ paths:
       summary: Create a short link
       description: |
         Runs the URL filter first (`422 url_denied`), then resolves the key (a
-        custom alias, or a generated six-character key) and deduplicates
+        custom alias, or a generated key of `key_length` characters, six by default) and deduplicates
         generated keys per destination. Creating a link for a destination the
         caller already shortened returns the existing link with
         `"duplicate": true`, reactivating it if it was inactive. Custom aliases
@@ -1034,8 +1034,8 @@ components:
       name: key
       in: path
       required: true
-      description: The link's key, 1 to 12 characters from `a-z A-Z 0-9 - _`.
-      schema: { type: string, minLength: 1, maxLength: 12 }
+      description: The link's key, 1 to 32 characters from `a-z A-Z 0-9 - _`.
+      schema: { type: string, minLength: 1, maxLength: 32 }
     CampaignSlug:
       name: slug
       in: path
@@ -1407,8 +1407,14 @@ components:
         title: { type: string }
         key:
           type: string
-          pattern: "^[a-zA-Z0-9_-]{1,12}$"
-          description: A custom alias. `custom_key` and `alias` are synonyms. The first non-empty one wins.
+          pattern: "^[a-zA-Z0-9_-]{1,32}$"
+          description: "A custom alias of 1 to 32 characters. `custom_key` and `alias` are synonyms. The first non-empty one wins. A client-chosen random key of 12 or more base-62 characters is a way to get an unguessable link. A taken key answers `409`."
+        key_length:
+          type: integer
+          minimum: 6
+          maximum: 32
+          default: 6
+          description: Length of the generated key. Ignored (and not validated) when a custom key is sent. Use 12 or more for links that must not be guessable. Out of range answers `400`. Deduplication reuses an existing link for the same destination only if its key is at least this long; otherwise a new link is created.
         custom_key: { type: string, description: Synonym of `key`. }
         alias: { type: string, description: Synonym of `key`. }
         expires_at: { type: [string, "null"], format: date-time }
@@ -1623,6 +1629,12 @@ components:
       additionalProperties: false
       required: [rows]
       properties:
+        key_length:
+          type: integer
+          minimum: 6
+          maximum: 32
+          default: 6
+          description: Length of every generated key. Out of range answers `400`.
         rows:
           type: array
           maxItems: 50

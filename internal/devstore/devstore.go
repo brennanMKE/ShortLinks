@@ -1038,7 +1038,7 @@ func (s *Store) CreateOrReactivateLink(_ context.Context, in links.NewLink, genK
 
 	// Dedup lookup.
 	for i, l := range s.links {
-		if l.UserID == in.UserID && l.DestinationURL == in.DestinationURL && l.DeniedReason == 0 {
+		if l.UserID == in.UserID && l.DestinationURL == in.DestinationURL && l.DeniedReason == 0 && len(l.Key) >= in.MinKeyLength {
 			if l.Active {
 				applyRequestedMetadata(&s.links[i], in)
 				return s.cloneLink(s.links[i]), links.OutcomeActiveDuplicate, nil

@@ -261,23 +261,27 @@ func TestLevel_IsHighest(t *testing.T) {
 }
 
 // TestLevel_TypicalShortURLStaysSmall pins the size claim in Level's doc
-// comment: at Highest, a short URL built from a key at links.key's
-// VARCHAR(12) maximum length — the worst case, well beyond the typical
-// 6-char generated key (links.KeyLength) — stays at QR version 5 or
-// smaller (45x45 modules including the quiet zone). If the key format ever
-// grows materially longer than that column bound allows today, this test
-// starts failing and forces a re-reading of that comment's size-cost
-// reasoning rather than a silent density regression.
+// comment: at Highest, a short URL for a 12-character key (the length
+// recommended for unguessable invite links) stays at QR version 5 or smaller
+// (45x45 modules including the quiet zone), and even the longest key links.key
+// holds (VARCHAR(32), #0179) stays at version 6 (49x49). If the key format
+// ever grows beyond that, this test starts failing and forces a re-reading of
+// that comment's size-cost reasoning rather than a silent density regression.
 func TestLevel_TypicalShortURLStaysSmall(t *testing.T) {
-	// 12 chars: links.key's VARCHAR(12) maximum, i.e. the longest key this
-	// package could ever be asked to encode.
-	bitmap, err := Matrix(ShortURL(testBase, "abcdEFGH1234"))
-	if err != nil {
-		t.Fatalf("Matrix: %v", err)
-	}
-	const maxModules = 45 // QR version 5 including the 4-module quiet zone.
-	if len(bitmap) > maxModules {
-		t.Fatalf("bitmap is %dx%d modules, want at most %dx%d", len(bitmap), len(bitmap), maxModules, maxModules)
+	for _, tc := range []struct {
+		key        string
+		maxModules int
+	}{
+		{"abcdEFGH1234", 45},                     // 12 chars: QR version 5.
+		{"abcdEFGH1234abcdEFGH1234abcdEFGH", 49}, // 32 chars: links.key's maximum, QR version 6.
+	} {
+		bitmap, err := Matrix(ShortURL(testBase, tc.key))
+		if err != nil {
+			t.Fatalf("Matrix: %v", err)
+		}
+		if len(bitmap) > tc.maxModules {
+			t.Fatalf("key of %d chars: bitmap is %dx%d modules, want at most %dx%d", len(tc.key), len(bitmap), len(bitmap), tc.maxModules, tc.maxModules)
+		}
 	}
 }
 

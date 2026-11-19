@@ -69,11 +69,11 @@ export function qrPngUrl(key: string): string {
 
 /**
  * The maximum length of a custom alias, mirroring the server's `validKey`
- * (internal/handlers/links.go) and the `links.key VARCHAR(12)` column it
+ * (internal/handlers/links.go) and the `links.key VARCHAR(32)` column it
  * guards. Exported so the form's hint can name the number rather than
  * restating it in a second place that could drift from this one.
  */
-export const MAX_KEY_LENGTH = 12;
+export const MAX_KEY_LENGTH = 32;
 
 /**
  * Client-side pre-validation of a custom alias, mirroring the server's
@@ -189,7 +189,7 @@ function serverMessage(err: ApiError): string {
  * (internal/handlers/links.go Create) has four distinct 400s and only two are
  * about a field the create form shows:
  *
- *   "custom key must be 1-12 url-safe characters" → the alias input
+ *   "custom key must be 1-32 url-safe characters" → the alias input
  *   "destination_url must be a valid absolute http(s) URL" → the URL input
  *   "invalid request body" / "campaigns are not available" → neither; these
  *     are client/server-wiring faults with no field to point at, so they

@@ -17,7 +17,7 @@ Migration `migrations/000002_create_links.up.sql` defines the `links` table:
 CREATE TABLE links (
     id              BIGSERIAL PRIMARY KEY,
     user_id         BIGINT NOT NULL REFERENCES users(id),
-    key             VARCHAR(12) UNIQUE NOT NULL,
+    key             VARCHAR(32) UNIQUE NOT NULL,
     destination_url TEXT NOT NULL,
     title           TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -67,15 +67,39 @@ The request body accepts a custom alias in any of three fields (`key`,
 is present the handler validates and uses it directly. When no alias is
 supplied the store generates one.
 
-**Custom alias validation** (`validKey` in `internal/handlers/links.go`): 1–12
-characters drawn from `[a-zA-Z0-9\-_]`. The 12-character ceiling matches the
-`links.key` column definition (`VARCHAR(12)`).
+**Custom alias validation** (`validKey` in `internal/handlers/links.go`): 1–32
+characters drawn from `[a-zA-Z0-9\-_]`. The 32-character ceiling is
+`links.MaxKeyLength` and matches the `links.key` column definition
+(`VARCHAR(32)`, widened from 12 by migration `000022`, #0179).
 
-**Generated key** (`internal/links/keygen.go`): a 6-character base-62 string
+**Unguessable keys (#0179).** A 6-character key is about 36 bits, fine for a
+marketing link but guessable at scale. A link that grants access to something
+(an invitation, a private document) needs more. There are two ways to get one:
+
+1. **Let the server generate it.** Send `key_length` (6–32, default 6) on
+   `POST /api/links`, or at the top level of the body of
+   `POST /api/campaigns/{slug}/links/batch` to apply it to every row. 12
+   characters is about 71 bits and 16 is about 95. Out-of-range values answer
+   `400`. `key_length` is ignored, and not validated, when a custom key is
+   sent. Collision handling is unchanged (up to 5 retries). Deduplication
+   still applies, with one rule: an existing link for the same destination is
+   reused only if its key is at least `key_length` characters long. Otherwise a
+   new link with a longer key is created, so asking for `key_length: 16` never
+   hands back an old 6-character key.
+2. **Choose it yourself.** Send 12 or more random base-62 characters as `key`
+   (up to 32). No server change is needed. Custom keys are never deduplicated,
+   so a taken key answers `409`. Pair a client-chosen key with an
+   `Idempotency-Key` header so a retry replays the first response instead of
+   hitting `409` (see docs/using-api-tokens.md).
+
+**Generated key** (`internal/links/keygen.go`): a 6-character (by default) base-62 string
 drawn from the alphabet `abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ`.
 Characters are selected using `crypto/rand` with rejection sampling (bytes
 `>= 248` are discarded) to avoid modulo bias across the 62-character alphabet.
-The constant `KeyLength = 6` controls the length.
+The constant `KeyLength = 6` is the default length; `GenerateKeyN` and
+`GenerateUniqueKeyN` take an explicit length (`MinKeyLength` 6 to
+`MaxKeyLength` 32), and `KeyGenerator(n)` adapts one to the store's `genKey`
+callback.
 
 `GenerateUniqueKey` wraps `GenerateKey`, retrying up to `maxKeyAttempts` (5)
 times with a caller-supplied `exists` callback to confirm the key is free. It

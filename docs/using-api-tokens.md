@@ -112,9 +112,40 @@ curl -s -H "Authorization: Bearer $SHORTLINKS_TOKEN" \
 ```
 
 The short URL is `$SHORTLINKS_URL/u/<key>`, where `key` comes from the
-response. Optional fields include `key` (a custom alias) and `expires_at`
-(RFC 3339). Creating a link for a destination you already shortened returns
-the existing link with `"duplicate": true`.
+response. Optional fields include `key` (a custom alias, 1-32 characters from
+`a-z A-Z 0-9 - _`), `key_length` and `expires_at` (RFC 3339). Creating a link
+for a destination you already shortened returns the existing link with
+`"duplicate": true`.
+
+#### Unguessable links
+
+A generated key has 6 characters (about 36 bits). If the link itself is a
+secret, such as an invitation, use a longer key in one of two ways:
+
+- **Ask the server for a longer key.** Add `"key_length": 16` (6 to 32, default
+  6) to `POST /api/links`, or to the top level of a batch create body to apply
+  it to every row. 12 characters is about 71 bits. `400` if out of range.
+- **Send your own random key.** Put 12 or more random base-62 characters in
+  `key` (up to 32). A custom key is never deduplicated and answers `409` if it
+  is taken, so send an `Idempotency-Key` so a retry replays the first response.
+
+For example, an invitation link whose key is derived from the invitation id
+(`base62(HMAC-SHA256(secret, "invite:"+id))[:12]`):
+
+```sh
+curl -s -H "Authorization: Bearer $SHORTLINKS_TOKEN" \
+     -H "Idempotency-Key: invite-8841" \
+     -H "Content-Type: application/json" \
+     -d '{"destination_url":"https://app.example.com/join/8841",
+          "key":"q7Zr0TnKd3Vb","expires_at":"2026-12-31T00:00:00Z",
+          "utm_source":"invite","utm_medium":"share"}' \
+     "$SHORTLINKS_URL/api/links"
+```
+
+A retry with the same `Idempotency-Key` and body returns the stored `201` with
+`Idempotent-Replayed: true`. After the link expires, `/u/<key>` stops
+redirecting. Longer keys make a slightly denser QR code (about 49x49 modules at
+32 characters).
 
 ### Create many links in one campaign
 

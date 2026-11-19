@@ -77,7 +77,8 @@ type keyIn struct {
 type createLinkIn struct {
 	DestinationURL string `json:"destination_url" jsonschema:"The full http or https URL the short link redirects to"`
 	Title          string `json:"title,omitempty" jsonschema:"A human-readable title for the link"`
-	Key            string `json:"key,omitempty" jsonschema:"A custom short key. Omit it to get a generated one"`
+	Key            string `json:"key,omitempty" jsonschema:"A custom short key of 1 to 32 characters from a-z A-Z 0-9 - _. Omit it to get a generated one"`
+	KeyLength      int    `json:"key_length,omitempty" jsonschema:"Length of the generated key, 6 to 32 (default 6). Use 12 or more for links that must not be guessable. Ignored when key is set"`
 	ExpiresAt      string `json:"expires_at,omitempty" jsonschema:"When the link stops redirecting, as an RFC 3339 timestamp such as 2026-12-31T23:59:59Z"`
 	CampaignSlug   string `json:"campaign_slug,omitempty" jsonschema:"Slug of one of your campaigns to put the link in"`
 	UTMSource      string `json:"utm_source,omitempty" jsonschema:"utm_source label recorded with the link, such as newsletter"`
