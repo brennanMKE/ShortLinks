@@ -179,6 +179,14 @@ envelope. A bad parameter is a tool error carrying the field and code
 (`invalid_tz`, field `tz`); an unknown campaign or link carries `campaign_not_found`
 or `link_not_found`.
 
+Filter values are matched whole, so a value that contains a comma (for example
+`utm_content` = `spring, 2026`) works: the tools send each array element as its
+own repeated parameter (`content=spring%2C+2026&content=...`) and, for a single
+element, escape the comma as `\,`. The HTTP reports take the same two forms: a
+repeated parameter is never split, while a parameter given once is still read as
+the older comma-separated list (`content=a,b`) with `\,` for a literal comma and
+`\\` for a backslash. See `GET /api/reports/{name}` in `openapi.yaml`.
+
 A test fails if a report is registered in `reports.NewDefaultRegistry()` without
 a tool (`reportTools` in `tools_reports.go`).
 

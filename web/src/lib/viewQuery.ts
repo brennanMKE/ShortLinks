@@ -160,9 +160,12 @@ export function clearFilters(s: ViewState): ViewState {
 
 /**
  * Query for a /api/reports/{name} call: window, tz, campaign scope and the UTM
- * filters (a repeated parameter per value). `extra` is appended last.
- * Note the reports also split each value on commas, so a value that itself
- * contains a comma cannot be matched exactly.
+ * filters. `extra` is appended last.
+ *
+ * Several values go as repeated parameters, which the reports take whole. A
+ * parameter sent once is still read as the older comma-separated list, so a
+ * lone value has its commas (and backslashes) escaped with a backslash. Either
+ * way a value that contains a comma matches exactly (#0187).
  */
 export function reportQuery(s: ViewState, tz: string, extra: Record<string, string> = {}): string {
   const q = new URLSearchParams();
@@ -174,7 +177,10 @@ export function reportQuery(s: ViewState, tz: string, extra: Record<string, stri
     q.set('range', s.range === 'custom' ? '30d' : s.range);
   }
   if (s.campaign) q.set('campaign', s.campaign);
-  for (const k of UTM_KEYS) for (const v of s.filters[k]) q.append(k, v);
+  for (const k of UTM_KEYS) {
+    const vals = s.filters[k];
+    for (const v of vals) q.append(k, vals.length === 1 ? v.replace(/[\\,]/g, '\\$&') : v);
+  }
   for (const [k, v] of Object.entries(extra)) q.set(k, v);
   return q.toString();
 }

@@ -828,27 +828,27 @@ paths:
           schema: { type: string }
         - name: source
           in: query
-          description: "`utm_source` values, comma-separated. `~none` matches empty."
+          description: '`utm_source` values: repeat the parameter for several (OR), each taken whole so a value may contain commas. A single value is also read as a comma-separated list; write `\,` for a literal comma and `\\` for a backslash. `~none` matches empty.'
           schema: { type: string }
         - name: medium
           in: query
-          description: "`utm_medium` values, comma-separated. `~none` matches empty."
+          description: '`utm_medium` values: repeat the parameter for several (OR), each taken whole so a value may contain commas. A single value is also read as a comma-separated list; write `\,` for a literal comma and `\\` for a backslash. `~none` matches empty.'
           schema: { type: string }
         - name: utm_campaign
           in: query
-          description: "`utm_campaign` values, comma-separated. `~none` matches empty."
+          description: '`utm_campaign` values: repeat the parameter for several (OR), each taken whole so a value may contain commas. A single value is also read as a comma-separated list; write `\,` for a literal comma and `\\` for a backslash. `~none` matches empty.'
           schema: { type: string }
         - name: content
           in: query
-          description: "`utm_content` values, comma-separated. `~none` matches empty."
+          description: '`utm_content` values: repeat the parameter for several (OR), each taken whole so a value may contain commas. A single value is also read as a comma-separated list; write `\,` for a literal comma and `\\` for a backslash. `~none` matches empty.'
           schema: { type: string }
         - name: term
           in: query
-          description: "`utm_term` values, comma-separated. `~none` matches empty."
+          description: '`utm_term` values: repeat the parameter for several (OR), each taken whole so a value may contain commas. A single value is also read as a comma-separated list; write `\,` for a literal comma and `\\` for a backslash. `~none` matches empty.'
           schema: { type: string }
         - name: placement
           in: query
-          description: Link placement values, comma-separated and case-insensitive. `~none` matches empty.
+          description: Link placement values, case-insensitive; repeated or comma-separated like `source`. `~none` matches empty.
           schema: { type: string }
         - name: include_bots
           in: query

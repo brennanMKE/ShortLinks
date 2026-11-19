@@ -493,7 +493,7 @@ in `STORAGE=json` dev mode.
 | `tz` | IANA zone, e.g. `America/Los_Angeles` | `DEFAULT_TIMEZONE`, else `UTC` |
 | `compare` | `previous` (same-length window immediately before), `none` | `previous` (no previous window for `range=all`) |
 | `campaign` | campaign slug, or `none` for clicks with no campaign | all |
-| `source`, `medium`, `utm_campaign`, `content`, `term`, `placement` | comma-separated (or repeated) values; `~none` matches empty/NULL | all |
+| `source`, `medium`, `utm_campaign`, `content`, `term`, `placement` | repeated parameters (`content=a&content=b`, each value taken whole, commas allowed) or one comma-separated parameter (`content=a,b`; write `\,` for a literal comma); `~none` matches empty/NULL | all |
 | `include_bots` | `true` / `false` | `false` |
 | `limit` | 1-500 | report-specific (`default_limit` in the catalogue) |
 

@@ -193,20 +193,73 @@ func (p Params) Validate(now time.Time) error {
 // parseDay parses a strict YYYY-MM-DD civil date (as UTC midnight).
 func parseDay(s string) (time.Time, error) { return time.Parse("2006-01-02", s) }
 
-// splitList flattens repeated and comma-separated values, trims, drops empties
-// and de-duplicates while keeping first-seen order.
+// splitList reads one filter parameter's raw values.
+//
+// A parameter given more than once (utm_content=a&utm_content=b) is a list of
+// whole values: nothing is split, so a value may contain commas. A parameter
+// given once is the older comma-separated form (utm_content=a,b), where a
+// literal comma is written \, and a literal backslash \\ (see
+// EscapeFilterValue). Values are trimmed, empties dropped and duplicates
+// removed, keeping first-seen order.
 func splitList(raw []string) []string {
 	var out []string
 	seen := map[string]bool{}
-	for _, r := range raw {
-		for _, part := range strings.Split(r, ",") {
-			part = strings.TrimSpace(part)
-			if part == "" || seen[part] {
-				continue
-			}
-			seen[part] = true
-			out = append(out, part)
+	add := func(part string) {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			return
 		}
+		seen[part] = true
+		out = append(out, part)
+	}
+	if len(raw) == 1 {
+		for _, part := range splitEscaped(raw[0]) {
+			add(part)
+		}
+		return out
+	}
+	for _, r := range raw {
+		add(r)
 	}
 	return out
+}
+
+// splitEscaped splits on commas not preceded by a backslash and unescapes \,
+// to , and \\ to \. Any other backslash is kept as written.
+func splitEscaped(s string) []string {
+	var parts []string
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && i+1 < len(s) && (s[i+1] == ',' || s[i+1] == '\\'):
+			b.WriteByte(s[i+1])
+			i++
+		case c == ',':
+			parts = append(parts, b.String())
+			b.Reset()
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return append(parts, b.String())
+}
+
+// EscapeFilterValue escapes a value for the single-parameter comma form.
+func EscapeFilterValue(v string) string {
+	return strings.NewReplacer(`\`, `\\`, `,`, `\,`).Replace(v)
+}
+
+// AddFilterValues sets a filter parameter from whole values so that each one
+// matches exactly, commas included. Several values go as repeated parameters;
+// a single value is escaped, because a lone parameter is still read as the
+// comma-separated form.
+func AddFilterValues(v url.Values, key string, vals []string) {
+	if len(vals) == 1 {
+		v.Add(key, EscapeFilterValue(vals[0]))
+		return
+	}
+	for _, x := range vals {
+		v.Add(key, x)
+	}
 }

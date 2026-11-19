@@ -113,9 +113,7 @@ func (c reportCommon) values() url.Values {
 		"source": c.Source, "medium": c.Medium, "utm_campaign": c.UTMCampaign,
 		"content": c.Content, "term": c.Term, "placement": c.Placement,
 	} {
-		for _, x := range list {
-			v.Add(k, x)
-		}
+		reports.AddFilterValues(v, k, list)
 	}
 	if c.IncludeBots {
 		v.Set("include_bots", "true")

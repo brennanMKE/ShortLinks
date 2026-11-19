@@ -43,7 +43,7 @@ func TestParseParams_Valid(t *testing.T) {
 		{"campaign slug", "campaign=guides", func(p Params) bool { return p.Campaign == "guides" }},
 		{"campaign none", "campaign=none", func(p Params) bool { return p.Campaign == "none" }},
 		{"csv values", "source=a,b", func(p Params) bool { return reflect.DeepEqual(p.Filters["source"], []string{"a", "b"}) }},
-		{"repeated and padded", "source=a&source=%20b%20,a", func(p Params) bool { return reflect.DeepEqual(p.Filters["source"], []string{"a", "b"}) }},
+		{"repeated and padded", "source=a&source=%20b%20&source=a", func(p Params) bool { return reflect.DeepEqual(p.Filters["source"], []string{"a", "b"}) }},
 		{"none token", "medium=~none,social", func(p Params) bool { return reflect.DeepEqual(p.Filters["medium"], []string{"~none", "social"}) }},
 		{"empty filter ignored", "term=", func(p Params) bool { _, ok := p.Filters["term"]; return !ok }},
 		{"include_bots", "include_bots=true", func(p Params) bool { return p.IncludeBots }},

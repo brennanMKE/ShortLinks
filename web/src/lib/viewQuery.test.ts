@@ -144,6 +144,18 @@ describe('reportQuery', () => {
     expect(q.has('sort')).toBe(false);
     expect(q.has('tab')).toBe(false);
   });
+  it('matches a value that contains a comma exactly (#0187)', () => {
+    const one = new URLSearchParams(reportQuery(state({ filters: { ...emptyFilters(), content: ['spring, 2026'] } }), 'UTC'));
+    expect(one.getAll('content')).toEqual(['spring\\, 2026']);
+    const back = new URLSearchParams(
+      reportQuery(state({ filters: { ...emptyFilters(), content: ['a\\b, c'] } }), 'UTC'),
+    );
+    expect(back.getAll('content')).toEqual(['a\\\\b\\, c']);
+    const many = new URLSearchParams(
+      reportQuery(state({ filters: { ...emptyFilters(), content: ['spring, 2026', 'x'] } }), 'UTC'),
+    );
+    expect(many.getAll('content')).toEqual(['spring, 2026', 'x']);
+  });
   it('uses the report parameter names for every UTM key', () => {
     const f = emptyFilters();
     for (const k of UTM_KEYS) f[k] = ['v'];
