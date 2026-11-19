@@ -9,15 +9,30 @@ import (
 // purely from the environment set via t.Setenv (no real .env interference).
 const noEnvFile = "testdata/does-not-exist.env"
 
-// setRequired sets every required variable to a valid value via t.Setenv so a
-// test can start from a known-good state and then mutate individual vars.
+// validRequired holds a valid value for each required variable. setRequired
+// walks requiredFields (the list Load uses) and looks each name up here, so a
+// newly required variable fails the tests with a message naming it instead of
+// silently drifting.
+var validRequired = map[string]string{
+	"BASE_URL":           "https://go.sstools.co",
+	"DATABASE_URL":       "postgres://u:p@localhost:5432/db?sslmode=disable",
+	"WEBAUTHN_RP_ID":     "go.sstools.co",
+	"WEBAUTHN_RP_ORIGIN": "https://go.sstools.co",
+	"SESSION_SECRET":     "deadbeef",
+	"ADMIN_EMAIL":        "admin@example.com",
+}
+
+// setRequired sets every variable Load requires to a valid value via t.Setenv
+// so a test can start from a known-good state and then mutate individual vars.
 func setRequired(t *testing.T) {
 	t.Helper()
-	t.Setenv("DATABASE_URL", "postgres://u:p@localhost:5432/db?sslmode=disable")
-	t.Setenv("WEBAUTHN_RP_ID", "go.sstools.co")
-	t.Setenv("WEBAUTHN_RP_ORIGIN", "https://go.sstools.co")
-	t.Setenv("SESSION_SECRET", "deadbeef")
-	t.Setenv("ADMIN_EMAIL", "admin@example.com")
+	for _, f := range requiredFields(&Config{}) {
+		v, ok := validRequired[f.name]
+		if !ok {
+			t.Fatalf("Load now requires %s: add a valid value to validRequired in config_test.go", f.name)
+		}
+		t.Setenv(f.name, v)
+	}
 }
 
 func TestLoad_AllRequiredPresent(t *testing.T) {
@@ -89,16 +104,14 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 }
 
 func TestLoad_MissingRequired(t *testing.T) {
-	tests := []struct {
+	type tc struct {
 		name      string
 		unset     string // required var to leave empty
 		wantInErr string // substring expected in the error
-	}{
-		{"missing DATABASE_URL", "DATABASE_URL", "DATABASE_URL"},
-		{"missing WEBAUTHN_RP_ID", "WEBAUTHN_RP_ID", "WEBAUTHN_RP_ID"},
-		{"missing WEBAUTHN_RP_ORIGIN", "WEBAUTHN_RP_ORIGIN", "WEBAUTHN_RP_ORIGIN"},
-		{"missing SESSION_SECRET", "SESSION_SECRET", "SESSION_SECRET"},
-		{"missing ADMIN_EMAIL", "ADMIN_EMAIL", "ADMIN_EMAIL"},
+	}
+	var tests []tc
+	for _, f := range requiredFields(&Config{}) {
+		tests = append(tests, tc{"missing " + f.name, f.name, f.name})
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

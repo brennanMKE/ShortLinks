@@ -133,18 +133,7 @@ func loadFromFile(path string) (*Config, error) {
 	// not required; in all other cases every variable below must be present.
 	// Collect every missing required variable so the error is comprehensive.
 	devMode := cfg.DevMode()
-	required := []struct {
-		name      string
-		value     string
-		skipInDev bool // when true, skip this check in dev mode
-	}{
-		{"BASE_URL", cfg.BaseURL, false},
-		{"DATABASE_URL", cfg.DatabaseURL, true}, // not required when STORAGE=json
-		{"WEBAUTHN_RP_ID", cfg.WebAuthnRPID, false},
-		{"WEBAUTHN_RP_ORIGIN", cfg.WebAuthnRPOrigin, false},
-		{"SESSION_SECRET", cfg.SessionSecret, false},
-		{"ADMIN_EMAIL", cfg.AdminEmail, false},
-	}
+	required := requiredFields(cfg)
 	for _, r := range required {
 		if r.value == "" && !(r.skipInDev && devMode) {
 			errs = append(errs, fmt.Sprintf("missing required variable %s", r.name))
@@ -156,6 +145,26 @@ func loadFromFile(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// requiredField describes one environment variable Load insists on.
+type requiredField struct {
+	name      string
+	value     string
+	skipInDev bool // when true, skip this check in dev mode
+}
+
+// requiredFields is the single source of truth for which variables Load
+// requires. Tests derive their fixtures from it so they cannot drift.
+func requiredFields(cfg *Config) []requiredField {
+	return []requiredField{
+		{"BASE_URL", cfg.BaseURL, false},
+		{"DATABASE_URL", cfg.DatabaseURL, true}, // not required when STORAGE=json
+		{"WEBAUTHN_RP_ID", cfg.WebAuthnRPID, false},
+		{"WEBAUTHN_RP_ORIGIN", cfg.WebAuthnRPOrigin, false},
+		{"SESSION_SECRET", cfg.SessionSecret, false},
+		{"ADMIN_EMAIL", cfg.AdminEmail, false},
+	}
 }
 
 // getInt reads an integer environment variable, returning def when the variable
