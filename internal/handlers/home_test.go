@@ -23,20 +23,24 @@ type fakeHomeReader struct {
 	extra map[string]string
 }
 
-func (f fakeHomeReader) RegistrationsEnabled(context.Context) (bool, error) {
-	return f.enabled, f.enabledErr
-}
-func (f fakeHomeReader) GetSetting(_ context.Context, key string) (string, error) {
-	if key != settingHomeRedirectURL {
-		if v, ok := f.extra[key]; ok {
-			return v, nil
-		}
-		if f.urlErr != nil && !errors.Is(f.urlErr, auth.ErrSettingNotFound) {
-			return "", f.urlErr
-		}
-		return "", auth.ErrSettingNotFound
+func (f fakeHomeReader) GetSettings(_ context.Context, keys ...string) (map[string]string, error) {
+	if f.enabledErr != nil {
+		return nil, f.enabledErr
 	}
-	return f.url, f.urlErr
+	if f.urlErr != nil && !errors.Is(f.urlErr, auth.ErrSettingNotFound) {
+		return nil, f.urlErr
+	}
+	out := map[string]string{}
+	if f.enabled {
+		out[settingRegistrationsEnabled] = "true"
+	}
+	if f.urlErr == nil && f.url != "" {
+		out[settingHomeRedirectURL] = f.url
+	}
+	for k, v := range f.extra {
+		out[k] = v
+	}
+	return out, nil
 }
 
 // serveHome mounts the handler on a bare mux (no auth middleware, no cookie),

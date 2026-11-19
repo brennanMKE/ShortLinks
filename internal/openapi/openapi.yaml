@@ -108,7 +108,13 @@ paths:
       description: |
         Needs no credentials. Exposes only whether registrations are open, the
         optional redirect for the site root, and the public home page content
-        (`mode`, `title`, `about`, `hero`). No other setting is returned.
+        (`mode`, `title`, `about`, `hero`). In `activity` mode it also returns a
+        site-wide 7-day summary (`activity`): daily clicks and the 3 most-clicked
+        links by title and short URL, never destinations or campaigns. Top links
+        are drawn from campaign links only: active, non-denied links that belong
+        to a campaign and have no expiry. The
+        summary is cached for 60 seconds, and the route is rate limited per IP
+        (`429`). No other setting is returned.
       security: []
       responses:
         "200":
@@ -119,6 +125,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PublicHome" }
+        "429":
+          description: Rate limited. Retry after the `Retry-After` header.
         "500": { $ref: "#/components/responses/InternalError" }
   /api/version:
     get:
@@ -1199,6 +1207,38 @@ components:
                 alt: { type: string }
                 width: { type: integer }
                 height: { type: integer }
+        activity:
+          description: Present only when `mode` is `activity`.
+          type: object
+          required: [window, total_clicks, timeseries, top_links]
+          properties:
+            window:
+              type: object
+              required: [from, to, tz, partial_last_day]
+              properties:
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+                tz: { type: string }
+                partial_last_day: { type: boolean }
+            total_clicks: { type: integer, description: Non-bot clicks on every user's links in the window. }
+            timeseries:
+              type: array
+              items:
+                type: object
+                required: [date, clicks]
+                properties:
+                  date: { type: string, format: date }
+                  clicks: { type: integer }
+            top_links:
+              type: array
+              maxItems: 3
+              items:
+                type: object
+                required: [title, short_url, clicks]
+                properties:
+                  title: { type: string, description: The link title without its channel suffix, or the short URL when untitled. }
+                  short_url: { type: string }
+                  clicks: { type: integer }
     Link:
       type: object
       required:

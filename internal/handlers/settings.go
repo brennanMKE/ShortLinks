@@ -110,7 +110,7 @@ func (h *SettingsHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key is required")
 		return
 	}
-	req.Value = strings.TrimSpace(req.Value)
+	req.Value = normalizeSettingValue(req.Key, strings.TrimSpace(req.Value))
 	if err := validateSettingValue(req.Key, req.Value, h.baseURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -175,6 +175,9 @@ func toSettingsResponse(settings []auth.Setting) settingsResponse {
 // (#0125). Empty means unset: there is deliberately no default.
 const settingHomeRedirectURL = "home_redirect_url"
 
+// settingRegistrationsEnabled gates new sign-ups; the public home info exposes it.
+const settingRegistrationsEnabled = "registrations_enabled"
+
 // maxHomeRedirectURLLen bounds the stored primary URL.
 const maxHomeRedirectURLLen = 2048
 
@@ -227,6 +230,17 @@ func validHomeMode(value string) error {
 	return fmt.Errorf("%s must be one of default, about, activity", settingHomeMode)
 }
 
+// normalizeSettingValue canonicalises a value before validation and storage:
+// the free-text home page settings get \r\n (and a lone \r) turned into \n.
+func normalizeSettingValue(key, value string) string {
+	switch key {
+	case settingHomeTitle, settingHomeAbout:
+		value = strings.ReplaceAll(value, "\r\n", "\n")
+		return strings.ReplaceAll(value, "\r", "\n")
+	}
+	return value
+}
+
 // validHomeText bounds a free-text home page setting by characters (not bytes)
 // and rejects control characters. Newlines are allowed only when multiline.
 func validHomeText(key, value string, max int, multiline bool) error {
@@ -239,6 +253,12 @@ func validHomeText(key, value string, max int, multiline bool) error {
 		}
 		if unicode.IsControl(r) {
 			return fmt.Errorf("%s must not contain control characters", key)
+		}
+		// Category Cf covers bidi overrides (U+202E) and zero-width characters
+		// (U+200B), which could disguise text on the anonymous home page.
+		// U+200D (ZWJ) is allowed: emoji sequences need it.
+		if r != '\u200d' && unicode.Is(unicode.Cf, r) {
+			return fmt.Errorf("%s must not contain invisible formatting characters", key)
 		}
 	}
 	return nil

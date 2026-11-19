@@ -51,6 +51,10 @@ func TestValidateSettingValue(t *testing.T) {
 		{"home_about", "tab\there"},
 		{"home_about", "del\x7f"},
 		{"home_about", "c1\u0085"},
+		{"home_about", "evil\u202egnp.exe"},   // right-to-left override
+		{"home_about", "zero\u200bwidth"},     // zero-width space
+		{"home_title", "bom\ufeff"},           // byte order mark
+		{"home_title", "iso\u2066late\u2069"}, // bidi isolates
 	}
 	for _, c := range bad {
 		if err := validateSettingValue(c.key, c.value, base); err == nil {
@@ -61,5 +65,29 @@ func TestValidateSettingValue(t *testing.T) {
 	if err := validateSettingValue("home_redirect_url", "https://go.example.com/", base); err == nil ||
 		!strings.Contains(err.Error(), "must not point at this instance") {
 		t.Errorf("self error = %v, want 'must not point at this instance'", err)
+	}
+}
+
+func TestNormalizeSettingValue_Newlines(t *testing.T) {
+	for _, c := range []struct{ key, in, want string }{
+		{"home_about", "a\r\nb\r\n\r\nc", "a\nb\n\nc"},
+		{"home_about", "a\rb", "a\nb"},
+		{"home_title", "x\r\ny", "x\ny"},
+		{"home_mode", "a\r\nb", "a\r\nb"}, // only free-text keys are touched
+	} {
+		if got := normalizeSettingValue(c.key, c.in); got != c.want {
+			t.Errorf("normalizeSettingValue(%q, %q) = %q, want %q", c.key, c.in, got, c.want)
+		}
+	}
+}
+
+// U+200D (ZWJ) joins emoji sequences, so it is the one Cf character allowed.
+func TestValidHomeText_AllowsZWJEmoji(t *testing.T) {
+	family := "family \U0001F468\u200D\U0001F469\u200D\U0001F467"
+	if err := validHomeText("home_about", family, 2000, true); err != nil {
+		t.Errorf("ZWJ emoji sequence rejected: %v", err)
+	}
+	if err := validHomeText("home_about", "zero\u200cwidth", 2000, true); err == nil {
+		t.Error("ZWNJ (U+200C) accepted, want rejected")
 	}
 }

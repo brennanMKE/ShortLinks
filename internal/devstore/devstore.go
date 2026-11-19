@@ -290,6 +290,21 @@ func (s *Store) GetSetting(_ context.Context, key string) (string, error) {
 	return "", auth.ErrSettingNotFound
 }
 
+// GetSettings reads several settings at once; absent keys are omitted.
+func (s *Store) GetSettings(_ context.Context, keys ...string) (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]string, len(keys))
+	for _, st := range s.settings {
+		for _, k := range keys {
+			if st.Key == k {
+				out[k] = st.Value
+			}
+		}
+	}
+	return out, nil
+}
+
 // UpdateSetting updates an existing setting. Returns ErrSettingNotFound for an
 // unknown key (no new keys are created via this path).
 func (s *Store) UpdateSetting(_ context.Context, key, value string, now time.Time) (string, error) {

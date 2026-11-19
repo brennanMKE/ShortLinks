@@ -67,6 +67,19 @@ func TestAdminSettings_PatchHomePageSettings(t *testing.T) {
 	if v := settingValue(t, pool, "home_about"); v != about {
 		t.Errorf("home_about = %q, want %q", v, about)
 	}
+	if got := patch("home_about", "evil\u202etxt"); got != http.StatusBadRequest {
+		t.Fatalf("bidi override status = %d, want 400", got)
+	}
+	if got := patch("home_about", "zero\u200bwidth"); got != http.StatusBadRequest {
+		t.Fatalf("zero-width status = %d, want 400", got)
+	}
+	// CRLF from a browser textarea is stored as LF.
+	if got := patch("home_about", "one\r\ntwo\r\n\r\nthree"); got != http.StatusOK {
+		t.Fatalf("crlf status = %d, want 200", got)
+	}
+	if v := settingValue(t, pool, "home_about"); v != "one\ntwo\n\nthree" {
+		t.Errorf("home_about = %q, want CRLF normalised to LF", v)
+	}
 	if got := patch("home_about", "bad\x07bell"); got != http.StatusBadRequest {
 		t.Fatalf("control char status = %d, want 400", got)
 	}

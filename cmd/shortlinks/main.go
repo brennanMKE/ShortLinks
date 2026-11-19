@@ -236,7 +236,7 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 	// read straight off the RequireSession-attached context, so the Svelte SPA
 	// can gate the admin view. Stateless — no data-layer dependency.
 	meH := handlers.NewMeHandler(cfg.BaseURL)
-	homeH := handlers.NewHomeHandler(store)
+	homeH := handlers.NewHomeHandler(store).WithActivity(handlers.PublicActivityFunc(pool, cfg.DefaultTimezone, cfg.BaseURL))
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
@@ -423,6 +423,10 @@ func buildMux(
 	loginLimiter := middleware.NewRateLimiter(rate.Every(time.Minute/10), 10) // 10 / minute / IP
 	recoverLimiter := middleware.NewRateLimiter(rate.Every(time.Hour/3), 3)   // 3 / hour / IP
 
+	// Anonymous and cheap, but activity mode can run click queries: 1 req/s
+	// sustained, burst 30, per IP.
+	homeLimiter := middleware.NewRateLimiter(rate.Every(time.Second), 30)
+
 	mux := &router{mux: http.NewServeMux()}
 	mux.Handle("GET /health", handlers.NewHealthHandler(pinger))
 
@@ -556,7 +560,7 @@ func buildMux(
 	// Signed-out home page info (#0125) — deliberately UNAUTHENTICATED (no
 	// requireAPI): the SPA needs it before anyone signs in. It exposes only
 	// {redirect_url, registrations_enabled}, never other settings.
-	mux.Handle("GET /api/public/home", homeH)
+	mux.Handle("GET /api/public/home", homeLimiter.Middleware(homeH))
 
 	// Build id for stale-tab detection (#0185) — UNAUTHENTICATED and no-store.
 	// The same id is stamped into the SPA shell as <meta name="sl-build">.

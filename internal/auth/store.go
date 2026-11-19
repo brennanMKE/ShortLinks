@@ -138,6 +138,28 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
 	return value, nil
 }
 
+// GetSettings reads several settings in one query. Keys with no row are absent
+// from the returned map.
+func (s *Store) GetSettings(ctx context.Context, keys ...string) (map[string]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT key, value FROM settings WHERE key = ANY($1::text[])`, keys)
+	if err != nil {
+		return nil, fmt.Errorf("auth: reading settings: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]string, len(keys))
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("auth: scanning setting: %w", err)
+		}
+		out[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("auth: reading settings: %w", err)
+	}
+	return out, nil
+}
+
 // UpdateSetting changes the value of an EXISTING setting key and bumps
 // updated_at to now, returning the previous value so the caller (the settings
 // handler) can write the settings.updated audit entry. The PRD/issue forbid creating arbitrary

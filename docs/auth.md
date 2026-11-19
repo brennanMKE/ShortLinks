@@ -203,7 +203,7 @@ which middleware each route group carries.
 | `GET /auth/recover/verify` | Verify recovery token |
 | `POST /auth/recover/finish` | Complete recovery, issue session |
 | `GET /` (catch-all) | Svelte SPA static assets |
-| `GET /api/public/home` | Signed-out home info (#0125, #0174): `redirect_url`, `registrations_enabled`, `mode`, `title`, `about`, `hero`, nothing else; `Cache-Control: no-store` |
+| `GET /api/public/home` | Signed-out home info (#0125, #0174): `redirect_url`, `registrations_enabled`, `mode`, `title`, `about`, `hero`, and `activity` in activity mode (#0175), nothing else; `Cache-Control: no-store` |
 
 **Authenticated (RequireSession)**
 
@@ -347,12 +347,57 @@ these keys and no other setting is exposed (a handler test pins the set):
 ```
 
 `hero` is `null` until #0176 stores an image, then
-`{"url","alt","width","height"}`. #0175 adds an `activity` object, present only
-when `mode` is `activity`. The handler reads fresh on every request and sends
-`Cache-Control: no-store`. Missing setting rows (database not yet migrated) are
-treated as unset. `/admin/settings` stays admin-only. The server-side
-registration gate in `/auth/register/start` is unchanged; hiding Register is UX
-only.
+`{"url","alt","width","height"}`. `activity` (#0175) is present only when `mode`
+is `activity`. The handler reads the settings fresh on every request, in a
+single query, and sends `Cache-Control: no-store`. Missing setting rows
+(database not yet migrated) are treated as unset. `/admin/settings` stays
+admin-only. The server-side registration gate in `/auth/register/start` is
+unchanged; hiding Register is UX only.
+
+`home_title` and `home_about` reject control characters and invisible Unicode
+formatting characters (category Cf: bidi overrides such as U+202E, zero-width
+characters such as U+200B, the byte order mark; U+200D, the zero width joiner,
+is allowed so emoji sequences work), and `\r\n` is stored as `\n`.
+
+#### What the public activity summary reveals (#0175)
+
+In `activity` mode `GET /api/public/home` adds, to anyone who can reach the
+site:
+
+```json
+"activity": {
+  "window": {"from":"2026-11-12","to":"2026-11-18","tz":"America/Los_Angeles","partial_last_day":true},
+  "total_clicks": 412,
+  "timeseries": [{"date":"2026-11-12","clicks":51}],
+  "top_links": [{"title":"Measuring current","short_url":"https://go.example.com/u/HaQRwV","clicks":64}]
+}
+```
+
+- **Scope.** Clicks on every user's links across the instance, bots excluded,
+  over 7 days including today in `DEFAULT_TIMEZONE`. Days with no clicks are
+  present with `0`.
+- **Top links.** The 3 most-clicked pieces of content. **Top links are drawn
+  from campaign links only:** a link is listed only if it is active, not denied,
+  belongs to a campaign and has no expiry. Expiring links (invites and other
+  private shares) and links in no campaign are never listed, however many
+  clicks they have; their clicks still count in `total_clicks` and the daily
+  series. (TODO #0182: also exclude links with an `external_id`.) Links to the same content
+  (same content key) are grouped into one entry that links to its most-clicked
+  member, with the group's clicks. The title is the link title without its
+  channel suffix; a link with no title shows its short URL.
+- **Never included.** Destination URLs, link keys other than inside the short
+  URL, campaigns, UTM values, sources, referrers, IP addresses, owners.
+- **Opt-in.** The admin enables it for the whole site by setting
+  `home_mode=activity`; there is no per-link opt-out. The titles of the most
+  clicked links become public.
+- **Load.** The summary is cached in memory for 60 seconds, so anonymous traffic
+  runs the click queries at most once a minute per process. Concurrent requests
+  share one computation, which runs on its own 5-second timeout (a visitor who
+  disconnects does not cancel it). After a failure the page is served without
+  `activity` for 10 seconds before retrying. The route is
+  rate limited per IP (1/s, burst 30). The code is `reports.PublicSummary`
+  (`internal/reports/public.go`); it is not a registered report and is not
+  reachable through `/api/reports`.
 
 ---
 
