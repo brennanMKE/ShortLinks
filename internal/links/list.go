@@ -188,17 +188,20 @@ func (s *Store) ListLinksFiltered(ctx context.Context, userID int64, opts ListOp
 	var total int64
 	for rows.Next() {
 		var l Link
-		var title, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID, slug *string
+		var title, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID, fallbackURL, slug *string
 		var expiresAt *time.Time
 		if err := rows.Scan(
 			&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 			&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
-			&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID,
+			&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID, &fallbackURL,
 			&l.ClickCount, &l.ClicksWindow, &slug, &total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("links: scanning filtered link: %w", err)
 		}
 		applyNullableLinkFields(&l, title, expiresAt, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement)
+		if fallbackURL != nil {
+			l.FallbackURL = *fallbackURL
+		}
 		if externalID != nil {
 			l.ExternalID = *externalID
 		}

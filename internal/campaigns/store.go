@@ -88,6 +88,9 @@ type Campaign struct {
 	DefaultUTMCampaign string
 	DefaultUTMTerm     string
 	DefaultUTMContent  string
+	// DefaultFallbackURL (#0180) is where an expired or deactivated link in
+	// this campaign redirects when the link has no fallback of its own.
+	DefaultFallbackURL string
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
@@ -106,6 +109,7 @@ type NewCampaign struct {
 	DefaultUTMCampaign string // "" -> defaults to the generated slug (see CreateCampaign)
 	DefaultUTMTerm     string
 	DefaultUTMContent  string
+	DefaultFallbackURL string // #0180; "" stored as NULL
 }
 
 // CreateCampaign inserts a new campaign. The slug is derived deterministically from
@@ -159,18 +163,19 @@ func (s *Store) CreateCampaign(ctx context.Context, in NewCampaign, auditor *aud
 		DefaultUTMCampaign: defaultUTMCampaign,
 		DefaultUTMTerm:     in.DefaultUTMTerm,
 		DefaultUTMContent:  in.DefaultUTMContent,
+		DefaultFallbackURL: in.DefaultFallbackURL,
 	}
 
 	err = tx.QueryRow(ctx,
 		`INSERT INTO campaigns
 		     (user_id, name, slug, description, starts_at, ends_at, archived,
 		      default_utm_source, default_utm_medium, default_utm_campaign,
-		      default_utm_term, default_utm_content, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9, $10, $11, now(), now())
+		      default_utm_term, default_utm_content, created_at, updated_at, default_fallback_url)
+		 VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9, $10, $11, now(), now(), $12)
 		 RETURNING id, created_at, updated_at`,
 		in.UserID, in.Name, slug, nullIfEmpty(in.Description), in.StartsAt, in.EndsAt,
 		nullIfEmpty(in.DefaultUTMSource), nullIfEmpty(in.DefaultUTMMedium), nullIfEmpty(defaultUTMCampaign),
-		nullIfEmpty(in.DefaultUTMTerm), nullIfEmpty(in.DefaultUTMContent),
+		nullIfEmpty(in.DefaultUTMTerm), nullIfEmpty(in.DefaultUTMContent), nullIfEmpty(in.DefaultFallbackURL),
 	).Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -248,11 +253,11 @@ func scanCampaignWithCounts(row pgx.Row) (CampaignWithCounts, error) {
 	var out CampaignWithCounts
 	var description *string
 	var startsAt, endsAt *time.Time
-	var defSource, defMedium, defCampaign, defTerm, defContent *string
+	var defSource, defMedium, defCampaign, defTerm, defContent, defFallback *string
 	if err := row.Scan(
 		&out.ID, &out.UserID, &out.Name, &out.Slug, &description, &startsAt, &endsAt, &out.Archived,
 		&defSource, &defMedium, &defCampaign, &defTerm, &defContent,
-		&out.CreatedAt, &out.UpdatedAt,
+		&out.CreatedAt, &out.UpdatedAt, &defFallback,
 		&out.LinkCount, &out.TotalClicks,
 	); err != nil {
 		return CampaignWithCounts{}, err
@@ -277,6 +282,9 @@ func scanCampaignWithCounts(row pgx.Row) (CampaignWithCounts, error) {
 	if defContent != nil {
 		out.DefaultUTMContent = *defContent
 	}
+	if defFallback != nil {
+		out.DefaultFallbackURL = *defFallback
+	}
 	return out, nil
 }
 
@@ -288,7 +296,7 @@ func (s *Store) ListCampaignsForUser(ctx context.Context, userID int64) ([]Campa
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.id, c.user_id, c.name, c.slug, c.description, c.starts_at, c.ends_at, c.archived,
 		        c.default_utm_source, c.default_utm_medium, c.default_utm_campaign,
-		        c.default_utm_term, c.default_utm_content, c.created_at, c.updated_at`+
+		        c.default_utm_term, c.default_utm_content, c.created_at, c.updated_at, c.default_fallback_url`+
 			campaignCountColumns+`
 		   FROM campaigns c
 		  WHERE c.user_id = $1
@@ -369,7 +377,7 @@ func (s *Store) GetCampaignBySlugWithCounts(ctx context.Context, userID int64, s
 	row := s.pool.QueryRow(ctx,
 		`SELECT c.id, c.user_id, c.name, c.slug, c.description, c.starts_at, c.ends_at, c.archived,
 		        c.default_utm_source, c.default_utm_medium, c.default_utm_campaign,
-		        c.default_utm_term, c.default_utm_content, c.created_at, c.updated_at`+
+		        c.default_utm_term, c.default_utm_content, c.created_at, c.updated_at, c.default_fallback_url`+
 			campaignCountColumns+`
 		   FROM campaigns c
 		  WHERE c.user_id = $1 AND c.slug = $2`,
@@ -397,7 +405,7 @@ func getBySlug(ctx context.Context, q querier, userID int64, slug string) (Campa
 	row := q.QueryRow(ctx,
 		`SELECT id, user_id, name, slug, description, starts_at, ends_at, archived,
 		        default_utm_source, default_utm_medium, default_utm_campaign,
-		        default_utm_term, default_utm_content, created_at, updated_at
+		        default_utm_term, default_utm_content, created_at, updated_at, default_fallback_url
 		   FROM campaigns
 		  WHERE user_id = $1 AND slug = $2`,
 		userID, slug,
@@ -423,7 +431,7 @@ func (s *Store) GetCampaignByID(ctx context.Context, userID, id int64) (Campaign
 	row := s.pool.QueryRow(ctx,
 		`SELECT id, user_id, name, slug, description, starts_at, ends_at, archived,
 		        default_utm_source, default_utm_medium, default_utm_campaign,
-		        default_utm_term, default_utm_content, created_at, updated_at
+		        default_utm_term, default_utm_content, created_at, updated_at, default_fallback_url
 		   FROM campaigns
 		  WHERE user_id = $1 AND id = $2`,
 		userID, id,
@@ -560,6 +568,7 @@ type CampaignUpdate struct {
 	DefaultUTMCampaign *string
 	DefaultUTMTerm     *string
 	DefaultUTMContent  *string
+	DefaultFallbackURL *string // #0180
 }
 
 // UpdateCampaign applies a partial update to the user's own campaign (by
@@ -614,6 +623,7 @@ func (s *Store) UpdateCampaign(ctx context.Context, userID int64, slug string, u
 	addNullableString("default_utm_campaign", upd.DefaultUTMCampaign)
 	addNullableString("default_utm_term", upd.DefaultUTMTerm)
 	addNullableString("default_utm_content", upd.DefaultUTMContent)
+	addNullableString("default_fallback_url", upd.DefaultFallbackURL)
 
 	if upd.StartsAt != nil {
 		setClauses = append(setClauses, fmt.Sprintf("starts_at = $%d", next))
@@ -790,11 +800,11 @@ func scanCampaign(row pgx.Row) (Campaign, error) {
 	var c Campaign
 	var description *string
 	var startsAt, endsAt *time.Time
-	var defSource, defMedium, defCampaign, defTerm, defContent *string
+	var defSource, defMedium, defCampaign, defTerm, defContent, defFallback *string
 	if err := row.Scan(
 		&c.ID, &c.UserID, &c.Name, &c.Slug, &description, &startsAt, &endsAt, &c.Archived,
 		&defSource, &defMedium, &defCampaign, &defTerm, &defContent,
-		&c.CreatedAt, &c.UpdatedAt,
+		&c.CreatedAt, &c.UpdatedAt, &defFallback,
 	); err != nil {
 		return Campaign{}, err
 	}
@@ -817,6 +827,9 @@ func scanCampaign(row pgx.Row) (Campaign, error) {
 	}
 	if defContent != nil {
 		c.DefaultUTMContent = *defContent
+	}
+	if defFallback != nil {
+		c.DefaultFallbackURL = *defFallback
 	}
 	return c, nil
 }

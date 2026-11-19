@@ -174,7 +174,7 @@ func TestLinksList_DefaultResponseShapeUnchanged(t *testing.T) {
 		}
 		expectKeys(t, itemKeys, []string{
 			"id", "key", "short_url", "destination_url", "title", "active", "denied_reason", "created_at", "expires_at",
-			"click_count", "campaign_id", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "placement", "external_id",
+			"click_count", "campaign_id", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "placement", "external_id", "fallback_url",
 		}, false, "item keys")
 		var k0 string
 		_ = json.Unmarshal(items[0]["key"], &k0)
@@ -503,10 +503,10 @@ func TestLinksList_DefaultResponseGolden(t *testing.T) {
 	  "links": [
 	    {"id": ` + i64s(newer) + `, "key": "newer", "short_url": "https://example.test/u/newer", "destination_url": "https://example.com/newer", "title": "", "active": false,
 	     "denied_reason": 0, "created_at": "2026-01-02T10:00:00Z", "expires_at": "2030-01-01T00:00:00Z", "click_count": 0,
-	     "campaign_id": null, "utm_source": "", "utm_medium": "", "utm_campaign": "", "utm_term": "", "utm_content": "", "placement": "", "external_id": null},
+	     "campaign_id": null, "utm_source": "", "utm_medium": "", "utm_campaign": "", "utm_term": "", "utm_content": "", "placement": "", "external_id": null, "fallback_url": ""},
 	    {"id": ` + i64s(older) + `, "key": "older", "short_url": "https://example.test/u/older", "destination_url": "https://example.com/older", "title": "Older", "active": true,
 	     "denied_reason": 0, "created_at": "2026-01-01T10:00:00Z", "expires_at": null, "click_count": 1,
-	     "campaign_id": null, "utm_source": "mastodon", "utm_medium": "", "utm_campaign": "", "utm_term": "", "utm_content": "", "placement": "flyer", "external_id": null}
+	     "campaign_id": null, "utm_source": "mastodon", "utm_medium": "", "utm_campaign": "", "utm_term": "", "utm_content": "", "placement": "flyer", "external_id": null, "fallback_url": ""}
 	  ],
 	  "page": 1, "per_page": 20, "total": 2
 	}`

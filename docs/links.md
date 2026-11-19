@@ -25,6 +25,8 @@ CREATE TABLE links (
     active          BOOLEAN DEFAULT TRUE,
     denied_reason   SMALLINT NOT NULL DEFAULT 0         -- 0 = permitted
 );
+-- plus, from later migrations: campaign_id, utm_*, placement, and
+-- fallback_url TEXT NULL (#0180, migration 000026)
 ```
 
 The `key` column has a `UNIQUE` constraint that spans all users; it also
@@ -41,7 +43,7 @@ Effective link state is encoded by two columns together:
 | `active` | `denied_reason` | Effective state |
 |---|---|---|
 | `true` | `0` | Active — redirects normally |
-| `false` | `0` | Inactive — redirect returns 404 |
+| `false` | `0` | Inactive — redirect returns 404, or 302 to its fallback URL |
 | `false` | `> 0` | Denied — blocked by URL filter, redirect returns 404 |
 
 ---
@@ -278,10 +280,17 @@ The handler follows a seven-step flow:
 1. Extract `key` from the URL path (`r.PathValue("key")`). Empty key → `404`.
 2. **Resolve via cache → DB** (see Ristretto cache section below). A non-nil
    error → `500`; not-found (negative entry or genuine DB miss) → `404`.
-3. **Unknown / inactive / denied link** — `!found || link.Negative || !link.Active` → `404`.
-   A denied link (`denied_reason > 0`) has `active=false` and is caught here.
-4. **Expired link** — `link.ExpiresAt != nil && !link.ExpiresAt.After(now())` → `410 Gone`.
-5. **Record click asynchronously** — `buildClickInfo` snapshots request metadata
+3. **Unknown key** (`!found || link.Negative`) → `404`. A fallback only ever
+   applies to a key that exists.
+4. **Denied link** (`denied_reason > 0`) → `404`, always. A denied link never
+   uses a fallback, its own or its campaign's.
+   **Inactive link** (`active = false`) → `404`, or `302` to its fallback URL
+   with `?reason=inactive` (see Fallback URLs below).
+   **Expired link** (`expires_at` has passed) → `410 Gone`, or `302` to its
+   fallback URL with `?reason=expired`. A link that is both inactive and
+   expired reports `inactive`.
+5. **Record click asynchronously** (live links only; fallback and error
+   responses never record a click) — `buildClickInfo` snapshots request metadata
    (IP from `X-Forwarded-For` first, then `RemoteAddr`; user-agent; referer;
    UTM params). `go h.recorder.RecordClick(info)` fires in a goroutine so the
    database write never blocks the redirect.
@@ -289,6 +298,39 @@ The handler follows a seven-step flow:
    Inbound `utm_*` values override the destination's own values for the same
    key; all other query parameters in the request are ignored.
 7. **`302 Found`** with `Location` set to the merged destination URL.
+
+### Fallback URLs (#0180)
+
+A link can carry an optional `fallback_url` (`links.fallback_url`, migration
+`000026`); a campaign can carry `default_fallback_url`
+(`campaigns.default_fallback_url`). When a link is expired or deactivated, the
+effective fallback is the link's own, else its campaign's default. If one is
+set, `/u/{key}` answers `302` to it with `reason=expired` or `reason=inactive`
+appended to the query (the fallback's own query and fragment are kept byte for
+byte). With no fallback the plain `404` / `410` remain.
+
+- **Validation**, on create and on every edit that carries the field (links:
+  `POST`/`PATCH /api/links`, MCP `create_link`/`update_link`; campaigns:
+  `POST`/`PATCH /api/campaigns`, MCP `create_campaign`/`update_campaign`):
+  an absolute `http(s)` URL (`400` otherwise), not on this instance's host
+  under `/u/` (`400`, prevents loops), and not matched by an active URL filter
+  rule (`422 {"error":"fallback_denied","field",...}`). An empty string clears
+  the field. Unlike `destination_url` on PATCH (#0109), edits are filtered.
+- **Not re-filtered at redirect time.** The fallback is filtered only when it
+  is saved, so a rule added later does not affect fallbacks already stored (the
+  same behaviour as destinations, #0109).
+- **Denied links never fall back**, and unknown keys stay `404`.
+- **Clicks:** fallback hits are **not recorded** (no `outcome` column), so by
+  construction they can never count as clicks on the link in any report.
+- **Lookup:** the fallback is read from the database on each expired/inactive
+  hit, not from the redirect cache. The cache therefore needs no invalidation
+  when a campaign default changes, and the live path is unaffected.
+- **Rate limiting (#0178):** a fallback `302` is not a `404`/`410`, so it does
+  not charge the strict miss bucket (it still counts against the general
+  per-IP bucket). Many people tapping the same expired poster from one venue
+  keep working, while a scanner guessing unknown keys is still throttled
+  after its burst of misses. Probing expired keys reveals only that a key
+  once existed, which grants no access.
 
 The `now` function is injectable (`RedirectHandler.now`) so expiry checks are
 deterministic in tests.

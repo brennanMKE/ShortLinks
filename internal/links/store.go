@@ -97,7 +97,8 @@ type querier interface {
 const linkColumns = `l.id, l.user_id, l.key, l.destination_url, l.title,
 	        l.active, l.denied_reason, l.created_at, l.expires_at,
 	        l.campaign_id, l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.utm_content, l.placement,
-	        l.external_id`
+	        l.external_id,
+	        l.fallback_url`
 
 // Store is the data-access layer for links: create, list, fetch, update, and
 // deactivate. Every method is scoped to an owning user id so a request can only
@@ -144,6 +145,9 @@ type Link struct {
 	UTMTerm        string
 	UTMContent     string
 	Placement      string
+	// FallbackURL (#0180) is where a visitor goes when the link is expired or
+	// deactivated; empty means none (the campaign's default may still apply).
+	FallbackURL string
 	// ExternalID is the client-supplied id (#0182); empty when the column is NULL.
 	ExternalID   string
 	CampaignName string // populated only by GetLink; "" elsewhere (ListLinksFiltered sets only the slug)
@@ -192,6 +196,8 @@ type NewLink struct {
 	UTMTerm     string
 	UTMContent  string
 	Placement   string
+	// FallbackURL (#0180) is the validated fallback; "" stored as NULL.
+	FallbackURL string
 	// ExternalID (#0182) is an optional client-supplied id, unique per user;
 	// "" stores NULL. The handler validates it with ValidExternalID.
 	ExternalID string
@@ -228,12 +234,12 @@ func (s *Store) CreateLink(ctx context.Context, in NewLink) (Link, error) {
 	}
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
-		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id)
-		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13)
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id, fallback_url)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, in.Key, in.DestinationURL, title, in.ExpiresAt,
 		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
-		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID), nullIfEmpty(in.FallbackURL),
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -265,6 +271,7 @@ func newLinkFromInput(in NewLink) Link {
 		UTMTerm:        in.UTMTerm,
 		UTMContent:     in.UTMContent,
 		Placement:      in.Placement,
+		FallbackURL:    in.FallbackURL,
 		ExternalID:     in.ExternalID,
 	}
 }
@@ -302,6 +309,7 @@ func (s *Store) CreateDeniedLink(ctx context.Context, in NewLink, reasonCode int
 	link.Key = key
 	link.Active = false
 	link.DeniedReason = reasonCode
+	link.FallbackURL = "" // a denied link never falls back (#0180)
 	// A denied row never claims an external id (it is stored NULL below), so a
 	// retry with the same id is not blocked by an attempt that was refused.
 	link.ExternalID = ""
@@ -477,12 +485,12 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
-		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id)
-		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13)
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id, fallback_url)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, key, in.DestinationURL, title, in.ExpiresAt,
 		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
-		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID), nullIfEmpty(in.FallbackURL),
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -615,12 +623,12 @@ func (s *Store) CreateLinksBatch(ctx context.Context, rows []NewLink, genKey fun
 		}
 		err = tx.QueryRow(ctx,
 			`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
-			                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id)
-			 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13)
+			                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id, fallback_url)
+			 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			 RETURNING id, created_at, expires_at`,
 			in.UserID, key, in.DestinationURL, title, in.ExpiresAt,
 			in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
-			nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID),
+			nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID), nullIfEmpty(in.FallbackURL),
 		).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 		if err != nil {
 			var pgErr *pgconn.PgError
@@ -696,6 +704,7 @@ func applyRequestedMetadataTx(ctx context.Context, tx pgx.Tx, existing Link, in 
 	addForward("utm_term", in.UTMTerm, &existing.UTMTerm)
 	addForward("utm_content", in.UTMContent, &existing.UTMContent)
 	addForward("placement", in.Placement, &existing.Placement)
+	addForward("fallback_url", in.FallbackURL, &existing.FallbackURL)
 
 	if len(setClauses) == 0 {
 		return existing, nil
@@ -919,6 +928,8 @@ type LinkUpdate struct {
 	UTMTerm        *string
 	UTMContent     *string
 	Placement      *string
+	// FallbackURL (#0180): nil = unchanged, pointer to "" clears it.
+	FallbackURL *string
 	// ExternalID (#0182): nil = unchanged; pointer to "" clears it to NULL.
 	ExternalID *string
 }
@@ -989,6 +1000,7 @@ func (s *Store) UpdateLink(ctx context.Context, userID int64, key string, upd Li
 	addNullableString("utm_term", upd.UTMTerm)
 	addNullableString("utm_content", upd.UTMContent)
 	addNullableString("placement", upd.Placement)
+	addNullableString("fallback_url", upd.FallbackURL)
 	addNullableString("external_id", upd.ExternalID)
 
 	// Nothing to change: behave as a no-op fetch so the caller still gets the
@@ -1079,16 +1091,19 @@ func scanLink(row pgx.Row) (Link, error) {
 	var l Link
 	var title *string
 	var expiresAt *time.Time
-	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID *string
+	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID, fallbackURL *string
 	if err := row.Scan(
 		&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
-		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID,
+		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID, &fallbackURL,
 		&l.ClickCount,
 	); err != nil {
 		return Link{}, err
 	}
 	applyNullableLinkFields(&l, title, expiresAt, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement)
+	if fallbackURL != nil {
+		l.FallbackURL = *fallbackURL
+	}
 	if externalID != nil {
 		l.ExternalID = *externalID
 	}
@@ -1102,17 +1117,20 @@ func scanLinkWithCampaign(row pgx.Row) (Link, error) {
 	var l Link
 	var title *string
 	var expiresAt *time.Time
-	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID *string
+	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID, fallbackURL *string
 	var campaignName, campaignSlug *string
 	if err := row.Scan(
 		&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
-		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID,
+		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID, &fallbackURL,
 		&l.ClickCount, &campaignName, &campaignSlug,
 	); err != nil {
 		return Link{}, err
 	}
 	applyNullableLinkFields(&l, title, expiresAt, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement)
+	if fallbackURL != nil {
+		l.FallbackURL = *fallbackURL
+	}
 	if externalID != nil {
 		l.ExternalID = *externalID
 	}

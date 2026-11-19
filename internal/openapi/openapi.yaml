@@ -344,7 +344,8 @@ paths:
         "422":
           description: |
             The destination was refused by a URL filter (`url_denied`, with
-            `reason` and `label`), or the `Idempotency-Key` was reused with a
+            `reason` and `label`), the `fallback_url` was refused by a URL
+            filter (`fallback_denied`, with `field`, `reason` and `label`), or the `Idempotency-Key` was reused with a
             different request (`idempotency_key_reused`).
           content:
             application/json:
@@ -448,7 +449,7 @@ paths:
                   - $ref: "#/components/schemas/Error"
                   - $ref: "#/components/schemas/ExternalIdTakenError"
         "422":
-          description: Reactivation refused by a URL filter (`destination_denied`).
+          description: Reactivation refused by a URL filter (`destination_denied`), or the `fallback_url` refused by a URL filter (`fallback_denied`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DeniedError" }
@@ -573,10 +574,13 @@ paths:
               schema: { $ref: "#/components/schemas/IdempotencyError" }
         "413": { $ref: "#/components/responses/RequestTooLarge" }
         "422":
-          description: The `Idempotency-Key` was reused with a different request (`idempotency_key_reused`).
+          description: The `default_fallback_url` was refused by a URL filter (`fallback_denied`), or the `Idempotency-Key` was reused with a different request (`idempotency_key_reused`).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/IdempotencyError" }
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DeniedError"
+                  - $ref: "#/components/schemas/IdempotencyError"
         "500": { $ref: "#/components/responses/InternalError" }
         "429": { $ref: "#/components/responses/RateLimited" }
   /api/campaigns/{slug}:
@@ -626,6 +630,11 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/ReadOnly" }
         "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "422":
+          description: The `default_fallback_url` was refused by a URL filter (`fallback_denied`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeniedError" }
         "500": { $ref: "#/components/responses/InternalError" }
         "429": { $ref: "#/components/responses/RateLimited" }
     delete:
@@ -1221,15 +1230,18 @@ components:
             - internal_error
         message: { type: string }
     DeniedError:
-      description: A URL filter refused the destination.
+      description: A URL filter refused the destination or a fallback URL.
       type: object
       required: [error, reason, label]
       properties:
-        error: { type: string, enum: [url_denied, destination_denied] }
+        error: { type: string, enum: [url_denied, destination_denied, fallback_denied] }
         reason:
           type: integer
           description: 1 malware, 2 phishing, 3 spam, 4 adult content, 5 policy violation, 6 other.
         label: { type: string, examples: [Phishing] }
+        field:
+          type: string
+          description: "`fallback_denied` only: `fallback_url` or `default_fallback_url`."
         row:
           type: integer
           description: Batch create only. Zero-based index of the offending row.
@@ -1334,6 +1346,7 @@ components:
         - utm_content
         - placement
         - external_id
+        - fallback_url
       properties:
         id: { type: integer, format: int64 }
         key: { type: string, description: "The short URL is `{base_url}/u/{key}`." }
@@ -1360,6 +1373,7 @@ components:
         external_id:
           type: [string, "null"]
           description: The client-supplied id set at creation, unique per user, or `null`.
+        fallback_url: { type: string, description: "Where an expired or deactivated link redirects (302, with `?reason=expired` or `?reason=inactive`). Empty when unset; the campaign's `default_fallback_url` may still apply. Not re-filtered at redirect time." }
     LinkList:
       type: object
       required: [links, page, per_page, total]
@@ -1512,6 +1526,7 @@ components:
           maxLength: 128
           pattern: "^[ -~]{1,128}$"
           description: Your own id for the link, 1 to 128 printable ASCII characters, unique per user. `null` or empty means none. Links with a different `external_id` are never merged by deduplication.
+        fallback_url: { type: string, format: uri, description: "Absolute http(s) URL, URL-filtered, not this instance's `/u/` path. Empty clears it (PATCH)." }
     PatchLinkRequest:
       type: object
       additionalProperties: false
@@ -1530,6 +1545,7 @@ components:
           type: [string, "null"]
           maxLength: 128
           description: "A string sets it (1 to 128 printable ASCII characters); `null` or an empty string clears it."
+        fallback_url: { type: string, format: uri, description: "Absolute http(s) URL, URL-filtered, not this instance's `/u/` path. Empty clears it (PATCH)." }
         active:
           type: boolean
           description: "`false` deactivates, `true` reactivates after a URL filter check."
@@ -1548,6 +1564,7 @@ components:
         - default_utm_campaign
         - default_utm_term
         - default_utm_content
+        - default_fallback_url
         - created_at
         - updated_at
       properties:
@@ -1563,6 +1580,7 @@ components:
         default_utm_campaign: { type: string, description: Defaults to the slug at creation. }
         default_utm_term: { type: string }
         default_utm_content: { type: string }
+        default_fallback_url: { type: string, format: uri, description: "Fallback for the campaign's links that have none of their own. Absolute http(s), URL-filtered, not this instance's `/u/` path. Empty clears it (PATCH)." }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     CampaignListItem:
@@ -1679,6 +1697,7 @@ components:
         default_utm_campaign: { type: string }
         default_utm_term: { type: string }
         default_utm_content: { type: string }
+        default_fallback_url: { type: string, format: uri, description: "Fallback for the campaign's links that have none of their own. Absolute http(s), URL-filtered, not this instance's `/u/` path. Empty clears it (PATCH)." }
     PatchCampaignRequest:
       type: object
       additionalProperties: false
@@ -1694,6 +1713,7 @@ components:
         default_utm_campaign: { type: string }
         default_utm_term: { type: string }
         default_utm_content: { type: string }
+        default_fallback_url: { type: string, format: uri, description: "Fallback for the campaign's links that have none of their own. Absolute http(s), URL-filtered, not this instance's `/u/` path. Empty clears it (PATCH)." }
     AssignLinksRequest:
       type: object
       additionalProperties: false

@@ -205,6 +205,7 @@ type campaignView struct {
 	DefaultUTMCampaign string     `json:"default_utm_campaign"`
 	DefaultUTMTerm     string     `json:"default_utm_term"`
 	DefaultUTMContent  string     `json:"default_utm_content"`
+	DefaultFallbackURL string     `json:"default_fallback_url"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
@@ -224,6 +225,7 @@ func toCampaignView(c campaigns.Campaign) campaignView {
 		DefaultUTMCampaign: c.DefaultUTMCampaign,
 		DefaultUTMTerm:     c.DefaultUTMTerm,
 		DefaultUTMContent:  c.DefaultUTMContent,
+		DefaultFallbackURL: c.DefaultFallbackURL,
 		CreatedAt:          c.CreatedAt,
 		UpdatedAt:          c.UpdatedAt,
 	}
@@ -364,6 +366,7 @@ type createCampaignRequest struct {
 	DefaultUTMCampaign string     `json:"default_utm_campaign"`
 	DefaultUTMTerm     string     `json:"default_utm_term"`
 	DefaultUTMContent  string     `json:"default_utm_content"`
+	DefaultFallbackURL string     `json:"default_fallback_url"`
 }
 
 // Create handles POST /api/campaigns. It validates the name, resolves a
@@ -402,6 +405,11 @@ func (h *CampaignsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	defaultFallback := strings.TrimSpace(req.DefaultFallbackURL)
+	if !checkFallbackURL(w, r, h.rules, h.baseURL, "default_fallback_url", defaultFallback) {
+		return
+	}
+
 	in := campaigns.NewCampaign{
 		UserID:             u.ID,
 		Name:               name,
@@ -413,6 +421,7 @@ func (h *CampaignsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		DefaultUTMCampaign: strings.TrimSpace(req.DefaultUTMCampaign),
 		DefaultUTMTerm:     strings.TrimSpace(req.DefaultUTMTerm),
 		DefaultUTMContent:  strings.TrimSpace(req.DefaultUTMContent),
+		DefaultFallbackURL: defaultFallback,
 	}
 
 	actor := u.ID
@@ -710,6 +719,7 @@ type patchCampaignRequest struct {
 	DefaultUTMCampaign *string    `json:"default_utm_campaign"`
 	DefaultUTMTerm     *string    `json:"default_utm_term"`
 	DefaultUTMContent  *string    `json:"default_utm_content"`
+	DefaultFallbackURL *string    `json:"default_fallback_url"`
 
 	startsAtPresent bool
 	endsAtPresent   bool
@@ -833,6 +843,13 @@ func (h *CampaignsHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	if req.DefaultUTMContent != nil {
 		v := strings.TrimSpace(*req.DefaultUTMContent)
 		upd.DefaultUTMContent = &v
+	}
+	if req.DefaultFallbackURL != nil {
+		v := strings.TrimSpace(*req.DefaultFallbackURL)
+		if !checkFallbackURL(w, r, h.rules, h.baseURL, "default_fallback_url", v) {
+			return
+		}
+		upd.DefaultFallbackURL = &v
 	}
 
 	actor := u.ID

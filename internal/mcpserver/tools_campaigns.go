@@ -28,6 +28,7 @@ type createCampaignIn struct {
 	DefaultUTMCampaign string `json:"default_utm_campaign,omitempty" jsonschema:"Default utm_campaign for links created in the campaign"`
 	DefaultUTMTerm     string `json:"default_utm_term,omitempty" jsonschema:"Default utm_term for links created in the campaign"`
 	DefaultUTMContent  string `json:"default_utm_content,omitempty" jsonschema:"Default utm_content for links created in the campaign"`
+	DefaultFallbackURL string `json:"default_fallback_url,omitempty" jsonschema:"Fallback URL used by links in the campaign that have none of their own when they are expired or deactivated"`
 	IdempotencyKey     string `json:"idempotency_key,omitempty" jsonschema:"A unique string for this create. Retrying with the same value returns the first result instead of creating a duplicate"`
 }
 
@@ -43,6 +44,7 @@ type updateCampaignIn struct {
 	DefaultUTMCampaign *string `json:"default_utm_campaign,omitempty" jsonschema:"New default utm_campaign"`
 	DefaultUTMTerm     *string `json:"default_utm_term,omitempty" jsonschema:"New default utm_term"`
 	DefaultUTMContent  *string `json:"default_utm_content,omitempty" jsonschema:"New default utm_content"`
+	DefaultFallbackURL *string `json:"default_fallback_url,omitempty" jsonschema:"New default fallback URL; an empty string clears it"`
 }
 
 type batchRowIn struct {

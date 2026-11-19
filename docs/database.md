@@ -127,6 +127,7 @@ described in the PRD.
 | `campaign_id` | `BIGINT` | FK → `campaigns(id)`, `ON DELETE SET NULL`, nullable (#0099). A link belongs to at most one campaign. |
 | `utm_source` / `utm_medium` / `utm_campaign` / `utm_term` / `utm_content` | `TEXT` | Nullable (#0099). Discrete copies of what the UTM builder baked into `destination_url` — see `docs/utm.md` |
 | `placement` | `TEXT` | Nullable (#0099). Free-text operational label (e.g. a physical poster location), deliberately separate from `utm_content` — see `docs/campaigns.md` |
+| `fallback_url` | `TEXT` | Nullable (#0180). Redirect target for an expired/deactivated link; see `docs/links.md` |
 | `external_id` | `TEXT` | Nullable (#0182, `000025_links_external_id`). Client-supplied id, 1 to 128 printable ASCII characters (`links_external_id_format` CHECK), unique per user. Added without a default, so no rows are rewritten. |
 
 Existing rows from before migration `000011` keep `NULL` in all seven
@@ -199,6 +200,7 @@ the resulting data can and cannot honestly compare).
 | `ends_at` | `TIMESTAMPTZ` | Nullable |
 | `archived` | `BOOLEAN` | Default `false`. Reversible — unlike delete. |
 | `default_utm_source` / `default_utm_medium` / `default_utm_campaign` / `default_utm_term` / `default_utm_content` | `TEXT` | Nullable. Prefill values for the create/batch UTM builder; `default_utm_campaign` defaults to the slug at creation and is never re-derived once cleared. |
+| `default_fallback_url` | `TEXT` | Nullable (#0180). Fallback for the campaign's links that have none of their own. |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | Default `now()` |
 
 **Constraints:** `UNIQUE (user_id, slug)` — slugs are unique per user, not

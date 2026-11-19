@@ -729,6 +729,7 @@ func (s *Store) CreateCampaign(_ context.Context, in campaigns.NewCampaign, _ *a
 		DefaultUTMCampaign: defaultUTMCampaign,
 		DefaultUTMTerm:     in.DefaultUTMTerm,
 		DefaultUTMContent:  in.DefaultUTMContent,
+		DefaultFallbackURL: in.DefaultFallbackURL,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
@@ -981,6 +982,7 @@ func newLinkFromInput(in links.NewLink) links.Link {
 		UTMTerm:        in.UTMTerm,
 		UTMContent:     in.UTMContent,
 		Placement:      in.Placement,
+		FallbackURL:    in.FallbackURL,
 		ExternalID:     in.ExternalID,
 	}
 }
@@ -1012,6 +1014,9 @@ func applyRequestedMetadata(l *links.Link, in links.NewLink) {
 	}
 	if in.Placement != "" {
 		l.Placement = in.Placement
+	}
+	if in.FallbackURL != "" {
+		l.FallbackURL = in.FallbackURL
 	}
 }
 
@@ -1402,6 +1407,9 @@ func (s *Store) UpdateLink(_ context.Context, userID int64, key string, upd link
 		if upd.Placement != nil {
 			s.links[i].Placement = *upd.Placement
 		}
+		if upd.FallbackURL != nil {
+			s.links[i].FallbackURL = *upd.FallbackURL
+		}
 		return s.cloneLink(s.links[i]), nil
 	}
 	return links.Link{}, links.ErrLinkNotFound
@@ -1490,6 +1498,33 @@ func (s *Store) ResolveByKey(_ context.Context, key string) (links.Resolution, e
 		}
 	}
 	return links.Resolution{}, links.ErrLinkNotFound
+}
+
+// FallbackURL implements handlers.FallbackResolver (#0180): the link's own
+// fallback, else its campaign's default, "" for a denied or unknown link.
+func (s *Store) FallbackURL(_ context.Context, key string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.links {
+		if l.Key != key {
+			continue
+		}
+		if l.DeniedReason != 0 {
+			return "", nil
+		}
+		if l.FallbackURL != "" {
+			return l.FallbackURL, nil
+		}
+		if l.CampaignID != nil {
+			for _, c := range s.campaigns {
+				if c.ID == *l.CampaignID {
+					return c.DefaultFallbackURL, nil
+				}
+			}
+		}
+		return "", nil
+	}
+	return "", nil
 }
 
 // Resolve implements handlers.LinkResolver directly so the redirect handler

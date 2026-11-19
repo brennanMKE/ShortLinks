@@ -218,6 +218,9 @@ type linkView struct {
 	Placement   string `json:"placement"`
 	// ExternalID (#0182) is the client-supplied id, null when the link has none.
 	ExternalID *string `json:"external_id"`
+	// FallbackURL (#0180) is the link's own fallback for when it is expired or
+	// deactivated; empty when unset (its campaign's default may still apply).
+	FallbackURL string `json:"fallback_url"`
 }
 
 // toLinkView maps a domain Link to its JSON shape without the duplicate field
@@ -247,6 +250,7 @@ func toLinkView(l links.Link, baseURL string) linkView {
 		UTMContent:     l.UTMContent,
 		Placement:      l.Placement,
 		ExternalID:     extID,
+		FallbackURL:    l.FallbackURL,
 	}
 }
 
@@ -279,6 +283,7 @@ type createLinkRequest struct {
 	UTMTerm        string     `json:"utm_term"`
 	UTMContent     string     `json:"utm_content"`
 	Placement      string     `json:"placement"`
+	FallbackURL    string     `json:"fallback_url"`
 	// KeyLength (#0179) is the length of the generated key, 6..32 (default 6).
 	// It is ignored when a custom key is supplied.
 	KeyLength *int `json:"key_length"`
@@ -387,6 +392,11 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	genKey := links.KeyGenerator(keyLength)
 
+	fallbackURL := strings.TrimSpace(req.FallbackURL)
+	if !checkFallbackURL(w, r, h.rules, h.baseURL, "fallback_url", fallbackURL) {
+		return
+	}
+
 	// ───────────────────────────────────────────────────────────────────────
 	// #0099 CAMPAIGN RESOLUTION — an optional campaign_id or campaign_slug is
 	// resolved to a campaign the CALLER owns before anything is inserted.
@@ -440,6 +450,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		UTMTerm:        strings.TrimSpace(req.UTMTerm),
 		UTMContent:     strings.TrimSpace(req.UTMContent),
 		Placement:      strings.TrimSpace(req.Placement),
+		FallbackURL:    fallbackURL,
 		MinKeyLength:   keyLength,
 		ExternalID:     externalID,
 	}
@@ -1188,6 +1199,8 @@ type patchLinkRequest struct {
 	UTMTerm     *string `json:"utm_term"`
 	UTMContent  *string `json:"utm_content"`
 	Placement   *string `json:"placement"`
+	// FallbackURL (#0180): "" clears it; validated and filtered like a destination.
+	FallbackURL *string `json:"fallback_url"`
 	// Active (#0145): false deactivates (same as DELETE), true reactivates after
 	// re-running the URL filter. Applied after every other field.
 	Active *bool `json:"active"`
@@ -1298,6 +1311,14 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	setUTM(&upd.UTMTerm, req.UTMTerm)
 	setUTM(&upd.UTMContent, req.UTMContent)
 	setUTM(&upd.Placement, req.Placement)
+
+	if req.FallbackURL != nil {
+		fb := strings.TrimSpace(*req.FallbackURL)
+		if !checkFallbackURL(w, r, h.rules, h.baseURL, "fallback_url", fb) {
+			return
+		}
+		upd.FallbackURL = &fb
+	}
 
 	// #0145: a reactivation that the filter would refuse must not save the
 	// accompanying edits. Check the effective destination (the edit if sent,

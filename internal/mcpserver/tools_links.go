@@ -89,6 +89,7 @@ type createLinkIn struct {
 	UTMContent     string `json:"utm_content,omitempty" jsonschema:"utm_content label that identifies the piece of content"`
 	Placement      string `json:"placement,omitempty" jsonschema:"Where the link will be placed, such as a poster location or channel"`
 	ExternalID     string `json:"external_id,omitempty" jsonschema:"Your own id for this link, 1 to 128 printable ASCII characters, unique among your links. Use it to find the link again with get_link_by_external_id. A different external_id always gets a new link, even for a destination already shortened"`
+	FallbackURL    string `json:"fallback_url,omitempty" jsonschema:"Where visitors go when the link is expired or deactivated, an absolute https (or http) URL. The server adds ?reason=expired or ?reason=inactive. Without it they get a 404 or 410"`
 	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"A unique string for this create. Retrying with the same value returns the first result instead of creating a duplicate"`
 }
 
@@ -104,6 +105,7 @@ type updateLinkIn struct {
 	UTMContent     *string `json:"utm_content,omitempty" jsonschema:"New utm_content label"`
 	Placement      *string `json:"placement,omitempty" jsonschema:"New placement label"`
 	ExternalID     *string `json:"external_id,omitempty" jsonschema:"New external_id, or an empty string to clear it"`
+	FallbackURL    *string `json:"fallback_url,omitempty" jsonschema:"New fallback URL for when the link is expired or deactivated; an empty string clears it"`
 }
 
 type externalIDIn struct {

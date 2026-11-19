@@ -31,6 +31,7 @@ in ["What this data cannot tell you"](#what-this-data-cannot-tell-you) below.
 | `ends_at` | `TIMESTAMPTZ` | Nullable |
 | `archived` | `BOOLEAN` | Default `FALSE`. Reversible — unlike delete |
 | `default_utm_source` .. `default_utm_content` | `TEXT` × 5 | Nullable. Prefill values for the create/batch UTM builder; `default_utm_campaign` defaults to the slug at creation and is never re-derived after being cleared |
+| `default_fallback_url` | `TEXT` | Nullable (#0180, migration `000026`). Where an expired or deactivated link in the campaign redirects (`302`, with `?reason=expired` or `?reason=inactive`) when the link has no `fallback_url` of its own. Validated like a destination: absolute http(s), URL-filtered, not this instance's `/u/` path. See `docs/links.md` |
 | `created_at` / `updated_at` | `TIMESTAMPTZ` | Default `now()` |
 
 Constraints: `UNIQUE (user_id, slug)` (slugs are unique **per user**, not

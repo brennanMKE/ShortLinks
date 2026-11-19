@@ -38,6 +38,14 @@ type LinkResolver interface {
 	Resolve(ctx context.Context, key string) (cache.CachedLink, bool, error)
 }
 
+// FallbackResolver is an optional capability of a LinkResolver (#0180): it
+// returns the effective fallback URL for a key (the link's own, else its
+// campaign's default, "" when none or when the link was denied by the URL
+// filter). The redirect handler asks it only for expired or deactivated links.
+type FallbackResolver interface {
+	FallbackURL(ctx context.Context, key string) (string, error)
+}
+
 // ClickInfo carries the request metadata recorded for a single click.
 type ClickInfo struct {
 	Key         string
@@ -130,15 +138,33 @@ func (h *RedirectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3: unknown key, negative entry, or inactive link → 404. A denied
-	// link (denied_reason > 0) is also inactive and therefore handled here.
-	if !found || link.Negative || !link.Active {
+	// Step 3: unknown key or negative entry → 404. A key that does not exist
+	// never falls back.
+	if !found || link.Negative {
 		http.NotFound(w, r)
 		return
 	}
 
-	// Step 4: expired link → 410 Gone.
+	// A link denied by the URL filter never redirects anywhere (#0180).
+	if link.DeniedReason != 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Steps 3-4: deactivated → 404, expired → 410, unless a fallback URL is
+	// configured (#0180), in which case 302 to it with ?reason=. Inactive wins
+	// when a link is both. Fallback hits record no click.
+	if !link.Active {
+		if h.fallback(w, r, key, "inactive") {
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
 	if link.ExpiresAt != nil && !link.ExpiresAt.After(h.now()) {
+		if h.fallback(w, r, key, "expired") {
+			return
+		}
 		http.Error(w, "link expired", http.StatusGone)
 		return
 	}
@@ -155,6 +181,45 @@ func (h *RedirectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 7: 302 Found with the merged Location.
 	w.Header().Set("Location", location)
 	w.WriteHeader(http.StatusFound)
+}
+
+// fallback writes a 302 to the key's fallback URL with reason appended and
+// reports whether it did. Any lookup error or unusable URL falls through to the
+// plain 404/410. No click is recorded: a fallback hit is not a click on the
+// link, so it can never reach a report. The 302 is not a 404/410, so the
+// redirect rate limiter does not charge the strict miss bucket for it (#0178).
+func (h *RedirectHandler) fallback(w http.ResponseWriter, r *http.Request, key, reason string) bool {
+	fr, ok := h.resolver.(FallbackResolver)
+	if !ok {
+		return false
+	}
+	raw, err := fr.FallbackURL(r.Context(), key)
+	if err != nil || raw == "" {
+		return false
+	}
+	loc, ok := withReason(raw, reason)
+	if !ok {
+		return false
+	}
+	w.Header().Set("Location", loc)
+	w.WriteHeader(http.StatusFound)
+	return true
+}
+
+// withReason appends reason=<reason> to raw's query, leaving the existing raw
+// query bytes untouched (no re-encoding or reordering) and keeping any
+// fragment. An existing reason parameter is kept as is; the new one follows it.
+func withReason(raw, reason string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", false
+	}
+	if u.RawQuery == "" {
+		u.RawQuery = "reason=" + reason
+	} else {
+		u.RawQuery += "&reason=" + reason
+	}
+	return u.String(), true
 }
 
 // buildClickInfo snapshots the request metadata recorded for analytics.

@@ -45,6 +45,38 @@ func (s *Store) ResolveByKey(ctx context.Context, key string) (Resolution, error
 	return r, nil
 }
 
+// FallbackURLByKey returns the effective fallback URL (#0180) for a key: the
+// link's own fallback_url, else its campaign's default_fallback_url, else "".
+// A filter-denied link always yields "" so it can never become a redirect. It
+// is read straight from the database (not the redirect cache) because it is
+// only consulted for expired/inactive links, so a changed campaign default
+// takes effect immediately and needs no cache invalidation.
+func (s *Store) FallbackURLByKey(ctx context.Context, key string) (string, error) {
+	var fb *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(NULLIF(l.fallback_url, ''), NULLIF(c.default_fallback_url, ''))
+		   FROM links l
+		   LEFT JOIN campaigns c ON c.id = l.campaign_id
+		  WHERE l.key = $1 AND l.denied_reason = 0`,
+		key,
+	).Scan(&fb)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("links: resolving fallback: %w", err)
+	}
+	if fb == nil {
+		return "", nil
+	}
+	return *fb, nil
+}
+
+// FallbackURL implements handlers.FallbackResolver.
+func (r *Resolver) FallbackURL(ctx context.Context, key string) (string, error) {
+	return r.store.FallbackURLByKey(ctx, key)
+}
+
 // keyResolver is the slice of *cache.Cache the Resolver uses: read-through with a
 // negative-entry path. *cache.Cache satisfies it. Taking an interface keeps the
 // resolver unit-testable without a real Ristretto cache, but production wires the
@@ -59,6 +91,7 @@ type keyResolver interface {
 // cache miss. *Store satisfies it via ResolveByKey.
 type keyLookup interface {
 	ResolveByKey(ctx context.Context, key string) (Resolution, error)
+	FallbackURLByKey(ctx context.Context, key string) (string, error)
 }
 
 // Resolver implements the redirect handler's LinkResolver: it checks the redirect
