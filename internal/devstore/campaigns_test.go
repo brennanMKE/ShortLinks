@@ -207,7 +207,7 @@ func TestCampaignStatsProvider_ReturnsEmptyZeroValues(t *testing.T) {
 	s := devstore.New("")
 	ctx := context.Background()
 
-	stats, err := s.CampaignStats(ctx, 1, time.Time{}, time.Time{})
+	stats, err := s.CampaignStats(ctx, 1, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestCampaignStatsProvider_ReturnsEmptyZeroValues(t *testing.T) {
 		}
 	}
 
-	ts, err := s.CampaignClicksOverTime(ctx, 1, time.Time{}, time.Time{})
+	ts, err := s.CampaignClicksOverTime(ctx, 1, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignClicksOverTime: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestCampaignStatsProvider_ReturnsEmptyZeroValues(t *testing.T) {
 		t.Errorf("CampaignClicksOverTime.Days = %+v, want empty non-nil", ts.Days)
 	}
 
-	byLink, err := s.CampaignClicksByLink(ctx, 1, time.Time{}, time.Time{})
+	byLink, err := s.CampaignClicksByLink(ctx, 1, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignClicksByLink: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestCampaignStatsProvider_ReturnsEmptyZeroValues(t *testing.T) {
 		t.Errorf("CampaignClicksByLink = %+v, want empty non-nil", byLink)
 	}
 
-	series, err := s.CampaignSeriesByLink(ctx, 1, time.Time{}, time.Time{})
+	series, err := s.CampaignSeriesByLink(ctx, 1, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignSeriesByLink: %v", err)
 	}

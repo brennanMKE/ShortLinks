@@ -319,14 +319,14 @@ func (s *StatsStore) beginCampaignReadTx(ctx context.Context) (pgx.Tx, error) {
 // test fails within a handful of iterations if the reads are switched back
 // to the pool while still opening (and discarding) the transaction, and
 // fails if the isolation level is downgraded to READ COMMITTED.
-func (s *StatsStore) CampaignStats(ctx context.Context, campaignID int64, from, to time.Time) (CampaignStats, error) {
+func (s *StatsStore) CampaignStats(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (CampaignStats, error) {
 	tx, err := s.beginCampaignReadTx(ctx)
 	if err != nil {
 		return CampaignStats{}, fmt.Errorf("clicks: begin campaign stats tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	resolvedFrom, resolvedTo, err := campaignWindow(ctx, tx, campaignID, from, to)
+	resolvedFrom, resolvedTo, err := campaignWindow(ctx, tx, campaignID, from, to, loc)
 	if err != nil {
 		return CampaignStats{}, err
 	}
@@ -338,14 +338,14 @@ func (s *StatsStore) CampaignStats(ctx context.Context, campaignID int64, from, 
 // transaction so the total and the chart it sits beside can never disagree
 // — see CampaignRollup's doc comment for the full argument. Backs GET
 // /api/campaigns/{slug}.
-func (s *StatsStore) CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time) (CampaignSummary, error) {
+func (s *StatsStore) CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (CampaignSummary, error) {
 	tx, err := s.beginCampaignReadTx(ctx)
 	if err != nil {
 		return CampaignSummary{}, fmt.Errorf("clicks: begin campaign summary tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	resolvedFrom, resolvedTo, err := campaignWindow(ctx, tx, campaignID, from, to)
+	resolvedFrom, resolvedTo, err := campaignWindow(ctx, tx, campaignID, from, to, loc)
 	if err != nil {
 		return CampaignSummary{}, err
 	}
@@ -384,14 +384,14 @@ func (s *StatsStore) CampaignSummary(ctx context.Context, campaignID int64, from
 // pins this under 4 concurrent writers over 300 iterations; it fails if any
 // one of the four reads is moved back onto a separate transaction or the
 // pool.
-func (s *StatsStore) CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time) (CampaignRollup, error) {
+func (s *StatsStore) CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (CampaignRollup, error) {
 	tx, err := s.beginCampaignReadTx(ctx)
 	if err != nil {
 		return CampaignRollup{}, fmt.Errorf("clicks: begin campaign rollup tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	resolvedFrom, resolvedTo, err := campaignWindow(ctx, tx, campaignID, from, to)
+	resolvedFrom, resolvedTo, err := campaignWindow(ctx, tx, campaignID, from, to, loc)
 	if err != nil {
 		return CampaignRollup{}, err
 	}
@@ -429,20 +429,13 @@ func campaignStatsQuery(ctx context.Context, q rowQuerier, campaignID int64, fro
 		ByContent: []Bucket{},
 		ByReferer: []Bucket{},
 		// The resolved window every query below (and this function's own
-		// COUNT) filters on — recorded from the exact from/to this function
-		// received, so it can never disagree with the counts alongside it.
-		//
-		// .UTC() is load-bearing, not decoration. time.Format renders in the
-		// value's own Location, and pgx decodes timestamptz into the PROCESS's
-		// local zone — so a campaign whose starts_at is UTC-midnight 2026-07-01
-		// formats as 2026-06-30 on any server with a negative offset. That
-		// silently shifts the window this field documents AND the divisor the
-		// UI computes clicks/day from. WindowTo happened to be immune because
-		// campaignWindow builds `today` with time.UTC explicitly, but the
-		// campaign-supplied branch is exactly the dated in-flight case these
-		// fields exist for.
-		WindowFrom: from.UTC().Format("2006-01-02"),
-		WindowTo:   to.UTC().Format("2006-01-02"),
+		// COUNT) filters on, recorded from the exact from/to this function
+		// received so it can never disagree with the counts alongside it.
+		// from and to carry the request's time zone (campaignWindow builds
+		// them with time.Date in loc), so Format prints the civil dates in
+		// that zone, not the process's local zone.
+		WindowFrom: from.Format("2006-01-02"),
+		WindowTo:   to.Format("2006-01-02"),
 	}
 
 	if err := q.QueryRow(ctx,
@@ -474,7 +467,13 @@ func campaignStatsQuery(ctx context.Context, q rowQuerier, campaignID int64, fro
 }
 
 // campaignWindow computes the effective [from, to) window for a
-// campaign-scoped stats query, per #0102's acceptance criteria. Takes a
+// campaign-scoped stats query, per #0102's acceptance criteria.
+//
+// #0190: days are civil days in loc (nil means UTC), DST-safe. The returned
+// from/to are local midnights in loc, so their Location names the zone the
+// day buckets use. `to` is the day AFTER the last day covered, so the
+// campaign's last day (ends_at is inclusive) and today are both in the
+// window, and the 30-day fallback is the last 30 civil days, today included. Takes a
 // rowQuerier (pool or tx) rather than always reading s.pool directly, so
 // callers that need EVERY read — including the window lookup itself —
 // inside one transaction (CampaignStats/CampaignSummary/CampaignRollup) get
@@ -500,9 +499,11 @@ func campaignStatsQuery(ctx context.Context, q rowQuerier, campaignID int64, fro
 // the caller (the campaigns handler) resolves the campaign by slug scoped to
 // the authenticated user first, then passes the resolved campaign id, so a
 // non-owner never reaches this query.
-func campaignWindow(ctx context.Context, q rowQuerier, campaignID int64, from, to time.Time) (time.Time, time.Time, error) {
-	now := time.Now().UTC()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+func campaignWindow(ctx context.Context, q rowQuerier, campaignID int64, from, to time.Time, loc *time.Location) (time.Time, time.Time, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	today := civilDay(time.Now().In(loc))
 
 	if from.IsZero() && to.IsZero() {
 		var startsAt, endsAt *time.Time
@@ -512,27 +513,62 @@ func campaignWindow(ctx context.Context, q rowQuerier, campaignID int64, from, t
 			return time.Time{}, time.Time{}, fmt.Errorf("clicks: reading campaign window: %w", err)
 		}
 		if startsAt != nil && endsAt != nil {
-			resolvedTo := *endsAt
-			if resolvedTo.After(today) {
-				resolvedTo = today
+			// starts_at/ends_at are date-only values stored as UTC midnight:
+			// read the date from the UTC fields, then treat it as a civil day
+			// in loc. ends_at is an inclusive last day, so `to` is the day
+			// after min(ends_at, today): the last day and today are both in.
+			start := civilDay(startsAt.UTC())
+			last := civilDay(endsAt.UTC())
+			if last.After(today) {
+				last = today
 			}
-			return *startsAt, resolvedTo, nil
+			resolvedFrom := localMidnight(start, loc)
+			resolvedTo := localMidnight(last.AddDate(0, 0, 1), loc)
+			if resolvedTo.Before(resolvedFrom) {
+				resolvedTo = resolvedFrom // starts in the future: empty window
+			}
+			return resolvedFrom, resolvedTo, nil
 		}
-		return today.AddDate(0, 0, -defaultTimeseriesDays), today, nil
+		// Last 30 civil days, today included.
+		return localMidnight(today.AddDate(0, 0, -(defaultTimeseriesDays-1)), loc),
+			localMidnight(today.AddDate(0, 0, 1), loc), nil
 	}
 
+	// Explicit bounds are civil dates (UTC-midnight carriers from the
+	// handler); `to` is exclusive. A missing `to` is the end of today.
 	if to.IsZero() {
-		to = today
+		to = localMidnight(today.AddDate(0, 0, 1), loc)
+	} else {
+		to = localMidnight(civilDay(to.UTC()), loc)
 	}
 	if from.IsZero() {
-		from = to.AddDate(0, 0, -defaultTimeseriesDays)
+		d := civilDay(to.In(loc))
+		from = localMidnight(d.AddDate(0, 0, -defaultTimeseriesDays), loc)
+	} else {
+		from = localMidnight(civilDay(from.UTC()), loc)
 	}
 	return from, to, nil
 }
 
+// civilDay returns t's calendar date, read from t's own fields, as a
+// UTC-midnight time (a plain date carrier, so AddDate is calendar
+// arithmetic).
+func civilDay(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
+
+// localMidnight is the instant a civil day (a civilDay value) starts in loc.
+// time.Date resolves it through the calendar, so a 23h or 25h daylight-saving
+// day still starts and ends at local midnight (reports.ResolveWindows does
+// the same).
+func localMidnight(day time.Time, loc *time.Location) time.Time {
+	return time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
+}
+
 // CampaignClicksOverTime is the campaign-scoped analog of ClicksOverTime:
 // per-day click counts (bot excluded) for campaignID over the half-open
-// [from, to) window, bucketed by UTC calendar day. Grouped on
+// [from, to) window, bucketed by civil day in the window's time zone. Grouped on
 // clicks.campaign_id (#0100), so a since-reassigned or since-unassigned
 // link's historical clicks stay attributed to the campaign that was running
 // when they happened. Default window resolution follows campaignWindow's
@@ -552,8 +588,8 @@ func campaignWindow(ctx context.Context, q rowQuerier, campaignID int64, from, t
 // deliberately NOT extended to also cover is_bot, and why the resulting
 // `Filter: (NOT is_bot)` node in this query's EXPLAIN output is expected,
 // not a defect (see TestExplainCampaignClicksOverTime_UsesCampaignTimeIndex).
-func (s *StatsStore) CampaignClicksOverTime(ctx context.Context, campaignID int64, from, to time.Time) (TimeseriesResult, error) {
-	resolvedFrom, resolvedTo, err := campaignWindow(ctx, s.pool, campaignID, from, to)
+func (s *StatsStore) CampaignClicksOverTime(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (TimeseriesResult, error) {
+	resolvedFrom, resolvedTo, err := campaignWindow(ctx, s.pool, campaignID, from, to, loc)
 	if err != nil {
 		return TimeseriesResult{}, err
 	}
@@ -566,7 +602,7 @@ func (s *StatsStore) CampaignClicksOverTime(ctx context.Context, campaignID int6
 // transaction or the pool.
 func campaignClicksOverTimeQuery(ctx context.Context, q rowQuerier, campaignID int64, from, to time.Time) (TimeseriesResult, error) {
 	rows, err := q.Query(ctx,
-		`SELECT to_char(date_trunc('day', clicked_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+		`SELECT to_char(date_trunc('day', clicked_at AT TIME ZONE $4::text), 'YYYY-MM-DD') AS day,
 		        COUNT(*) AS count
 		   FROM clicks
 		  WHERE campaign_id = $1
@@ -575,7 +611,7 @@ func campaignClicksOverTimeQuery(ctx context.Context, q rowQuerier, campaignID i
 		    AND is_bot = FALSE
 		  GROUP BY day
 		  ORDER BY day ASC`,
-		campaignID, from, to,
+		campaignID, from, to, from.Location().String(),
 	)
 	if err != nil {
 		return TimeseriesResult{}, fmt.Errorf("clicks: querying campaign timeseries: %w", err)
@@ -639,8 +675,8 @@ type LinkBucket struct {
 // per link (or per NULL link_id) that received at least one non-bot click in
 // the window. The result slice is always non-nil so the JSON encodes as []
 // rather than null.
-func (s *StatsStore) CampaignClicksByLink(ctx context.Context, campaignID int64, from, to time.Time) ([]LinkBucket, error) {
-	resolvedFrom, resolvedTo, err := campaignWindow(ctx, s.pool, campaignID, from, to)
+func (s *StatsStore) CampaignClicksByLink(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) ([]LinkBucket, error) {
+	resolvedFrom, resolvedTo, err := campaignWindow(ctx, s.pool, campaignID, from, to, loc)
 	if err != nil {
 		return nil, err
 	}
@@ -826,8 +862,8 @@ type LinkSeries struct {
 // (asserted directly by TestCampaignSeriesByLink_CapsAndOtherReconciles).
 // Grouped on clicks.campaign_id/clicks.link_id (#0100), never a join through
 // links, for the same since-unassigned reason CampaignClicksByLink documents.
-func (s *StatsStore) CampaignSeriesByLink(ctx context.Context, campaignID int64, from, to time.Time) ([]LinkSeries, error) {
-	resolvedFrom, resolvedTo, err := campaignWindow(ctx, s.pool, campaignID, from, to)
+func (s *StatsStore) CampaignSeriesByLink(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) ([]LinkSeries, error) {
+	resolvedFrom, resolvedTo, err := campaignWindow(ctx, s.pool, campaignID, from, to, loc)
 	if err != nil {
 		return nil, err
 	}
@@ -840,7 +876,7 @@ func (s *StatsStore) CampaignSeriesByLink(ctx context.Context, campaignID int64,
 func campaignSeriesByLinkQuery(ctx context.Context, q rowQuerier, campaignID int64, from, to time.Time) ([]LinkSeries, error) {
 	rows, err := q.Query(ctx,
 		`SELECT link_id,
-		        to_char(date_trunc('day', clicked_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+		        to_char(date_trunc('day', clicked_at AT TIME ZONE $4::text), 'YYYY-MM-DD') AS day,
 		        COUNT(*) AS count
 		   FROM clicks
 		  WHERE campaign_id = $1
@@ -849,7 +885,7 @@ func campaignSeriesByLinkQuery(ctx context.Context, q rowQuerier, campaignID int
 		    AND is_bot = FALSE
 		  GROUP BY link_id, day
 		  ORDER BY link_id ASC NULLS LAST, day ASC`,
-		campaignID, from, to,
+		campaignID, from, to, from.Location().String(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("clicks: querying campaign series by link: %w", err)

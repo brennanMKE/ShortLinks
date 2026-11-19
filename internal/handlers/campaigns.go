@@ -80,8 +80,8 @@ type campaignStore interface {
 // one call that already read everything from one transaction (see
 // clicks.CampaignRollup's doc comment).
 type campaignStatsProvider interface {
-	CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignSummary, error)
-	CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignRollup, error)
+	CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (clicks.CampaignSummary, error)
+	CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (clicks.CampaignRollup, error)
 }
 
 // campaignLinksProvider is the slice of the links data layer the campaigns
@@ -537,7 +537,11 @@ func (h *CampaignsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	// fatal to the detail response so the client never sees a partial or
 	// inconsistent analytics payload (mirrors LinksHandler.Get).
 	if h.stats != nil {
-		summary, err := h.stats.CampaignSummary(r.Context(), c.ID, zeroTime, zeroTime)
+		loc, ok := h.statsTZ(w, r)
+		if !ok {
+			return // statsTZ already wrote the 400.
+		}
+		summary, err := h.stats.CampaignSummary(r.Context(), c.ID, zeroTime, zeroTime, loc)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
@@ -568,7 +572,8 @@ type campaignStatsResponse struct {
 
 // parseStatsWindow parses the optional ?from=/?to= query parameters GET
 // /api/campaigns/{slug}/stats accepts, each a "YYYY-MM-DD" date matching
-// stats.go's DayBucket date format, interpreted as UTC midnight. Either or
+// stats.go's DayBucket date format. They are civil dates, read in the request's
+// tz by the store (#0190); `to` is exclusive. Either or
 // both may be absent (zero time.Time), letting the store apply its own
 // default window (clicks.campaignWindow's doc comment: the campaign's own
 // starts_at/ends_at when both are set, otherwise 30 days). An unparseable
@@ -597,6 +602,27 @@ func parseStatsWindow(w http.ResponseWriter, r *http.Request) (from, to time.Tim
 		return time.Time{}, time.Time{}, false
 	}
 	return from, to, true
+}
+
+// statsTZ resolves the optional ?tz= IANA zone (#0190) the campaign stats
+// bucket their days in, defaulting to DEFAULT_TIMEZONE (UTC when unset). An
+// unknown zone writes the same 400 body the reports use and returns ok=false.
+func (h *CampaignsHandler) statsTZ(w http.ResponseWriter, r *http.Request) (*time.Location, bool) {
+	pv := url.Values{}
+	if v, ok := r.URL.Query()["tz"]; ok {
+		pv["tz"] = v
+	}
+	params, err := reports.ParseParams(pv, h.defaultTZ)
+	if err != nil {
+		var pe *reports.ParamError
+		if errors.As(err, &pe) {
+			writeListParamError(w, pe.Field, pe.Code, pe.Message)
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid request")
+		}
+		return nil, false
+	}
+	return params.TZ, true
 }
 
 // Stats handles GET /api/campaigns/{slug}/stats. It returns the caller's
@@ -646,7 +672,12 @@ func (h *CampaignsHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		return // parseStatsWindow already wrote the 400.
 	}
 
-	rollup, err := h.stats.CampaignRollup(r.Context(), c.ID, from, to)
+	loc, ok := h.statsTZ(w, r)
+	if !ok {
+		return // statsTZ already wrote the 400.
+	}
+
+	rollup, err := h.stats.CampaignRollup(r.Context(), c.ID, from, to, loc)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

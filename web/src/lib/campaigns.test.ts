@@ -756,16 +756,18 @@ describe('campaignQrZipUrl', () => {
 // ── campaignExportCsvUrl (#0107) ──────────────────────────────────────────
 
 describe('campaignExportCsvUrl', () => {
-  it('builds the same-origin CSV export API route from a slug', () => {
-    expect(campaignExportCsvUrl('summer-fair')).toBe('/api/campaigns/summer-fair/export.csv');
+  it('builds the same-origin CSV export API route from a slug, with the time zone', () => {
+    expect(campaignExportCsvUrl('summer-fair', 'America/Los_Angeles')).toBe(
+      '/api/campaigns/summer-fair/export.csv?tz=America%2FLos_Angeles',
+    );
   });
 
   it('encodes an unusual slug defensively', () => {
-    expect(campaignExportCsvUrl('a b')).toBe('/api/campaigns/a%20b/export.csv');
+    expect(campaignExportCsvUrl('a b', 'UTC')).toBe('/api/campaigns/a%20b/export.csv?tz=UTC');
   });
 
-  it('carries no query params, so the export reuses the same default window the on-screen table shows', () => {
-    expect(campaignExportCsvUrl('summer-fair')).not.toContain('?');
+  it('carries no from/to, so the export reuses the same default window the on-screen table shows', () => {
+    expect(campaignExportCsvUrl('summer-fair', 'UTC')).not.toMatch(/from=|to=/);
   });
 });
 

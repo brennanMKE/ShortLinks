@@ -20,8 +20,9 @@
       the content x channel matrix, the tiles' links/idle/top content and the
       change against the previous period. Not mounted in STORAGE=json dev
       mode; the Content tab then says so and the rest of the page still works.
-  The stats window is UTC and half-open; the report calls ask for the same
-  days in UTC (see api.ts) so the matrix, chart and table agree.
+  Days are civil days in the Account time zone (getChartTimeZone, #0190): the
+  stats, the CSV and the report calls all send the same `tz`, so the matrix,
+  chart and table agree. The stats window is half-open.
 
   FOUR NUMBERS, TWO TIME SCALES (#0102 constraint 2): the all-time
   link_count/total_clicks are never reconciled with the windowed click count.
@@ -122,6 +123,7 @@
   import StatTile from '../lib/StatTile.svelte';
   import Dialog from '../lib/Dialog.svelte';
   import CampaignRange from '../lib/CampaignRange.svelte';
+  import { getChartTimeZone } from '../lib/preferences';
   import CampaignMatrix, { type ChildLink } from '../lib/CampaignMatrix.svelte';
 
   interface Props {
@@ -136,11 +138,11 @@
   // ── View state: the hash query is the state (#0164) ─────────────────────
   const route = $derived(getRoute());
   const view = $derived<CampaignView>(parseCampaignView(route.rawQuery));
-  // UTC today, the day the stats windows end on (see statsRange).
-  const today = new Date().toISOString().slice(0, 10);
-  // Depends on the campaign's dates (Campaign dates asks for explicit days), so
-  // it is known once the campaign has loaded and changes if its dates are edited.
-  const rangeOf = (d: CampaignDetail | null) => statsRange(view, today, d);
+  // Days are counted in the Account time zone, so "today" is the viewer's.
+  const tz = getChartTimeZone();
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date());
+  // Campaign dates sends no days: the server's default is right (#0190).
+  const rangeOf = () => statsRange(view, today);
   const keyOf = (r: { from?: string; to?: string }) => `${r.from ?? ''}|${r.to ?? ''}`;
 
   const hrefTab = (t: Tab) => '#' + campaignPath(slug, route.rawQuery, { tab: t });
@@ -154,7 +156,7 @@
   let notFound = $state(false);
   let loadError = $state<string | null>(null);
   let detail = $state<CampaignDetail | null>(null);
-  const rangeKey = $derived(keyOf(rangeOf(detail)));
+  const rangeKey = $derived(keyOf(rangeOf()));
   // The windowed stats for the selected range; null until the first answer.
   let rollup = $state<CampaignRollup | null>(null);
   let statsFailed = $state(false);
@@ -256,7 +258,7 @@
   const exportItems = $derived<MenuItem[]>([
     { label: copiedAll ? 'Copied!' : 'Copy all short URLs', onselect: copyAll, disabled: rows.length === 0 },
     { label: 'Download all QR codes (zip)', href: campaignQrZipUrl(slug) },
-    { label: 'Download CSV', href: campaignExportCsvUrl(slug) },
+    { label: 'Download CSV', href: campaignExportCsvUrl(slug, tz) },
   ]);
 
   function linkMenu(row: Extract<TableRow, { kind: 'link' }>): MenuItem[] {
@@ -341,7 +343,7 @@
     }
     const mine = ++perfSeq;
     perfState = 'loading';
-    getCampaignPerformance(s, w.from, w.to, by)
+    getCampaignPerformance(s, w.from, w.to, by, tz)
       .then((r) => {
         if (mine !== perfSeq) return;
         perf = r;
@@ -368,7 +370,7 @@
       return;
     }
     const mine = ++cmpSeq;
-    getCampaignComparison(s, w.from, w.to)
+    getCampaignComparison(s, w.from, w.to, tz)
       .then((r) => {
         if (mine === cmpSeq) comparison = comparisonRow(r.data.campaigns, s);
       })
@@ -440,10 +442,10 @@
     loadError = null;
     let r: { from?: string; to?: string } = {};
     try {
-      const d = await getCampaign(slug);
+      const d = await getCampaign(slug, tz);
       if (mine !== loadSeq) return;
       detail = d;
-      r = untrack(() => rangeOf(d));
+      r = untrack(() => rangeOf());
       loadedRange = keyOf(r);
     } catch (err) {
       if (mine !== loadSeq) return;
@@ -467,7 +469,7 @@
     // provider always returns empty/zero here anyway).
     let next: CampaignRollup | null = null;
     try {
-      next = await getCampaignStats(slug, r.from, r.to);
+      next = await getCampaignStats(slug, tz, r.from, r.to);
     } catch {
       next = null;
     }
@@ -482,7 +484,7 @@
     let truncated = false;
     if (w) {
       try {
-        const data = (await getCampaignContentGroups(slug, w.from, w.to)).data;
+        const data = (await getCampaignContentGroups(slug, w.from, w.to, tz)).data;
         groups = data.groups;
         truncated = !!data.truncated;
       } catch {
@@ -830,7 +832,7 @@
     <div class="tab-body" class:stale={refreshing}>
       {#if tab === 'content'}
         <Panel title="Clicks over time">
-          <p class="text-faint chart-window-label">{windowLabel(stats)} · UTC days</p>
+          <p class="text-faint chart-window-label">{windowLabel(stats)}</p>
           <CampaignClicksChart
             {timeseries}
             {seriesByLink}
@@ -998,7 +1000,7 @@
         </Panel>
       {:else if tab === 'channels'}
         <Panel title="Channel breakdown">
-          <p class="text-faint chart-window-label">{windowLabel(stats)} · UTC days</p>
+          <p class="text-faint chart-window-label">{windowLabel(stats)}</p>
           {#if noChannelData}
             <p class="text-muted">No click data yet — share this campaign's links to start collecting stats.</p>
           {:else}

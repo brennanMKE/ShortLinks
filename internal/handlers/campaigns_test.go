@@ -2037,3 +2037,79 @@ func TestCampaignsBatchCreate_ErrorRowNumberIsOriginalIndex(t *testing.T) {
 		t.Errorf("links in campaign = %v, want none", inCampaign)
 	}
 }
+
+// TestCampaignsStats_TZBucketsDaysAndIncludesLastDay (#0190): ?tz= buckets the
+// stats by civil days in that zone, the default window includes the
+// campaign's last day, an unknown zone is a 400, and the CSV export accepts
+// tz too (its filename carries the zone's window).
+func TestCampaignsStats_TZBucketsDaysAndIncludesLastDay(t *testing.T) {
+	pool := credsTestPool(t)
+	srv := httptest.NewServer(campaignsMux(t, pool))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	seedSession(t, pool, alice, "alice-token")
+	c := createCampaign(t, srv, "alice-token", `{"name":"TZ Stats","starts_at":"2026-03-07T00:00:00Z","ends_at":"2026-03-09T00:00:00Z"}`)
+	campID := campaignRowID(t, pool, c.Slug)
+	link := seedLinkWithCampaign(t, pool, alice, "tzstat01", "https://example.com", &campID)
+
+	// 2026-03-10 05:30 UTC is 21:30 on the 9th (the last day) in Los Angeles
+	// but already the 10th in UTC. 2026-03-09 12:00 UTC is on the 9th in both.
+	for _, ts := range []string{"2026-03-10 05:30:00+00", "2026-03-09 12:00:00+00"} {
+		if _, err := pool.Exec(context.Background(),
+			`INSERT INTO clicks (link_id, campaign_id, is_bot, clicked_at) VALUES ($1, $2, FALSE, $3)`,
+			link, campID, ts); err != nil {
+			t.Fatalf("seed click: %v", err)
+		}
+	}
+
+	get := func(path string) (int, map[string]any, http.Header) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		return resp.StatusCode, body, resp.Header
+	}
+
+	_, la, _ := get("/api/campaigns/" + c.Slug + "/stats?tz=America/Los_Angeles")
+	if la["click_count"] != float64(2) || la["window_from"] != "2026-03-07" || la["window_to"] != "2026-03-10" {
+		t.Errorf("Los Angeles: click_count=%v window=[%v, %v), want 2 clicks in [2026-03-07, 2026-03-10)",
+			la["click_count"], la["window_from"], la["window_to"])
+	}
+	_, utc, _ := get("/api/campaigns/" + c.Slug + "/stats?tz=UTC")
+	if utc["click_count"] != float64(1) {
+		t.Errorf("UTC click_count = %v, want 1 (the 05:30 UTC click is on the 10th, past the last day)", utc["click_count"])
+	}
+	// No tz: DEFAULT_TIMEZONE (unset in this mux) means UTC.
+	_, def, _ := get("/api/campaigns/" + c.Slug + "/stats")
+	if def["click_count"] != float64(1) {
+		t.Errorf("default click_count = %v, want 1", def["click_count"])
+	}
+	// The detail view takes tz as well.
+	_, detail, _ := get("/api/campaigns/" + c.Slug + "?tz=America/Los_Angeles")
+	if st, _ := detail["stats"].(map[string]any); st == nil || st["click_count"] != float64(2) {
+		t.Errorf("detail stats = %v, want click_count 2 with tz=America/Los_Angeles", detail["stats"])
+	}
+
+	if status, body, _ := get("/api/campaigns/" + c.Slug + "/stats?tz=Not/AZone"); status != http.StatusBadRequest || body["field"] != "tz" {
+		t.Errorf("bad tz: status=%d body=%v, want 400 with field tz", status, body)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/campaigns/"+c.Slug+"/export.csv?tz=America/Los_Angeles", nil)
+	resp, err := srv.Client().Do(withCookie(req, "alice-token"))
+	if err != nil {
+		t.Fatalf("export request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("export status = %d, want 200", resp.StatusCode)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "_2026-03-07_to_2026-03-09.csv") {
+		t.Errorf("Content-Disposition = %q, want the window 2026-03-07 to 2026-03-09 (inclusive last day)", cd)
+	}
+}

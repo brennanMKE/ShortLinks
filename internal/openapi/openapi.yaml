@@ -496,7 +496,12 @@ paths:
       tags: [Campaigns]
       operationId: getCampaign
       summary: One campaign with its links and summary
-      description: Includes click statistics and a daily series for the campaign's default window.
+      description: Includes click statistics and a daily series for the campaign's default window, with days counted in `tz`.
+      parameters:
+        - name: tz
+          in: query
+          description: IANA time zone the days are counted in (civil days, daylight-saving safe). Defaults to the server's `DEFAULT_TIMEZONE`, else UTC. An unknown zone is a 400 with the field `tz`.
+          schema: { type: string, examples: [America/Los_Angeles] }
       responses:
         "200":
           description: The campaign.
@@ -558,18 +563,23 @@ paths:
       summary: Windowed campaign statistics
       description: |
         Totals, channel breakdowns, a daily series and per-link and per-placement
-        breakdowns for a window. The window defaults to the campaign's own dates
-        when both are set, otherwise the last 30 days. For richer analysis use
+        breakdowns for a window. Days are civil days in `tz`. The window defaults
+        to the campaign's own dates when both are set, last day and today
+        included, otherwise the last 30 days with today. For richer analysis use
         the `campaign-performance` report.
       parameters:
         - name: from
           in: query
-          description: First day, `YYYY-MM-DD`, read as UTC.
+          description: First day, `YYYY-MM-DD`, a civil day in `tz`.
           schema: { type: string, format: date }
         - name: to
           in: query
-          description: Last day, `YYYY-MM-DD`, read as UTC. Must not be before `from`.
+          description: Day after the last day covered (exclusive), `YYYY-MM-DD`, a civil day in `tz`. Must not be before `from`. Without it the window runs through the end of today.
           schema: { type: string, format: date }
+        - name: tz
+          in: query
+          description: IANA time zone the days are counted in (civil days, daylight-saving safe). Defaults to the server's `DEFAULT_TIMEZONE`, else UTC. An unknown zone is a 400 with the field `tz`.
+          schema: { type: string, examples: [America/Los_Angeles] }
       responses:
         "200":
           description: The statistics.
@@ -756,12 +766,16 @@ paths:
       parameters:
         - name: from
           in: query
-          description: First day, `YYYY-MM-DD`, read as UTC. Defaults as for `/stats`.
+          description: First day, `YYYY-MM-DD`, a civil day in `tz`. Defaults as for `/stats`.
           schema: { type: string, format: date }
         - name: to
           in: query
-          description: Last day, `YYYY-MM-DD`, read as UTC. Must not be before `from`.
+          description: Day after the last day covered (exclusive), `YYYY-MM-DD`, a civil day in `tz`. Must not be before `from`. Without it the window runs through the end of today.
           schema: { type: string, format: date }
+        - name: tz
+          in: query
+          description: IANA time zone the days are counted in (civil days, daylight-saving safe). Defaults to the server's `DEFAULT_TIMEZONE`, else UTC. An unknown zone is a 400 with the field `tz`.
+          schema: { type: string, examples: [America/Los_Angeles] }
       responses:
         "200":
           description: The CSV, sent as an attachment.

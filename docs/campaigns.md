@@ -471,10 +471,13 @@ the campaign's overall click count. Any consumer wanting a true
 campaign-total share must compute it separately against
 `CampaignStats.ClickCount`.
 
+The export takes `tz` like `/stats` (#0190): days are civil days in that zone,
+and the filename carries that zone's window.
+
 Other decisions, all tested: the filename carries the **inclusive** window
 end (matching the on-screen caption), even though `window_to` is exclusive
-everywhere else in the API; an empty resolved window (`starts_at ==
-ends_at`, so `[X, X)`) is representable, not an error — every assigned link
+everywhere else in the API; an empty resolved window (a campaign that starts in the future, so
+`[X, X)`) is representable, not an error — every assigned link
 still gets a row at `0`/`0`, matching the screen; a leading `=`, `+`, `-`,
 or `@` in a text field is neutralized against formula injection (numeric
 columns are routed around the neutralizer, so numbers stay numbers); the

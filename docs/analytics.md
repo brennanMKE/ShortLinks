@@ -422,8 +422,8 @@ exposes exactly two **composite** methods, each of which reads its entire
 payload inside one `REPEATABLE READ`, read-only transaction:
 
 ```go
-func (s *StatsStore) CampaignSummary(ctx, campaignID int64, from, to time.Time) (CampaignSummary, error)
-func (s *StatsStore) CampaignRollup(ctx, campaignID int64, from, to time.Time) (CampaignRollup, error)
+func (s *StatsStore) CampaignSummary(ctx, campaignID int64, from, to time.Time, loc *time.Location) (CampaignSummary, error)
+func (s *StatsStore) CampaignRollup(ctx, campaignID int64, from, to time.Time, loc *time.Location) (CampaignRollup, error)
 ```
 
 `CampaignSummary` (stats + timeseries) backs `GET /api/campaigns/{slug}`;
@@ -437,10 +437,20 @@ response's timeseries and total disagree, because each fragment would be
 read at a different instant. The four standalone methods exist for tests and
 carry `STANDALONE:` warnings in their doc comments for exactly this reason.
 
+**Time zone (#0190):** the campaign endpoints (`GET /api/campaigns/{slug}`,
+`.../stats` and `.../export.csv`) take `tz`, an IANA zone defaulting to
+`DEFAULT_TIMEZONE` (else UTC); an unknown zone is a 400 with `field: tz`. Days
+are civil days in that zone, bucketed with `date_trunc('day', clicked_at AT
+TIME ZONE tz)`, and window edges are local midnights built through the calendar
+(`time.Date`), so a 23 or 25 hour daylight-saving day still starts and ends at
+local midnight, as in `reports.ResolveWindows`. `from`/`to` are `YYYY-MM-DD`
+civil days in `tz`, with `to` exclusive.
+
 **Default window:** the campaign's own `starts_at`–`ends_at` when both are
-set, clamped so `to` never exceeds today (`campaignWindow` in
-`internal/clicks/stats.go`); otherwise the existing 30-day default shared
-with the per-link queries above. `CampaignStats.WindowFrom`/`WindowTo` report
+set (both are inclusive dates, read from their UTC fields and treated as civil
+days in `tz`), so `to` is the day after `min(ends_at, today)`: the last day and
+today are both in (`campaignWindow` in `internal/clicks/stats.go`, #0119's
+dropped last day). Otherwise the last 30 civil days, today included. `CampaignStats.WindowFrom`/`WindowTo` report
 the window actually used, so the frontend (and the CSV export's filename)
 label and divide by the server's resolved window rather than re-deriving it
 client-side.

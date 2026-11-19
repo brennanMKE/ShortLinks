@@ -79,28 +79,13 @@ describe('patchCampaignQuery', () => {
 describe('statsRange', () => {
   const today = '2026-11-18';
   const v = DEFAULT_VIEW;
-  const dated = (starts: string, ends: string) => ({ starts_at: starts + 'T00:00:00Z', ends_at: ends + 'T00:00:00Z' });
 
-  it('an ended campaign includes its last day (to is exclusive)', () => {
-    expect(statsRange(v, today, dated('2026-10-01', '2026-10-31'))).toEqual({ from: '2026-10-01', to: '2026-11-01' });
+  it('sends nothing for campaign dates: the server default includes the last day and today', () => {
+    expect(statsRange(v, today)).toEqual({});
   });
-  it('a running campaign includes today', () => {
-    expect(statsRange(v, today, dated('2026-11-01', '2026-11-30'))).toEqual({ from: '2026-11-01', to: '2026-11-19' });
-  });
-  it('a one-day campaign gets a one-day window', () => {
-    expect(statsRange(v, today, dated('2026-11-05', '2026-11-05'))).toEqual({ from: '2026-11-05', to: '2026-11-06' });
-    expect(statsRange(v, today, dated('2026-11-18', '2026-11-18'))).toEqual({ from: '2026-11-18', to: '2026-11-19' });
-  });
-  it('a campaign that has not started gets its first day', () => {
-    expect(statsRange(v, today, dated('2026-12-01', '2026-12-31'))).toEqual({ from: '2026-12-01', to: '2026-12-02' });
-  });
-  it('leaves the window to the server unless the campaign has both dates', () => {
-    expect(statsRange(v, today, { starts_at: '2026-11-01T00:00:00Z', ends_at: null })).toEqual({});
-    expect(statsRange(v, today, null)).toEqual({});
-  });
-  it('ends presets today, exclusive', () => {
-    expect(statsRange({ ...v, range: '7d' }, today)).toEqual({ from: '2026-11-11', to: today });
-    expect(statsRange({ ...v, range: '30d' }, today)).toEqual({ from: '2026-10-19', to: today });
+  it('presets run that many days ending today, today included (to is exclusive)', () => {
+    expect(statsRange({ ...v, range: '7d' }, today)).toEqual({ from: '2026-11-12', to: '2026-11-19' });
+    expect(statsRange({ ...v, range: '30d' }, today)).toEqual({ from: '2026-10-20', to: '2026-11-19' });
   });
   it('makes a custom to exclusive, and no end means through today', () => {
     expect(statsRange({ ...v, range: 'custom', from: '2026-11-01', to: '2026-11-30' }, today)).toEqual({ from: '2026-11-01', to: '2026-12-01' });

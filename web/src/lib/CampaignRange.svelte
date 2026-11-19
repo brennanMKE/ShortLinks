@@ -2,8 +2,7 @@
   CampaignRange (#0164, meets #0124) — the campaign page's date range:
   Campaign dates (the default), last 7 days, last 30 days or a custom from/to.
   Every choice is a hash link, so the range survives a reload and a pasted
-  link, and Back undoes it. Days are UTC days (the campaign stats resolve
-  their window in UTC); the label under the control says so.
+  link, and Back undoes it. Days are civil days in the Account time zone.
 -->
 <script lang="ts">
   import type { CampaignView, RangeKey } from './campaignView';

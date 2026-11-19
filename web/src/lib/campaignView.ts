@@ -89,35 +89,21 @@ export function addDays(iso: string, n: number): string {
 }
 
 /**
- * The from/to for GET /api/campaigns/{slug}/stats. Both are UTC days and `to`
- * is EXCLUSIVE ([from, to), parseStatsWindow and clicks.campaignWindow), so
- * "through day D" is to = D + 1.
+ * The from/to for GET /api/campaigns/{slug}/stats. Both are civil days in the
+ * chart time zone (the same `tz` the request sends) and `to` is EXCLUSIVE
+ * ([from, to), parseStatsWindow), so "through day D" is to = D + 1.
  *
- * - Campaign dates: the server's own default drops the last day and today
- *   (#0119), so ask explicitly: from = the start day, to = the day after
- *   min(end, today). An ended Nov 1-30 campaign therefore includes Nov 30, a
- *   running one includes today, and a one-day campaign gets its one day. A
- *   campaign with fewer than both dates keeps the server's 30-day default
- *   (empty here). One that starts in the future gets just its first day.
- * - 7d / 30d / 90d end today, exclusive, as the server's default does.
+ * - Campaign dates: nothing. The server's default is the campaign's own
+ *   dates, last day and today included (#0190, #0119), or the last 30 days
+ *   when it has fewer than both dates.
+ * - 7d / 30d / 90d are that many days ending today, today included.
  * - Custom: `to` is an inclusive day in the control; no end means through today.
  */
-export function statsRange(
-  v: CampaignView,
-  todayUtc: string,
-  campaign?: { starts_at: string | null; ends_at: string | null } | null,
-): { from?: string; to?: string } {
-  if (v.range === 'campaign') {
-    const start = campaign?.starts_at?.slice(0, 10);
-    const end = campaign?.ends_at?.slice(0, 10);
-    if (!start || !end) return {};
-    const last = end < todayUtc ? end : todayUtc;
-    const to = addDays(last, 1);
-    return { from: start, to: to > start ? to : addDays(start, 1) };
-  }
-  if (v.range === 'custom') return { from: v.from, to: addDays(v.to || todayUtc, 1) };
+export function statsRange(v: CampaignView, today: string): { from?: string; to?: string } {
+  if (v.range === 'campaign') return {};
+  if (v.range === 'custom') return { from: v.from, to: addDays(v.to || today, 1) };
   const days = v.range === '7d' ? 7 : v.range === '90d' ? 90 : 30;
-  return { from: addDays(todayUtc, -days), to: todayUtc };
+  return { from: addDays(today, -(days - 1)), to: addDays(today, 1) };
 }
 
 // ── Matrix ──────────────────────────────────────────────────────────────

@@ -1467,7 +1467,7 @@ func (s *Store) ClicksOverTime(_ context.Context, _ int64, _, _ time.Time) (clic
 // motivated every other devstore twin in this file.
 
 // CampaignStats returns zero totals and empty (non-nil) breakdowns.
-func (s *Store) CampaignStats(_ context.Context, _ int64, _, _ time.Time) (clicks.CampaignStats, error) {
+func (s *Store) CampaignStats(_ context.Context, _ int64, _, _ time.Time, _ *time.Location) (clicks.CampaignStats, error) {
 	return clicks.CampaignStats{
 		BySource:  []clicks.Bucket{},
 		ByMedium:  []clicks.Bucket{},
@@ -1477,18 +1477,18 @@ func (s *Store) CampaignStats(_ context.Context, _ int64, _, _ time.Time) (click
 }
 
 // CampaignClicksOverTime returns an empty timeseries.
-func (s *Store) CampaignClicksOverTime(_ context.Context, _ int64, _, _ time.Time) (clicks.TimeseriesResult, error) {
+func (s *Store) CampaignClicksOverTime(_ context.Context, _ int64, _, _ time.Time, _ *time.Location) (clicks.TimeseriesResult, error) {
 	return clicks.TimeseriesResult{Days: []clicks.DayBucket{}}, nil
 }
 
 // CampaignClicksByLink returns an empty (non-nil) breakdown.
-func (s *Store) CampaignClicksByLink(_ context.Context, _ int64, _, _ time.Time) ([]clicks.LinkBucket, error) {
+func (s *Store) CampaignClicksByLink(_ context.Context, _ int64, _, _ time.Time, _ *time.Location) ([]clicks.LinkBucket, error) {
 	return []clicks.LinkBucket{}, nil
 }
 
 // CampaignSeriesByLink returns an empty (non-nil) series list — no "Other"
 // row either, since there is nothing to fold.
-func (s *Store) CampaignSeriesByLink(_ context.Context, _ int64, _, _ time.Time) ([]clicks.LinkSeries, error) {
+func (s *Store) CampaignSeriesByLink(_ context.Context, _ int64, _, _ time.Time, _ *time.Location) ([]clicks.LinkSeries, error) {
 	return []clicks.LinkSeries{}, nil
 }
 
@@ -1501,12 +1501,12 @@ func (s *Store) CampaignSeriesByLink(_ context.Context, _ int64, _, _ time.Time)
 // above are kept as direct-call twins of clicks.StatsStore's own public
 // surface, even though nothing in this package's interface assertions
 // requires them anymore.
-func (s *Store) CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignSummary, error) {
-	stats, err := s.CampaignStats(ctx, campaignID, from, to)
+func (s *Store) CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (clicks.CampaignSummary, error) {
+	stats, err := s.CampaignStats(ctx, campaignID, from, to, loc)
 	if err != nil {
 		return clicks.CampaignSummary{}, err
 	}
-	ts, err := s.CampaignClicksOverTime(ctx, campaignID, from, to)
+	ts, err := s.CampaignClicksOverTime(ctx, campaignID, from, to, loc)
 	if err != nil {
 		return clicks.CampaignSummary{}, err
 	}
@@ -1516,16 +1516,16 @@ func (s *Store) CampaignSummary(ctx context.Context, campaignID int64, from, to 
 // CampaignRollup returns zero/empty values for every quarter of the payload
 // — the dev-mode twin of clicks.StatsStore.CampaignRollup, the method
 // handlers.CampaignsHandler.Stats calls.
-func (s *Store) CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignRollup, error) {
-	summary, err := s.CampaignSummary(ctx, campaignID, from, to)
+func (s *Store) CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (clicks.CampaignRollup, error) {
+	summary, err := s.CampaignSummary(ctx, campaignID, from, to, loc)
 	if err != nil {
 		return clicks.CampaignRollup{}, err
 	}
-	byLink, err := s.CampaignClicksByLink(ctx, campaignID, from, to)
+	byLink, err := s.CampaignClicksByLink(ctx, campaignID, from, to, loc)
 	if err != nil {
 		return clicks.CampaignRollup{}, err
 	}
-	seriesByLink, err := s.CampaignSeriesByLink(ctx, campaignID, from, to)
+	seriesByLink, err := s.CampaignSeriesByLink(ctx, campaignID, from, to, loc)
 	if err != nil {
 		return clicks.CampaignRollup{}, err
 	}
@@ -1783,8 +1783,8 @@ var _ interface {
 // them directly once combining their results one-at-a-time was found to let
 // each quarter of a response read a different snapshot.
 var _ interface {
-	CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignSummary, error)
-	CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time) (clicks.CampaignRollup, error)
+	CampaignSummary(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (clicks.CampaignSummary, error)
+	CampaignRollup(ctx context.Context, campaignID int64, from, to time.Time, loc *time.Location) (clicks.CampaignRollup, error)
 } = (*Store)(nil)
 
 var _ interface {

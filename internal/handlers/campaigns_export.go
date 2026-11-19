@@ -441,7 +441,12 @@ func (h *CampaignsHandler) Export(w http.ResponseWriter, r *http.Request) {
 	// are used from the payload; Timeseries/SeriesByLink are read and
 	// discarded — an acceptable cost against reusing the one call that is
 	// documented safe to read a per-link total from.
-	rollup, err := h.stats.CampaignRollup(r.Context(), c.ID, from, to)
+	loc, ok := h.statsTZ(w, r)
+	if !ok {
+		return // statsTZ already wrote the 400.
+	}
+
+	rollup, err := h.stats.CampaignRollup(r.Context(), c.ID, from, to, loc)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

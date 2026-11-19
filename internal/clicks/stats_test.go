@@ -525,7 +525,7 @@ func TestCampaignStats_EmptyCampaign(t *testing.T) {
 
 	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
-	got, err := stats.CampaignStats(context.Background(), campID, from, to)
+	got, err := stats.CampaignStats(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestCampaignStats_MultipleLinksAggregate(t *testing.T) {
 
 	from := when.AddDate(0, 0, -1)
 	to := when.AddDate(0, 0, 1)
-	got, err := stats.CampaignStats(context.Background(), campID, from, to)
+	got, err := stats.CampaignStats(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -607,7 +607,7 @@ func TestCampaignStats_WindowBoundariesHalfOpen(t *testing.T) {
 	seedCampaignClick(t, pool, &link, &campID, to, false, "", "", "", "")                         // at to: excluded
 	seedCampaignClick(t, pool, &link, &campID, from.Add(-time.Nanosecond), false, "", "", "", "") // just before from: excluded
 
-	got, err := stats.CampaignStats(context.Background(), campID, from, to)
+	got, err := stats.CampaignStats(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -635,7 +635,7 @@ func TestCampaignStats_SinceUnassignedLinkStaysAttributed(t *testing.T) {
 
 	from := when.AddDate(0, 0, -1)
 	to := when.AddDate(0, 0, 1)
-	got, err := stats.CampaignStats(context.Background(), campID, from, to)
+	got, err := stats.CampaignStats(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -664,7 +664,7 @@ func TestCampaignStats_ExcludesBotsAndReportsExcludedCount(t *testing.T) {
 
 	from := when.AddDate(0, 0, -1)
 	to := when.AddDate(0, 0, 1)
-	got, err := stats.CampaignStats(context.Background(), campID, from, to)
+	got, err := stats.CampaignStats(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -698,7 +698,7 @@ func TestCampaignStats_DefaultWindow30DayFallbackWhenDatesNotSet(t *testing.T) {
 	seedCampaignClick(t, pool, &link, &campID, tooOld, false, "", "", "", "")
 	seedCampaignClick(t, pool, &link, &campID, recent, false, "", "", "", "")
 
-	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{})
+	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -728,7 +728,7 @@ func TestCampaignStats_DefaultWindowFollowsCampaignDates(t *testing.T) {
 	seedCampaignClick(t, pool, &link, &campID, beforeStart, false, "", "", "", "")
 	seedCampaignClick(t, pool, &link, &campID, afterEnd, false, "", "", "", "")
 
-	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{})
+	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -758,7 +758,7 @@ func TestCampaignStats_DefaultWindowClampsEndsAtToToday(t *testing.T) {
 	seedCampaignClick(t, pool, &link, &campID, yesterday, false, "", "", "", "")
 	seedCampaignClick(t, pool, &link, &campID, tomorrow, false, "", "", "", "")
 
-	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{})
+	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -781,7 +781,7 @@ func TestCampaignStats_WindowFromWindowToMatchQueriedRange(t *testing.T) {
 	from := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
 
-	got, err := stats.CampaignStats(context.Background(), campID, from, to)
+	got, err := stats.CampaignStats(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -811,9 +811,9 @@ func TestCampaignStats_WindowToReflectsTodayClamp(t *testing.T) {
 	setCampaignWindow(t, pool, campID, startsAt, endsAt)
 
 	wantFrom := startsAt.Format("2006-01-02")
-	wantTo := time.Now().UTC().Format("2006-01-02")
+	wantTo := time.Now().UTC().AddDate(0, 0, 1).Format("2006-01-02") // exclusive: today is a bucket (#0119)
 
-	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{})
+	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -821,7 +821,7 @@ func TestCampaignStats_WindowToReflectsTodayClamp(t *testing.T) {
 		t.Errorf("window_from = %q, want %q (the campaign's own starts_at)", got.WindowFrom, wantFrom)
 	}
 	if got.WindowTo != wantTo {
-		t.Errorf("window_to = %q, want %q (clamped to today, NOT ends_at's %s)", got.WindowTo, wantTo, endsAt.Format("2006-01-02"))
+		t.Errorf("window_to = %q, want %q (clamped to the day after today, NOT ends_at's %s)", got.WindowTo, wantTo, endsAt.Format("2006-01-02"))
 	}
 }
 
@@ -845,7 +845,7 @@ func TestCampaignClicksOverTime_BasicBuckets(t *testing.T) {
 
 	from := time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
-	got, err := stats.CampaignClicksOverTime(context.Background(), campID, from, to)
+	got, err := stats.CampaignClicksOverTime(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignClicksOverTime: %v", err)
 	}
@@ -884,7 +884,7 @@ func TestCampaignClicksOverTime_ExcludesBots(t *testing.T) {
 
 	from := time.Date(2026, 8, 9, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
-	got, err := stats.CampaignClicksOverTime(context.Background(), campID, from, to)
+	got, err := stats.CampaignClicksOverTime(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignClicksOverTime: %v", err)
 	}
@@ -922,7 +922,7 @@ func TestCampaignClicksByLink_AggregatesPerLink(t *testing.T) {
 
 	from := when.AddDate(0, 0, -1)
 	to := when.AddDate(0, 0, 1)
-	got, err := stats.CampaignClicksByLink(context.Background(), campID, from, to)
+	got, err := stats.CampaignClicksByLink(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignClicksByLink: %v", err)
 	}
@@ -951,7 +951,7 @@ func TestCampaignClicksByLink_EmptyCampaign(t *testing.T) {
 	uid := seedUser(t, pool, "ccbl-empty@example.com")
 	campID := seedCampaign(t, pool, uid, "CCBL Empty", "ccbl-empty")
 
-	got, err := stats.CampaignClicksByLink(context.Background(), campID, time.Time{}, time.Time{})
+	got, err := stats.CampaignClicksByLink(context.Background(), campID, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignClicksByLink: %v", err)
 	}
@@ -980,7 +980,7 @@ func TestCampaignClicksByLink_SinceUnassignedLinkStaysAttributed(t *testing.T) {
 
 	from := when.AddDate(0, 0, -1)
 	to := when.AddDate(0, 0, 1)
-	got, err := stats.CampaignClicksByLink(context.Background(), campID, from, to)
+	got, err := stats.CampaignClicksByLink(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignClicksByLink: %v", err)
 	}
@@ -1031,12 +1031,12 @@ func TestCampaignSeriesByLink_CapsAndOtherReconciles(t *testing.T) {
 	from := when.AddDate(0, 0, -1)
 	to := when.AddDate(0, 0, 1)
 
-	overall, err := stats.CampaignStats(context.Background(), campID, from, to)
+	overall, err := stats.CampaignStats(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
 
-	got, err := stats.CampaignSeriesByLink(context.Background(), campID, from, to)
+	got, err := stats.CampaignSeriesByLink(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignSeriesByLink: %v", err)
 	}
@@ -1108,7 +1108,7 @@ func TestCampaignSeriesByLink_NoOtherWhenWithinCap(t *testing.T) {
 
 	from := when.AddDate(0, 0, -1)
 	to := when.AddDate(0, 0, 1)
-	got, err := stats.CampaignSeriesByLink(context.Background(), campID, from, to)
+	got, err := stats.CampaignSeriesByLink(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignSeriesByLink: %v", err)
 	}
@@ -1129,7 +1129,7 @@ func TestCampaignSeriesByLink_EmptyCampaign(t *testing.T) {
 	uid := seedUser(t, pool, "csbl-empty@example.com")
 	campID := seedCampaign(t, pool, uid, "CSBL Empty", "csbl-empty")
 
-	got, err := stats.CampaignSeriesByLink(context.Background(), campID, time.Time{}, time.Time{})
+	got, err := stats.CampaignSeriesByLink(context.Background(), campID, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignSeriesByLink: %v", err)
 	}
@@ -1154,7 +1154,7 @@ func TestCampaignSeriesByLink_ExcludesBots(t *testing.T) {
 
 	from := when.AddDate(0, 0, -1)
 	to := when.AddDate(0, 0, 1)
-	got, err := stats.CampaignSeriesByLink(context.Background(), campID, from, to)
+	got, err := stats.CampaignSeriesByLink(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("CampaignSeriesByLink: %v", err)
 	}
@@ -1518,7 +1518,7 @@ func TestCampaignStats_BreakdownStaysConsistentWithTotalUnderConcurrentWrites(t 
 	deadline := time.Now().Add(concurrencyDuration)
 	iterations := 0
 	for time.Now().Before(deadline) {
-		got, err := stats.CampaignStats(ctx, campID, from, to)
+		got, err := stats.CampaignStats(ctx, campID, from, to, nil)
 		if err != nil {
 			t.Fatalf("iteration %d: CampaignStats: %v", iterations, err)
 		}
@@ -1577,7 +1577,7 @@ func TestCampaignRollup_TimeseriesConsistentWithClickCountUnderConcurrentWrites(
 		read func(context.Context, int64, time.Time, time.Time) (CampaignStats, TimeseriesResult, int64, error)
 	}{
 		{"CampaignRollup", func(ctx context.Context, id int64, f, t2 time.Time) (CampaignStats, TimeseriesResult, int64, error) {
-			got, err := stats.CampaignRollup(ctx, id, f, t2)
+			got, err := stats.CampaignRollup(ctx, id, f, t2, nil)
 			// by_placement (#0122) must sit inside the same snapshot too.
 			var placementTotal int64
 			for _, b := range got.ByPlacement {
@@ -1586,7 +1586,7 @@ func TestCampaignRollup_TimeseriesConsistentWithClickCountUnderConcurrentWrites(
 			return got.Stats, got.Timeseries, placementTotal, err
 		}},
 		{"CampaignSummary", func(ctx context.Context, id int64, f, t2 time.Time) (CampaignStats, TimeseriesResult, int64, error) {
-			got, err := stats.CampaignSummary(ctx, id, f, t2)
+			got, err := stats.CampaignSummary(ctx, id, f, t2, nil)
 			return got.Stats, got.Timeseries, got.Stats.ClickCount, err
 		}},
 	}
@@ -1670,7 +1670,7 @@ func TestCampaignStats_WindowFromSurvivesDatabaseRoundTripInNonUTCZone(t *testin
 
 	// Zero from/to so campaignWindow resolves the window from the campaign's
 	// own dates — the branch that reads back through pgx.
-	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{})
+	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{}, nil)
 	if err != nil {
 		t.Fatalf("CampaignStats: %v", err)
 	}
@@ -1705,7 +1705,7 @@ func TestCampaignRollup_ByPlacement_GroupsCaseAndWhitespace(t *testing.T) {
 	placementLink(t, pool, uid, campID, "plgrp003", "testing ", 1, at)
 	placementLink(t, pool, uid, campID, "plgrp004", " TESTING", 1, at)
 
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1723,7 +1723,7 @@ func TestCampaignRollup_ByPlacement_TieBreaksByByteOrder(t *testing.T) {
 	placementLink(t, pool, uid, campID, "pltie001", "acme", 1, from.Add(time.Hour))
 	placementLink(t, pool, uid, campID, "pltie002", "Acme", 1, from.Add(time.Hour))
 
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1743,7 +1743,7 @@ func TestCampaignRollup_ByPlacement_NullEmptyAndBlankAreNone(t *testing.T) {
 		t.Fatalf("set empty placement: %v", err)
 	}
 
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1762,7 +1762,7 @@ func TestCampaignRollup_ByPlacement_ZeroClickLinkStillCounted(t *testing.T) {
 	placementLink(t, pool, uid, campID, "plzer001", "Quiet Shop", 0, at)
 	placementLink(t, pool, uid, campID, "plzer002", "Busy Shop", 2, at)
 
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1784,7 +1784,7 @@ func TestCampaignRollup_ByPlacement_SortOrder(t *testing.T) {
 	placementLink(t, pool, uid, campID, "plsrt006", "Beta", 1, at) // ties Alpha on both
 	placementLink(t, pool, uid, campID, "plsrt007", "Alpha", 1, at)
 
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1812,7 +1812,7 @@ func TestCampaignRollup_ByPlacement_RespectsWindowAndExcludesBots(t *testing.T) 
 	}
 	seedCampaignClick(t, pool, &link, &campID, from.Add(time.Hour), true, "", "", "", "")
 
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1831,7 +1831,7 @@ func TestCampaignRollup_ByPlacement_SumsMatchTotals(t *testing.T) {
 	gone := placementLink(t, pool, uid, campID, "plsum004", "Gone Shop", 4, at)
 	unassignLink(t, pool, gone)
 
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1866,7 +1866,7 @@ func TestCampaignRollup_ByPlacement_SumsMatchTotals(t *testing.T) {
 func TestCampaignRollup_ByPlacement_EmptyCampaign(t *testing.T) {
 	pool := testPool(t)
 	_, campID, stats, from, to := placementFixture(t, pool, "pl-empty@example.com", "pl-empty")
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1884,7 +1884,7 @@ func TestCampaignRollup_ByPlacement_LiteralNoneIsDistinctFromBlank(t *testing.T)
 	placementLink(t, pool, uid, campID, "pllit001", "(none)", 2, at)
 	placementLink(t, pool, uid, campID, "pllit002", "", 1, at)
 
-	got, err := stats.CampaignRollup(context.Background(), campID, from, to)
+	got, err := stats.CampaignRollup(context.Background(), campID, from, to, nil)
 	if err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
@@ -1894,5 +1894,104 @@ func TestCampaignRollup_ByPlacement_LiteralNoneIsDistinctFromBlank(t *testing.T)
 	}
 	if len(got.ByPlacement) != 2 || got.ByPlacement[0] != want[0] || got.ByPlacement[1] != want[1] {
 		t.Fatalf("ByPlacement = %+v, want %+v", got.ByPlacement, want)
+	}
+}
+
+// TestCampaignWindow_TimeZoneDSTAndLastDay (#0190) covers the civil-day window
+// across a daylight-saving change and the dropped last day (#0119). The
+// campaign runs 2026-03-07..2026-03-09 in America/Los_Angeles, which springs
+// forward on 2026-03-08 (a 23-hour day).
+func TestCampaignWindow_TimeZoneDSTAndLastDay(t *testing.T) {
+	pool := testPool(t)
+	stats := NewStatsStore(pool)
+	uid := seedUser(t, pool, "cw-tz@example.com")
+	campID := seedCampaign(t, pool, uid, "TZ Window", "cw-tz")
+	setCampaignWindow(t, pool, campID,
+		time.Date(2026, 3, 7, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 9, 0, 0, 0, 0, time.UTC))
+
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	link := seedLink(t, pool, uid, "cwtz01", "https://example.com")
+
+	// Local instants: 23:30 on the 7th, 00:30 and 23:30 on the 8th (the
+	// 23-hour day), 12:00 and 23:59 on the 9th (the campaign's last day), and
+	// 00:10 on the 10th, which is outside.
+	at := func(d, h, m int) time.Time { return time.Date(2026, 3, d, h, m, 0, 0, la) }
+	for _, c := range []time.Time{at(7, 23, 30), at(8, 0, 30), at(8, 23, 30), at(9, 12, 0), at(9, 23, 59), at(10, 0, 10)} {
+		seedCampaignClick(t, pool, &link, &campID, c, false, "", "", "", "")
+	}
+
+	roll, err := stats.CampaignRollup(context.Background(), campID, time.Time{}, time.Time{}, la)
+	if err != nil {
+		t.Fatalf("CampaignRollup: %v", err)
+	}
+	if roll.Stats.WindowFrom != "2026-03-07" || roll.Stats.WindowTo != "2026-03-10" {
+		t.Errorf("window = [%s, %s), want [2026-03-07, 2026-03-10): the last day (the 9th) is included",
+			roll.Stats.WindowFrom, roll.Stats.WindowTo)
+	}
+	if roll.Stats.ClickCount != 5 {
+		t.Errorf("click_count = %d, want 5 (the click at 00:10 on the 10th is outside)", roll.Stats.ClickCount)
+	}
+	want := map[string]int64{"2026-03-07": 1, "2026-03-08": 2, "2026-03-09": 2}
+	if len(roll.Timeseries.Days) != len(want) {
+		t.Fatalf("days = %+v, want %v", roll.Timeseries.Days, want)
+	}
+	var sum int64
+	for _, d := range roll.Timeseries.Days {
+		sum += d.Count
+		if want[d.Date] != d.Count {
+			t.Errorf("day %s = %d, want %d", d.Date, d.Count, want[d.Date])
+		}
+	}
+	if sum != roll.Stats.ClickCount {
+		t.Errorf("sum(timeseries) = %d, click_count = %d", sum, roll.Stats.ClickCount)
+	}
+	if len(roll.SeriesByLink) != 1 || len(roll.SeriesByLink[0].Days) != 3 {
+		t.Errorf("series_by_link = %+v, want one link with 3 days", roll.SeriesByLink)
+	}
+
+	// In UTC the same clicks bucket differently, so the zone really is what
+	// buckets them: 23:30 PST on the 7th is the 8th in UTC.
+	utc, err := stats.CampaignRollup(context.Background(), campID, time.Time{}, time.Time{}, time.UTC)
+	if err != nil {
+		t.Fatalf("CampaignRollup UTC: %v", err)
+	}
+	if c := findDay(utc.Timeseries.Days, "2026-03-07"); c != -1 {
+		t.Errorf("UTC buckets = %+v, want nothing on 2026-03-07", utc.Timeseries.Days)
+	}
+}
+
+// TestCampaignWindow_OneDayCampaignAndTodayDefault (#0190, #0119): a one-day
+// campaign gets its one day, and the 30-day fallback includes today.
+func TestCampaignWindow_OneDayCampaignAndTodayDefault(t *testing.T) {
+	pool := testPool(t)
+	stats := NewStatsStore(pool)
+	uid := seedUser(t, pool, "cw-one@example.com")
+	campID := seedCampaign(t, pool, uid, "One Day", "cw-one")
+	link := seedLink(t, pool, uid, "cwone1", "https://example.com")
+	setCampaignWindow(t, pool, campID,
+		time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC))
+	seedCampaignClick(t, pool, &link, &campID, time.Date(2026, 5, 4, 15, 0, 0, 0, time.UTC), false, "", "", "", "")
+
+	got, err := stats.CampaignStats(context.Background(), campID, time.Time{}, time.Time{}, nil)
+	if err != nil {
+		t.Fatalf("CampaignStats: %v", err)
+	}
+	if got.WindowFrom != "2026-05-04" || got.WindowTo != "2026-05-05" || got.ClickCount != 1 {
+		t.Errorf("one-day campaign = [%s, %s) with %d clicks, want [2026-05-04, 2026-05-05) with 1", got.WindowFrom, got.WindowTo, got.ClickCount)
+	}
+
+	c2 := seedCampaign(t, pool, uid, "Undated", "cw-undated")
+	seedCampaignClick(t, pool, &link, &c2, time.Now(), false, "", "", "", "")
+	got2, err := stats.CampaignStats(context.Background(), c2, time.Time{}, time.Time{}, nil)
+	if err != nil {
+		t.Fatalf("CampaignStats: %v", err)
+	}
+	if got2.ClickCount != 1 {
+		t.Errorf("undated campaign click_count = %d, want 1 (today is in the default window)", got2.ClickCount)
 	}
 }
