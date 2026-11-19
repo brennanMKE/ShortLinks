@@ -576,7 +576,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // listParamNames are the #0144 query parameters. When none is present List
 // serves the original response unchanged.
-var listParamNames = []string{"q", "campaign", "source", "medium", "status", "content_key", "sort", "window"}
+var listParamNames = []string{"q", "campaign", "source", "medium", "status", "content_key", "sort", "window", "group"}
 
 // listLinkItem is a list item in the #0144 enriched response: the usual link
 // fields plus content_key, label, campaign_slug (null when unassigned) and,
@@ -588,6 +588,37 @@ type listLinkItem struct {
 	CampaignSlug *string `json:"campaign_slug"`
 	ClicksWindow *int64  `json:"clicks_window,omitempty"`
 }
+
+// groupedListResponse is the GET /api/links body with group=content (#0189):
+// one page of content groups, each with all of its matching links. total is
+// the number of groups and total_links the number of links across all of them.
+type groupedListResponse struct {
+	Groups     []linkGroupItem `json:"groups"`
+	Page       int             `json:"page"`
+	PerPage    int             `json:"per_page"`
+	Total      int64           `json:"total"`
+	TotalLinks int64           `json:"total_links"`
+	// Truncated is true when more than maxGroupedLinks links matched, so the
+	// groups cover only the first maxGroupedLinks of them in the list order.
+	Truncated bool            `json:"truncated"`
+	Window    *listWindowInfo `json:"window,omitempty"`
+}
+
+// linkGroupItem is one content group: its key, display title and path, the
+// totals over every matching link and the links themselves.
+type linkGroupItem struct {
+	ContentKey   string         `json:"content_key"`
+	Title        string         `json:"title"`
+	Path         string         `json:"path"`
+	LinkCount    int            `json:"link_count"`
+	Clicks       int64          `json:"clicks"`
+	ClicksWindow *int64         `json:"clicks_window,omitempty"`
+	Links        []listLinkItem `json:"links"`
+}
+
+// maxGroupedLinks bounds how many matching links group=content loads and
+// groups (#0189). It is a variable so tests can lower it.
+var maxGroupedLinks = 10000
 
 // listWindowInfo describes the clicks_window span: civil days in tz, today
 // included, the same day model as the reports.
@@ -679,6 +710,16 @@ func (h *LinksHandler) listEnriched(w http.ResponseWriter, r *http.Request, user
 	q := r.URL.Query()
 	get := func(n string) string { return strings.TrimSpace(q.Get(n)) }
 
+	grouped := false
+	switch get("group") {
+	case "", "none":
+	case "content":
+		grouped = true
+	default:
+		writeListParamError(w, "group", "invalid_group", "group must be content or none")
+		return
+	}
+
 	status := get("status")
 	switch {
 	case !q.Has("status"):
@@ -752,14 +793,23 @@ func (h *LinksHandler) listEnriched(w http.ResponseWriter, r *http.Request, user
 		info = &listWindowInfo{Window: window, From: win.From, To: win.To, TZ: win.TZName}
 	}
 
+	if grouped {
+		// Group by content: fetch the matching links (same search, filters
+		// and sort) up to maxGroupedLinks+1, bucket them with the reports' content grouping and page
+		// by group, so a content item is never split across pages.
+		opts.Limit, opts.Offset = maxGroupedLinks+1, 0
+	}
 	rows, total, err := h.store.ListLinksFiltered(r.Context(), userID, opts)
 	if err != nil {
 		slog.Error("links: filtered list failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	items := make([]listLinkItem, 0, len(rows))
-	for _, l := range rows {
+	truncated := false
+	if grouped && len(rows) > maxGroupedLinks {
+		rows, truncated = rows[:maxGroupedLinks], true
+	}
+	toItem := func(l links.Link) listLinkItem {
 		it := listLinkItem{linkView: toLinkView(l), ContentKey: reports.ContentKey(l.DestinationURL)}
 		_, it.Label = reports.LinkLabel(l.Title, l.UTMSource)
 		if l.CampaignSlug != "" {
@@ -770,7 +820,28 @@ func (h *LinksHandler) listEnriched(w http.ResponseWriter, r *http.Request, user
 			cw := l.ClicksWindow
 			it.ClicksWindow = &cw
 		}
-		items = append(items, it)
+		return it
+	}
+	if grouped {
+		all := links.GroupLinks(rows, sortBy)
+		out := make([]linkGroupItem, 0, perPage)
+		for _, g := range links.Page(all, perPage, offset) {
+			gi := linkGroupItem{ContentKey: g.ContentKey, Title: g.Title, Path: g.Path, LinkCount: len(g.Links), Clicks: g.Clicks, Links: make([]listLinkItem, 0, len(g.Links))}
+			if window != "" {
+				cw := g.ClicksWindow
+				gi.ClicksWindow = &cw
+			}
+			for _, l := range g.Links {
+				gi.Links = append(gi.Links, toItem(l))
+			}
+			out = append(out, gi)
+		}
+		writeJSON(w, http.StatusOK, groupedListResponse{Groups: out, Page: page, PerPage: perPage, Total: int64(len(all)), TotalLinks: int64(len(rows)), Truncated: truncated, Window: info})
+		return
+	}
+	items := make([]listLinkItem, 0, len(rows))
+	for _, l := range rows {
+		items = append(items, toItem(l))
 	}
 	writeJSON(w, http.StatusOK, enrichedListResponse{Links: items, Page: page, PerPage: perPage, Total: total, Window: info})
 }

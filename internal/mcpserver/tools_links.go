@@ -41,12 +41,33 @@ type listLinksIn struct {
 	Source     string `json:"source,omitempty" jsonschema:"Only links with this utm_source (comma-separated for several, ~none for none)"`
 	Medium     string `json:"medium,omitempty" jsonschema:"Only links with this utm_medium (comma-separated for several, ~none for none)"`
 	ContentKey string `json:"content_key,omitempty" jsonschema:"Only links that share this content key, which groups the per-channel links of one piece of content"`
+	Group      string `json:"group,omitempty" jsonschema:"Set to content to page by content group: each result is one piece of content with all of its matching links and its total clicks. Omit it for a flat list of links"`
 	Status     string `json:"status,omitempty" jsonschema:"One of active, inactive, expired or all. Omit it to include every status"`
 	Sort       string `json:"sort,omitempty" jsonschema:"One of created (newest first, the default), -created, clicks, clicks_window or title. clicks_window needs window"`
 	Window     string `json:"window,omitempty" jsonschema:"7d, 30d or 90d. Adds a clicks_window count to each link over that window"`
 	TZ         string `json:"tz,omitempty" jsonschema:"IANA time zone for the window, such as America/Los_Angeles. Defaults to the instance's zone"`
 	Page       int    `json:"page,omitempty" jsonschema:"Page number, starting at 1"`
 	PerPage    int    `json:"per_page,omitempty" jsonschema:"Links per page, up to 100"`
+}
+
+// listLinksSummary summarises either list shape: with group=content the
+// response has groups (one per content item) instead of links.
+func listLinksSummary(m map[string]any) string {
+	groups, ok := m["groups"].([]any)
+	if !ok {
+		return linksSummary("Links")(m)
+	}
+	s := fmt.Sprintf("Content groups: %d of %v (page %v), %v links in all", len(groups), m["total"], m["page"], m["total_links"])
+	for i, g := range groups {
+		if i >= 10 {
+			s += fmt.Sprintf("\n… and %d more", len(groups)-10)
+			break
+		}
+		if gm, ok := g.(map[string]any); ok {
+			s += fmt.Sprintf("\n%s (%v links, %v clicks)", str(gm, "title"), gm["link_count"], gm["clicks"])
+		}
+	}
+	return s
 }
 
 type keyIn struct {
@@ -91,7 +112,7 @@ func registerLinkTools(b *Builder) {
 	}, func(ctx context.Context, c *Caller, in listLinksIn) (*mcp.CallToolResult, error) {
 		q := url.Values{}
 		for k, v := range map[string]string{"q": in.Q, "campaign": in.Campaign, "source": in.Source, "medium": in.Medium,
-			"content_key": in.ContentKey, "status": in.Status, "sort": in.Sort, "window": in.Window, "tz": in.TZ} {
+			"content_key": in.ContentKey, "status": in.Status, "sort": in.Sort, "window": in.Window, "tz": in.TZ, "group": in.Group} {
 			if v != "" {
 				q.Set(k, v)
 			}
@@ -102,7 +123,7 @@ func registerLinkTools(b *Builder) {
 		if in.PerPage > 0 {
 			q.Set("per_page", strconv.Itoa(in.PerPage))
 		}
-		return proxy(ctx, c, http.MethodGet, "/api/links", q, nil, nil, linksSummary("Links"))
+		return proxy(ctx, c, http.MethodGet, "/api/links", q, nil, nil, listLinksSummary)
 	})
 
 	AddTool(b, Spec{

@@ -3,7 +3,7 @@
 // messages and "View all links" from the Overview. No DOM, no Svelte.
 
 import type { LinkListQuery } from './api';
-import type { Link } from './types';
+import type { Link, LinkGroup } from './types';
 import { DEFAULT_STATE, emptyFilters, viewPath, type ViewState } from './viewQuery';
 
 export const PER_PAGE = 20;
@@ -51,6 +51,9 @@ export function toListQuery(view: ViewState, tz: string, perPage = PER_PAGE): Li
     sort: sortOption(view.sort).api,
     window: '30d',
     tz,
+    // Group by content is done by the server (#0189), so each content item is
+    // whole and paging moves by groups.
+    group: view.group === 'content' ? 'content' : undefined,
   };
 }
 
@@ -94,9 +97,16 @@ export type ListRow =
  * Collapses links that share a content key into one header row (expandable to
  * its links). A content with a single link on the page stays a plain row.
  * Order follows each content's first link, so the server's sort is kept.
- * Only the links on the current page are grouped, since the API pages links.
+ * With group=content the server pages by group (#0189), so `links` already
+ * holds every link of each content item on the page; `titles` carries the
+ * server's content title per key.
  */
-export function groupRows(links: Link[], grouped: boolean, expanded: ReadonlySet<string>): ListRow[] {
+export function groupRows(
+  links: Link[],
+  grouped: boolean,
+  expanded: ReadonlySet<string>,
+  titles: ReadonlyMap<string, string> = new Map(),
+): ListRow[] {
   if (!grouped) return links.map((l) => ({ kind: 'link', id: l.key, link: l, child: false }));
   const order: string[] = [];
   const byKey = new Map<string, Link[]>();
@@ -116,10 +126,32 @@ export function groupRows(links: Link[], grouped: boolean, expanded: ReadonlySet
       continue;
     }
     const open = expanded.has(ck);
-    rows.push({ kind: 'group', id: 'group:' + ck, contentKey: ck, label: ls[0].label || ls[0].title || ls[0].key, links: ls, open });
+    rows.push({ kind: 'group', id: 'group:' + ck, contentKey: ck, label: titles.get(ck) || ls[0].label || ls[0].title || ls[0].key, links: ls, open });
     if (open) for (const l of ls) rows.push({ kind: 'link', id: l.key, link: l, child: true });
   }
   return rows;
+}
+
+/** The links of a page of content groups, in order, each group's links together. */
+export function flattenGroups(groups: LinkGroup[]): Link[] {
+  return groups.flatMap((g) => g.links);
+}
+
+/** Content key -> the server's per-group totals (all-time and window clicks). */
+export function groupTotals(groups: LinkGroup[]): Map<string, { clicks: number; window: number }> {
+  return new Map(groups.map((g) => [g.content_key, { clicks: g.clicks, window: g.clicks_window ?? 0 }]));
+}
+
+export const TRUNCATED_NOTE = 'Grouping covers the first 10,000 links; narrow the filters.';
+
+/** Content key -> the server's content title. */
+export function groupTitles(groups: LinkGroup[]): Map<string, string> {
+  return new Map(groups.map((g) => [g.content_key, g.title]));
+}
+
+/** "N links" / "N content items" for the pager, by grouping mode. */
+export function totalNoun(grouped: boolean, n: number): string {
+  return grouped ? plural(n, 'content item', 'content items') : plural(n, 'link', 'links');
 }
 
 export function sumClicks(links: Link[], get: (l: Link) => number): number {

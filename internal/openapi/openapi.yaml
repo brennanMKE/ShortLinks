@@ -160,9 +160,14 @@ paths:
         Paged, newest first, limited to the caller's own links. With none of the
         filter parameters the response is the plain `LinkList` with all-time
         `click_count`. Passing any of `q`, `campaign`, `source`, `medium`,
-        `status`, `content_key`, `sort` or `window`, even with an empty
+        `status`, `content_key`, `sort`, `window` or `group`, even with an empty
         value, returns the `EnrichedLinkList`, whose items add `content_key`,
         `label`, `campaign_slug` and, with `window`, `clicks_window`.
+
+        With `group=content` the response is the `GroupedLinkList` instead:
+        the same search, filters and sort, but paged by content group. Every
+        matching link of a content item is in its one group, so a group is
+        never split across pages; `page` and `per_page` count groups.
       parameters:
         - { $ref: "#/components/parameters/Page" }
         - { $ref: "#/components/parameters/PerPage" }
@@ -207,6 +212,15 @@ paths:
           in: query
           description: Adds `clicks_window`, the non-bot clicks over that many days, today included.
           schema: { type: string, enum: [7d, 30d, 90d] }
+        - name: group
+          in: query
+          description: |
+            `content` returns one entry per content item (links sharing a
+            `content_key`) with its links and totals, paged by group. `none`
+            or empty is the flat list. Groups are ordered by `sort`: `created`
+            by their newest link, `-created` by their oldest, `clicks` and
+            `clicks_window` by the group's totals, `title` by group title.
+          schema: { type: string, enum: [content, none] }
         - name: tz
           in: query
           description: IANA time zone for `window` days. On its own it does not switch to the enriched response. Defaults to the server's `DEFAULT_TIMEZONE`.
@@ -220,8 +234,9 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/LinkList"
                   - $ref: "#/components/schemas/EnrichedLinkList"
+                  - $ref: "#/components/schemas/GroupedLinkList"
         "400":
-          description: "`invalid_sort`, `invalid_status`, `invalid_window` or `invalid_tz`."
+          description: "`invalid_sort`, `invalid_status`, `invalid_window`, `invalid_group` or `invalid_tz`."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/FieldError" }
@@ -1188,6 +1203,46 @@ components:
         page: { type: integer }
         per_page: { type: integer }
         total: { type: integer, format: int64, description: Every link matching the filters. }
+        window:
+          type: object
+          description: Present with `window`.
+          required: [window, from, to, tz]
+          properties:
+            window: { type: string }
+            from: { type: string }
+            to: { type: string }
+            tz: { type: string }
+    LinkGroup:
+      type: object
+      required: [content_key, title, path, link_count, clicks, links]
+      properties:
+        content_key: { type: string }
+        title: { type: string, description: The content title shared by the group's links, without channel labels. }
+        path: { type: string, description: The destination path, for display. }
+        link_count: { type: integer }
+        clicks: { type: integer, format: int64, description: All-time non-bot clicks over the group's matching links. }
+        clicks_window:
+          type: integer
+          format: int64
+          description: Present with `window`.
+        links:
+          type: array
+          items: { $ref: "#/components/schemas/EnrichedLink" }
+    GroupedLinkList:
+      type: object
+      description: The `group=content` response.
+      required: [groups, page, per_page, total, total_links, truncated]
+      properties:
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/LinkGroup" }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer, format: int64, description: Content groups matching the filters. }
+        total_links: { type: integer, format: int64, description: "Links grouped, across all groups. At most 10,000." }
+        truncated:
+          type: boolean
+          description: True when more than 10,000 links matched; the groups then cover only the first 10,000 in the list order. Narrow the filters.
         window:
           type: object
           description: Present with `window`.

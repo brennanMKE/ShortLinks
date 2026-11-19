@@ -64,6 +64,28 @@ export interface LinkList {
   total: number;
 }
 
+/** One content group of GET /api/links?group=content (#0189). */
+export interface LinkGroup {
+  content_key: string;
+  title: string;
+  path: string;
+  link_count: number;
+  clicks: number;
+  clicks_window?: number;
+  links: Link[];
+}
+
+/** GET /api/links?group=content: `total` counts groups, `total_links` their links. */
+export interface GroupedLinkList {
+  groups: LinkGroup[];
+  page: number;
+  per_page: number;
+  total: number;
+  total_links: number;
+  /** More than 10,000 links matched: the groups cover only the first 10,000. */
+  truncated?: boolean;
+}
+
 /** One value/count row of a UTM breakdown dimension. */
 export interface UTMBucket {
   value: string;

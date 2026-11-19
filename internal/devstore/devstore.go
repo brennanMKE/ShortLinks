@@ -1156,7 +1156,7 @@ func (s *Store) ListLinksFiltered(_ context.Context, userID int64, opts links.Li
 			return strings.ToLower(ta) < strings.ToLower(tb)
 		})
 	}
-	return links.PageSlice(matched, opts.Limit, opts.Offset), int64(len(matched)), nil
+	return links.Page(matched, opts.Limit, opts.Offset), int64(len(matched)), nil
 }
 
 // devValueIn reports whether v satisfies an OR-list of wanted values (empty

@@ -148,6 +148,7 @@ item also carries `content_key` and `label` (the #0140 content grouping),
 | `content_key` | Links whose destination has this content key (scheme, `utm_*`, fragment and trailing slash ignored, host lower-cased), e.g. `www.example.com/guides/x`. |
 | `sort` | `created` (newest first, the default), `-created` (oldest first), `clicks` (all-time, most first), `clicks_window` (requires `window`), `title` (A-Z, untitled last). |
 | `window` | `7d`, `30d` or `90d`: adds `clicks_window`, the non-bot clicks over that many days, today included, in the zone below. |
+| `group` | `content` pages by content group (#0189): the response is `{groups, page, per_page, total, total_links}`, `total` counts groups, each group is `{content_key, title, path, link_count, clicks, clicks_window?, links}` with every matching link, so a content item is never split across pages. Same search, filters and `sort` (groups ordered by newest/oldest link, group clicks, or title). `none` is the flat list; anything else is `400 invalid_group`. Grouping covers at most the first 10,000 matching links (in the list order); beyond that the response has `"truncated": true` and the SPA asks the user to narrow the filters. The MCP `list_links` tool takes `group` too. |
 | `tz` | IANA zone for `window` days; defaults to the server's `DEFAULT_TIMEZONE`. |
 
 Errors are `400` with `{"error", "field", "message"}`: `invalid_sort` (unknown

@@ -3,6 +3,10 @@ import {
   acceptsNewLink,
   bulkAssignedMessage,
   groupRows,
+  flattenGroups,
+  groupTitles,
+  groupTotals,
+  totalNoun,
   isNarrowed,
   linksHrefFromOverview,
   previousCampaigns,
@@ -40,7 +44,7 @@ describe('toListQuery', () => {
   it('defaults to active, 30-day clicks, page 1', () => {
     const q = toListQuery(state(), 'UTC');
     expect(q).toMatchObject({ page: 1, status: 'active', sort: 'clicks_window', window: '30d', tz: 'UTC' });
-    expect(linkListQueryString(q)).toBe('page=1&per_page=20&status=active&sort=clicks_window&window=30d&tz=UTC');
+    expect(linkListQueryString(q)).toBe('page=1&per_page=20&status=active&sort=clicks_window&window=30d&tz=UTC&group=content');
   });
   it('maps search, campaign, source, medium, status and sort', () => {
     const v = state({
@@ -132,6 +136,33 @@ describe('groupRows', () => {
   });
   it('sums', () => {
     expect(sumClicks([link('a', { click_count: 2 }), link('b', { click_count: 3 })], (l) => l.click_count)).toBe(5);
+  });
+});
+
+describe('server-grouped pages (#0189)', () => {
+  const groups = [
+    { content_key: 'k1', title: 'Fuse guide', path: '/g', link_count: 2, clicks: 5, links: [link('a', { content_key: 'k1' }), link('c', { content_key: 'k1' })] },
+    { content_key: 'k2', title: 'Other', path: '/o', link_count: 1, clicks: 1, links: [link('b', { content_key: 'k2' })] },
+  ];
+  it('flattens groups in order and keeps each group together', () => {
+    expect(flattenGroups(groups).map((l) => l.key)).toEqual(['a', 'c', 'b']);
+  });
+  it('uses the server title for the group row', () => {
+    const rows = groupRows(flattenGroups(groups), true, new Set(), groupTitles(groups));
+    expect(rows.map((r) => r.id)).toEqual(['group:k1', 'b']);
+    expect(rows[0]).toMatchObject({ kind: 'group', label: 'Fuse guide' });
+  });
+  it('asks the server to group only for Group by content', () => {
+    expect(toListQuery(state({ group: 'content' }), 'UTC').group).toBe('content');
+    expect(toListQuery(state({ group: 'link' }), 'UTC').group).toBeUndefined();
+  });
+  it('uses the server totals per group', () => {
+    expect(groupTotals(groups).get('k1')).toEqual({ clicks: 5, window: 0 });
+  });
+  it('names what the pager counts', () => {
+    expect(totalNoun(true, 1)).toBe('content item');
+    expect(totalNoun(true, 3)).toBe('content items');
+    expect(totalNoun(false, 3)).toBe('links');
   });
 });
 

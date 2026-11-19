@@ -12,6 +12,7 @@ import type {
   User,
   Link,
   LinkList,
+  GroupedLinkList,
   LinkDetail,
   Credential,
   ApiToken,
@@ -147,6 +148,8 @@ export interface LinkListQuery {
   sort: string;
   window?: '7d' | '30d' | '90d';
   tz?: string;
+  /** 'content' pages by content group (#0189); absent is the flat list. */
+  group?: 'content';
 }
 
 /** The query string for GET /api/links with the #0144 parameters. */
@@ -162,12 +165,18 @@ export function linkListQueryString(p: LinkListQuery): string {
   q.set('sort', p.sort);
   if (p.window) q.set('window', p.window);
   if (p.tz) q.set('tz', p.tz);
+  if (p.group) q.set('group', p.group);
   return q.toString();
 }
 
 /** GET /api/links with search, filters and sort (#0144), across all pages. */
 export function searchLinks(p: LinkListQuery): Promise<LinkList> {
   return apiGet<LinkList>('/api/links?' + linkListQueryString(p));
+}
+
+/** GET /api/links with `group: 'content'`: one page of content groups (#0189). */
+export function searchLinkGroups(p: LinkListQuery): Promise<GroupedLinkList> {
+  return apiGet<GroupedLinkList>('/api/links?' + linkListQueryString({ ...p, group: 'content' }));
 }
 
 /** GET /api/links/{key} — link detail plus UTM click stats. */

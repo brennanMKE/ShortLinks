@@ -214,10 +214,10 @@ func (s *Store) ListLinksFiltered(ctx context.Context, userID int64, opts ListOp
 	return out, total, nil
 }
 
-// PageSlice returns the offset/limit window of in (empty, never nil, past the end).
-func PageSlice(in []Link, limit, offset int) []Link {
+// Page returns the offset/limit window of in (empty, never nil, past the end).
+func Page[T any](in []T, limit, offset int) []T {
 	if offset >= len(in) {
-		return []Link{}
+		return []T{}
 	}
 	end := offset + limit
 	if end > len(in) {

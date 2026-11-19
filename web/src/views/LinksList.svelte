@@ -21,6 +21,7 @@
   import { currentUser, links } from '../lib/stores';
   import {
     searchLinks,
+    searchLinkGroups,
     listCampaigns,
     deactivateLink,
     reactivateLink,
@@ -71,6 +72,11 @@
     isNarrowed,
     acceptsNewLink,
     groupRows,
+    flattenGroups,
+    groupTitles,
+    groupTotals,
+    TRUNCATED_NOTE,
+    totalNoun,
     sumClicks,
     plural,
     copiedMessage,
@@ -93,12 +99,17 @@
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let total = $state(0);
+  /** Links across every page: equals `total` flat, and counts links inside the groups when grouped. */
+  let totalLinks = $state(0);
   let perPage = $state(PER_PAGE);
   let reloadCount = $state(0);
   let campaigns = $state<CampaignWithCounts[]>([]);
   let reportFacets = $state<{ source: FacetValue[]; medium: FacetValue[] }>({ source: [], medium: [] });
   let selected = $state<Set<string>>(new Set());
   let expanded = $state<Set<string>>(new Set());
+  let titles = $state<Map<string, string>>(new Map());
+  let totals = $state<Map<string, { clicks: number; window: number }>>(new Map());
+  let truncated = $state(false);
   const phone = createPhone();
   let filtersOpen = $state(false);
   $effect(() => {
@@ -109,7 +120,7 @@
   const hasPrev = $derived(view.page > 1);
   const hasNext = $derived(view.page < totalPages);
   const grouped = $derived(view.group === 'content');
-  const rows = $derived(groupRows($links, grouped, expanded));
+  const rows = $derived(groupRows($links, grouped, expanded, titles));
   const maxWindow = $derived(columnMax($links, (l) => l.clicks_window ?? 0));
   const maxAll = $derived(columnMax($links, (l) => l.click_count));
   const campaignById = $derived(new Map(campaigns.map((c) => [c.id, c])));
@@ -129,8 +140,8 @@
 
   // A response for a view the user has already left must not overwrite a newer one.
   let seq = 0;
-  // Grouping is applied client-side, so it must not refetch.
-  const fetchKey = $derived(linksPath({ ...view, group: DEFAULT_STATE.group }) + '|' + reloadCount);
+  // Grouping is done by the server (#0189), so the group is part of the key.
+  const fetchKey = $derived(linksPath(view) + '|' + reloadCount);
 
   $effect(() => {
     const key = fetchKey;
@@ -141,17 +152,47 @@
     const mine = ++seq;
     loading = true;
     loadError = null;
-    searchLinks(toListQuery(v, tz))
+    const req = toListQuery(v, tz);
+    // Both shapes reduce to a flat, ordered list of links plus the content
+    // titles; `total` counts groups when grouped, links otherwise.
+    const load = req.group
+      ? searchLinkGroups(req).then((res) => ({
+          list: flattenGroups(res.groups ?? []),
+          titles: groupTitles(res.groups ?? []),
+          totals: groupTotals(res.groups ?? []),
+          truncated: res.truncated === true,
+          page: res.page,
+          perPage: res.per_page,
+          total: res.total,
+          totalLinks: res.total_links,
+          count: (res.groups ?? []).length,
+        }))
+      : searchLinks(req).then((res) => ({
+          list: res.links ?? [],
+          titles: new Map<string, string>(),
+          totals: new Map<string, { clicks: number; window: number }>(),
+          truncated: false,
+          page: res.page,
+          perPage: res.per_page,
+          total: res.total,
+          totalLinks: res.total,
+          count: (res.links ?? []).length,
+        }));
+    load
       .then((res) => {
         if (mine !== seq) return;
-        if (res.total > 0 && (res.links ?? []).length === 0 && v.page > 1) {
+        if (res.total > 0 && res.count === 0 && v.page > 1) {
           // Past the last page (a stale bookmark): land on the last one.
-          replace(linksPath({ ...v, page: Math.max(1, Math.ceil(res.total / res.per_page)) }));
+          replace(linksPath({ ...v, page: Math.max(1, Math.ceil(res.total / res.perPage)) }));
           return;
         }
-        links.set(res.links ?? []);
-        perPage = res.per_page;
+        links.set(res.list);
+        titles = res.titles;
+        totals = res.totals;
+        truncated = res.truncated;
+        perPage = res.perPage;
         total = res.total;
+        totalLinks = res.totalLinks;
         loading = false;
       })
       .catch((err) => {
@@ -497,6 +538,11 @@
 
     // #0034 SSE live updates: prepend a created link where it belongs.
     const unsubscribe = subscribeLinks((link) => {
+      // Grouped, a new link may belong to any group: reload rather than prepend.
+      if (grouped) {
+        if (acceptsNewLink({ ...view, page: 1 })) reloadCount++;
+        return;
+      }
       if (!acceptsNewLink(view)) return;
       links.update((cur) => prependUniqueByKey(cur, link));
     });
@@ -513,7 +559,7 @@
 <div class="app-shell">
   <h1 class="page-title">
     Links
-    {#if !loading && !loadError}<span class="count text-muted">{total.toLocaleString()}</span>{/if}
+    {#if !loading && !loadError}<span class="count text-muted">{totalLinks.toLocaleString()}</span>{/if}
   </h1>
 
   <div class="toolbar">
@@ -653,13 +699,13 @@
                 <span class="chev" aria-hidden="true">{r.open ? '▾' : '▸'}</span>
                 <span class="gtext">
                   <span class="gtitle" title={r.label}>{r.label}</span>
-                  <span class="gmeta">{r.links.length} links on this page</span>
+                  <span class="gmeta">{r.links.length} links</span>
                 </span>
               </button>
             {:else if col.key === 'd30'}
-              <InlineBar value={sumClicks(r.links, (l) => l.clicks_window ?? 0)} max={maxWindow} />
+              <InlineBar value={totals.get(r.contentKey)?.window ?? sumClicks(r.links, (l) => l.clicks_window ?? 0)} max={maxWindow} />
             {:else if col.key === 'all'}
-              <span class="num">{sumClicks(r.links, (l) => l.click_count).toLocaleString()}</span>
+              <span class="num">{(totals.get(r.contentKey)?.clicks ?? sumClicks(r.links, (l) => l.click_count)).toLocaleString()}</span>
             {/if}
           {:else}
             {@const l = r.link}
@@ -698,10 +744,14 @@
         {/snippet}
       </DataTable>
 
+      {#if !loading && grouped && truncated}
+        <p class="text-muted truncated" role="status">{TRUNCATED_NOTE}</p>
+      {/if}
+
       {#if !loading && totalPages > 1}
         <div class="pager">
           <Button disabled={!hasPrev} onclick={() => navigate(linksPath({ ...view, page: view.page - 1 }))}>Previous</Button>
-          <span class="text-muted">Page {view.page} of {totalPages} ({total} links)</span>
+          <span class="text-muted">Page {view.page} of {totalPages} ({total.toLocaleString()} {totalNoun(grouped, total)})</span>
           <Button disabled={!hasNext} onclick={() => navigate(linksPath({ ...view, page: view.page + 1 }))}>Next</Button>
         </div>
       {/if}
@@ -781,6 +831,10 @@
     font-size: var(--fs-sm);
     color: var(--text-muted);
     margin-right: var(--space-1);
+  }
+  .truncated {
+    margin: 0.5rem 0.25rem 0;
+    font-size: 0.875rem;
   }
   .seg-group {
     display: inline-flex;
