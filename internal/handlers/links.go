@@ -61,6 +61,8 @@ type linkStore interface {
 	ListLinksFiltered(ctx context.Context, userID int64, opts links.ListOptions) ([]links.Link, int64, error)
 	CountLinks(ctx context.Context, userID int64) (int64, error)
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
+	// GetLinkByExternalID backs GET /api/links/by-external-id/{id} (#0182).
+	GetLinkByExternalID(ctx context.Context, userID int64, externalID string) (links.Link, error)
 	UpdateLink(ctx context.Context, userID int64, key string, upd links.LinkUpdate) (links.Link, error)
 	DeactivateLink(ctx context.Context, userID int64, key string) error
 	// ReactivateLink sets active=true (#0145); links.ErrLinkDenied for a
@@ -214,11 +216,18 @@ type linkView struct {
 	UTMTerm     string `json:"utm_term"`
 	UTMContent  string `json:"utm_content"`
 	Placement   string `json:"placement"`
+	// ExternalID (#0182) is the client-supplied id, null when the link has none.
+	ExternalID *string `json:"external_id"`
 }
 
 // toLinkView maps a domain Link to its JSON shape without the duplicate field
 // (used by list and detail responses).
 func toLinkView(l links.Link, baseURL string) linkView {
+	var extID *string
+	if l.ExternalID != "" {
+		e := l.ExternalID
+		extID = &e
+	}
 	return linkView{
 		ID:             l.ID,
 		Key:            l.Key,
@@ -237,6 +246,7 @@ func toLinkView(l links.Link, baseURL string) linkView {
 		UTMTerm:        l.UTMTerm,
 		UTMContent:     l.UTMContent,
 		Placement:      l.Placement,
+		ExternalID:     extID,
 	}
 }
 
@@ -272,6 +282,9 @@ type createLinkRequest struct {
 	// KeyLength (#0179) is the length of the generated key, 6..32 (default 6).
 	// It is ignored when a custom key is supplied.
 	KeyLength *int `json:"key_length"`
+	// ExternalID (#0182) is an optional client-supplied id, 1 to 128 printable
+	// ASCII characters, unique per user. null or "" means none.
+	ExternalID *string `json:"external_id"`
 }
 
 // customKey returns the user-supplied alias from whichever field carried it, or
@@ -351,6 +364,15 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	externalID := ""
+	if req.ExternalID != nil {
+		externalID = *req.ExternalID
+	}
+	if externalID != "" && !links.ValidExternalID(externalID) {
+		writeError(w, http.StatusBadRequest, "external_id must be 1 to 128 printable ASCII characters")
+		return
+	}
+
 	customKey := strings.TrimSpace(req.customKey())
 
 	keyLength := links.KeyLength
@@ -419,6 +441,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		UTMContent:     strings.TrimSpace(req.UTMContent),
 		Placement:      strings.TrimSpace(req.Placement),
 		MinKeyLength:   keyLength,
+		ExternalID:     externalID,
 	}
 
 	// ───────────────────────────────────────────────────────────────────────
@@ -505,6 +528,8 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, links.ErrKeyTaken):
 			writeError(w, http.StatusConflict, "key already taken")
 			return
+		case writeExternalIDTaken(w, err):
+			return
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
@@ -520,6 +545,8 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case err == nil:
 			created = link
+		case writeExternalIDTaken(w, err):
+			return
 		default:
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
@@ -597,9 +624,30 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, view)
 }
 
+// writeExternalIDTaken answers an external-id conflict with 409
+// external_id_taken and the existing link's key, and reports whether err was
+// one (#0182).
+func writeExternalIDTaken(w http.ResponseWriter, err error) bool {
+	var taken *links.ExternalIDTakenError
+	if !errors.As(err, &taken) {
+		return false
+	}
+	body := map[string]any{
+		"error":       "external_id_taken",
+		"message":     "a link with this external_id already exists",
+		"external_id": taken.ExternalID,
+	}
+	// The holder's key is left out when it could not be looked up.
+	if taken.Key != "" {
+		body["key"] = taken.Key
+	}
+	writeJSON(w, http.StatusConflict, body)
+	return true
+}
+
 // listParamNames are the #0144 query parameters. When none is present List
 // serves the original response unchanged.
-var listParamNames = []string{"q", "campaign", "source", "medium", "status", "content_key", "sort", "window", "group"}
+var listParamNames = []string{"q", "campaign", "source", "medium", "status", "content_key", "sort", "window", "group", "external_id"}
 
 // listLinkItem is a list item in the #0144 enriched response: the usual link
 // fields plus content_key, label, campaign_slug (null when unassigned) and,
@@ -806,6 +854,8 @@ func (h *LinksHandler) listEnriched(w http.ResponseWriter, r *http.Request, user
 		Filter:     params,
 		Status:     status,
 		ContentKey: get("content_key"),
+		// external_id is exact, so it is not trimmed (#0182).
+		ExternalID: q.Get("external_id"),
 		Sort:       sortBy,
 		Now:        now,
 	}
@@ -915,6 +965,39 @@ func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.writeDetail(w, r, link)
+}
+
+// GetByExternalID handles GET /api/links/by-external-id/{id} (#0182): the same
+// detail response as Get, found by the caller's own external id. 404 when the
+// caller has no link with it, whoever else does.
+func (h *LinksHandler) GetByExternalID(w http.ResponseWriter, r *http.Request) {
+	u, ok := middleware.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "external id is required")
+		return
+	}
+	link, err := h.store.GetLinkByExternalID(r.Context(), u.ID, id)
+	switch {
+	case err == nil:
+	case errors.Is(err, links.ErrLinkNotFound):
+		writeError(w, http.StatusNotFound, "link not found")
+		return
+	default:
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	h.writeDetail(w, r, link)
+}
+
+// writeDetail writes the link-detail response for a link already resolved for
+// the caller: its fields plus the UTM breakdown and time series.
+func (h *LinksHandler) writeDetail(w http.ResponseWriter, r *http.Request, link links.Link) {
 	detail := linkDetailView{
 		linkView:     toLinkView(link, h.baseURL),
 		CampaignName: link.CampaignName,
@@ -980,6 +1063,20 @@ func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 // load-bearing) or varying the URL on placement (which would need a cache
 // key scheme this endpoint doesn't have reason to carry otherwise).
 const qrCacheControl = "private, max-age=31536000, immutable"
+
+// File serves GET /api/links/{key}/{file}: qr.svg and qr.png, anything else
+// 404. One route instead of two literal ones, because the literal
+// GET /api/links/by-external-id/{id} (#0182) conflicts with both in the mux.
+func (h *LinksHandler) File(w http.ResponseWriter, r *http.Request) {
+	switch r.PathValue("file") {
+	case "qr.svg":
+		h.QRSVG(w, r)
+	case "qr.png":
+		h.QRPNG(w, r)
+	default:
+		writeError(w, http.StatusNotFound, "not found")
+	}
+}
 
 // QRSVG handles GET /api/links/{key}/qr.svg: a vector QR code encoding this
 // link's short URL, as a download (Content-Disposition: attachment) named
@@ -1094,10 +1191,16 @@ type patchLinkRequest struct {
 	// Active (#0145): false deactivates (same as DELETE), true reactivates after
 	// re-running the URL filter. Applied after every other field.
 	Active *bool `json:"active"`
+	// ExternalID (#0182): a string sets it; null or "" clears it; absent leaves
+	// it unchanged.
+	ExternalID *string `json:"external_id"`
 	// expiresAtPresent records whether the JSON contained the expires_at key at
 	// all, so sending `"expires_at": null` clears it while omitting the field
 	// leaves it unchanged. Populated by UnmarshalJSON.
 	expiresAtPresent bool
+	// externalIDPresent records whether the JSON had the external_id key, so
+	// null clears it instead of meaning "unchanged".
+	externalIDPresent bool
 }
 
 // UnmarshalJSON decodes the patch body while recording whether expires_at was
@@ -1116,6 +1219,7 @@ func (p *patchLinkRequest) UnmarshalJSON(data []byte) error {
 	}
 	*p = patchLinkRequest(a)
 	_, p.expiresAtPresent = probe["expires_at"]
+	_, p.externalIDPresent = probe["external_id"]
 	return nil
 }
 
@@ -1165,6 +1269,17 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		// is nil when null, which clears the column).
 		exp := req.ExpiresAt
 		upd.ExpiresAt = &exp
+	}
+	if req.externalIDPresent {
+		id := ""
+		if req.ExternalID != nil {
+			id = *req.ExternalID
+		}
+		if id != "" && !links.ValidExternalID(id) {
+			writeError(w, http.StatusBadRequest, "external_id must be 1 to 128 printable ASCII characters")
+			return
+		}
+		upd.ExternalID = &id
 	}
 	// #0099: the five discrete UTM fields plus placement, trimmed like every
 	// other string field this handler accepts. Present-but-empty clears the
@@ -1216,6 +1331,11 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		// fall through.
 	case errors.Is(err, links.ErrLinkNotFound):
 		writeError(w, http.StatusNotFound, "link not found")
+		return
+	case errors.Is(err, links.ErrLinkDenied):
+		writeError(w, http.StatusBadRequest, "external_id cannot be set on a link denied by the URL filter")
+		return
+	case writeExternalIDTaken(w, err):
 		return
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")
@@ -1451,6 +1571,11 @@ func validDestinationURL(s string) bool {
 // (VARCHAR(32), migration 000022).
 func validKey(s string) bool {
 	if len(s) == 0 || len(s) > links.MaxKeyLength {
+		return false
+	}
+	// "by-external-id" is the literal path segment of the #0182 lookup route,
+	// so a link with that key could not have its QR code fetched.
+	if s == "by-external-id" {
 		return false
 	}
 	for _, c := range s {

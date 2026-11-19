@@ -380,6 +380,14 @@ func (r *router) Handle(pattern string, h http.Handler) {
 	r.mux.Handle(pattern, h)
 }
 
+// HandleAs registers one mux pattern that serves several documented routes and
+// records those routes, not the shared pattern, so route listings (the OpenAPI
+// drift and MCP parity tests) keep seeing each real route (#0182).
+func (r *router) HandleAs(pattern string, h http.Handler, as ...string) {
+	r.patterns = append(r.patterns, as...)
+	r.mux.Handle(pattern, h)
+}
+
 func (r *router) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
 	r.Handle(pattern, http.HandlerFunc(h))
 }
@@ -522,8 +530,18 @@ func buildMux(
 	// QR codes (#0106): vector SVG and print-resolution PNG, each encoding
 	// the link's SHORT URL (never the destination) so a scan is recorded as
 	// a click like any other visit — see internal/qr's package doc comment.
-	mux.Handle("GET /api/links/{key}/qr.svg", requireAPI(http.HandlerFunc(linksH.QRSVG)))
-	mux.Handle("GET /api/links/{key}/qr.png", requireAPI(http.HandlerFunc(linksH.QRPNG)))
+	//
+	// Both go through one {key}/{file} route rather than two literal
+	// qr.svg/qr.png ones: GET /api/links/by-external-id/{id} (#0182) would
+	// otherwise conflict with them in the mux (both match
+	// /api/links/by-external-id/qr.svg and neither is more specific).
+	mux.HandleAs("GET /api/links/{key}/{file}", requireAPI(http.HandlerFunc(linksH.File)),
+		"GET /api/links/{key}/qr.svg", "GET /api/links/{key}/qr.png")
+	// Lookup by the client-supplied external id (#0182). A key can never be
+	// "by-external-id" in this route because the literal wins in the mux, so
+	// the key alphabet (letters, digits, - and _) is kept clear of it by the
+	// handler's reserved-key check.
+	mux.Handle("GET /api/links/by-external-id/{id}", requireAPI(http.HandlerFunc(linksH.GetByExternalID)))
 
 	// Campaign CRUD + link-membership + stats API (#0098, #0099, #0102) — all
 	// behind RequireSession and scoped to the authenticated user in the

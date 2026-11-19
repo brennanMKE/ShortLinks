@@ -54,6 +54,7 @@ type batchRowIn struct {
 	UTMTerm        string `json:"utm_term,omitempty" jsonschema:"utm_term for this row"`
 	UTMContent     string `json:"utm_content,omitempty" jsonschema:"utm_content for this row, identifying the content"`
 	Placement      string `json:"placement,omitempty" jsonschema:"Placement label for this row, such as a poster location"`
+	ExternalID     string `json:"external_id,omitempty" jsonschema:"Your own id for this row's link, 1 to 128 printable ASCII characters, unique among your links and within the batch"`
 }
 
 type batchCreateIn struct {

@@ -121,6 +121,18 @@ dedup decision atomically in a single transaction:
    transaction) and a fresh row is inserted; `duplicate=false`; SSE broadcast
    fires.
 
+**`external_id` and dedup (#0182).** The lookup also requires the same
+`external_id`, with NULL equal only to NULL. So a create that carries an
+`external_id` never merges into a link with a different one (or none), and a
+create without one never returns a link that has one: two invitations to the
+same page never share a link. The same destination with the *same*
+`external_id` is still a duplicate and returns the existing link. If that link
+is deactivated it is **not** reactivated (an admin or client may have turned an
+invitation off on purpose): the response is the link unchanged, with
+`duplicate: true` and `active: false`, and nothing is written. Without an
+`external_id`, a duplicate create still reactivates as before. Re-sending the
+same `Idempotency-Key` replays the first response as always.
+
 The `FOR UPDATE` lock ensures two concurrent creates of the same URL serialize
 rather than racing to insert a duplicate.
 
@@ -153,6 +165,40 @@ which the handler maps to `409 Conflict`.
 
 ---
 
+## External ids (#0182)
+
+A client that keeps nothing of its own, such as CommunityPlatform with its
+invitation links, can set an `external_id` and find the link again later.
+
+- **Format.** Optional, 1 to 128 printable ASCII characters (space to `~`),
+  matched exactly (case-sensitive, not trimmed). Invalid values answer `400`.
+- **Set.** `external_id` on `POST /api/links` and on each batch row
+  (`POST /api/campaigns/{slug}/links/batch`); `PATCH /api/links/{key}` sets or
+  changes it, and `null` (or `""`) clears it, but a non-empty id cannot be set on a link denied by the URL filter (`400`). Every link object returns
+  `external_id`, `null` when unset. A link denied by the URL filter never
+  claims an id.
+- **Unique per user.** Enforced by the partial unique index
+  `idx_links_user_external_id` (migration `000025`); two users may use the same
+  id. Taking an id another of your links holds answers
+  `409 {"error":"external_id_taken","external_id":...,"key":...}`, `key` being the
+  link that holds it. A batch that hits this creates nothing, and a batch with
+  the same id on two rows is a `400`.
+- **Look up.** `GET /api/links?external_id=<id>` returns a one-link list or an
+  empty list (it switches to the enriched response like the other filters).
+  `GET /api/links/by-external-id/{id}` returns the link detail, or `404`; the
+  id is one path segment, so percent-encode `/` and other unsafe characters.
+  The ids `.` and `..` cannot be used in that path, so use `?external_id=` for
+  them. The key `by-external-id` is reserved and cannot be a custom key.
+- **Dedup.** See "Deduplication" above: different ids never merge.
+  Idempotency keys (#0147) are independent of `external_id`.
+- **Public page.** A link with an `external_id` is never listed in the public
+  home page's top links (`reports.PublicSummary`), though its clicks count in
+  the totals.
+- **MCP.** `create_link`, `update_link` and `list_links` take `external_id`,
+  batch rows take it, and `get_link_by_external_id` finds one link.
+
+---
+
 ## Listing, searching and sorting — `GET /api/links`
 
 Paged with `page` (1-based) and `per_page` (default 20, max 100). With none of
@@ -173,6 +219,7 @@ item also carries `content_key` and `label` (the #0140 content grouping),
 | `sort` | `created` (newest first, the default), `-created` (oldest first), `clicks` (all-time, most first), `clicks_window` (requires `window`), `title` (A-Z, untitled last). |
 | `window` | `7d`, `30d` or `90d`: adds `clicks_window`, the non-bot clicks over that many days, today included, in the zone below. |
 | `group` | `content` pages by content group (#0189): the response is `{groups, page, per_page, total, total_links}`, `total` counts groups, each group is `{content_key, title, path, link_count, clicks, clicks_window?, links}` with every matching link, so a content item is never split across pages. Same search, filters and `sort` (groups ordered by newest/oldest link, group clicks, or title). `none` is the flat list; anything else is `400 invalid_group`. Grouping covers at most the first 10,000 matching links (in the list order); beyond that the response has `"truncated": true` and the SPA asks the user to narrow the filters. The MCP `list_links` tool takes `group` too. |
+| `external_id` | The link with exactly this external id (#0182), or an empty list. |
 | `tz` | IANA zone for `window` days; defaults to the server's `DEFAULT_TIMEZONE`. |
 
 Errors are `400` with `{"error", "field", "message"}`: `invalid_sort` (unknown

@@ -981,6 +981,7 @@ func newLinkFromInput(in links.NewLink) links.Link {
 		UTMTerm:        in.UTMTerm,
 		UTMContent:     in.UTMContent,
 		Placement:      in.Placement,
+		ExternalID:     in.ExternalID,
 	}
 }
 
@@ -1014,6 +1015,20 @@ func applyRequestedMetadata(l *links.Link, in links.NewLink) {
 	}
 }
 
+// externalIDHolder returns the key of userID's link holding externalID, other
+// than the link with id exceptID. Caller must hold s.mu.
+func (s *Store) externalIDHolder(userID int64, externalID string, exceptID int64) (string, bool) {
+	if externalID == "" {
+		return "", false
+	}
+	for _, l := range s.links {
+		if l.UserID == userID && l.ExternalID == externalID && l.ID != exceptID {
+			return l.Key, true
+		}
+	}
+	return "", false
+}
+
 // CreateLink inserts a new active link.
 func (s *Store) CreateLink(_ context.Context, in links.NewLink) (links.Link, error) {
 	s.mu.Lock()
@@ -1022,6 +1037,9 @@ func (s *Store) CreateLink(_ context.Context, in links.NewLink) (links.Link, err
 		if l.Key == in.Key {
 			return links.Link{}, links.ErrKeyTaken
 		}
+	}
+	if key, taken := s.externalIDHolder(in.UserID, in.ExternalID, 0); taken {
+		return links.Link{}, &links.ExternalIDTakenError{ExternalID: in.ExternalID, Key: key}
 	}
 	l := newLinkFromInput(in)
 	l.ID = s.nextLinkID
@@ -1038,15 +1056,23 @@ func (s *Store) CreateOrReactivateLink(_ context.Context, in links.NewLink, genK
 
 	// Dedup lookup.
 	for i, l := range s.links {
-		if l.UserID == in.UserID && l.DestinationURL == in.DestinationURL && l.DeniedReason == 0 && len(l.Key) >= in.MinKeyLength {
+		if l.UserID == in.UserID && l.DestinationURL == in.DestinationURL && l.DeniedReason == 0 && len(l.Key) >= in.MinKeyLength && l.ExternalID == in.ExternalID {
 			if l.Active {
 				applyRequestedMetadata(&s.links[i], in)
+				return s.cloneLink(s.links[i]), links.OutcomeActiveDuplicate, nil
+			}
+			if in.ExternalID != "" {
+				// #0182: never revive a deactivated link by external_id.
 				return s.cloneLink(s.links[i]), links.OutcomeActiveDuplicate, nil
 			}
 			s.links[i].Active = true
 			applyRequestedMetadata(&s.links[i], in)
 			return s.cloneLink(s.links[i]), links.OutcomeReactivated, nil
 		}
+	}
+
+	if key, taken := s.externalIDHolder(in.UserID, in.ExternalID, 0); taken {
+		return links.Link{}, 0, &links.ExternalIDTakenError{ExternalID: in.ExternalID, Key: key}
 	}
 
 	// No existing link — mint a unique key.
@@ -1093,6 +1119,7 @@ func (s *Store) CreateDeniedLink(_ context.Context, in links.NewLink, reasonCode
 	l.Key = key
 	l.Active = false
 	l.DeniedReason = reasonCode
+	l.ExternalID = "" // a denied row never claims an external id
 	l.CreatedAt = time.Now()
 	s.nextLinkID++
 	s.links = append(s.links, l)
@@ -1153,6 +1180,12 @@ func (s *Store) CreateLinksBatch(_ context.Context, rows []links.NewLink, genKey
 			s.links = s.links[:startLen]
 			s.nextLinkID = startNextID
 			return nil, err
+		}
+
+		if holder, taken := s.externalIDHolder(in.UserID, in.ExternalID, 0); taken {
+			s.links = s.links[:startLen]
+			s.nextLinkID = startNextID
+			return nil, &links.ExternalIDTakenError{ExternalID: in.ExternalID, Key: holder}
 		}
 
 		l := newLinkFromInput(in)
@@ -1232,6 +1265,9 @@ func (s *Store) ListLinksFiltered(_ context.Context, userID int64, opts links.Li
 		if !devValueIn(opts.Filter.Filters["source"], l.UTMSource) || !devValueIn(opts.Filter.Filters["medium"], l.UTMMedium) {
 			continue
 		}
+		if opts.ExternalID != "" && l.ExternalID != opts.ExternalID {
+			continue
+		}
 		if opts.ContentKey != "" && reports.ContentKey(l.DestinationURL) != opts.ContentKey {
 			continue
 		}
@@ -1294,6 +1330,18 @@ func (s *Store) GetLink(_ context.Context, userID int64, key string) (links.Link
 	return links.Link{}, links.ErrLinkNotFound
 }
 
+// GetLinkByExternalID returns the user's link with the given external id.
+func (s *Store) GetLinkByExternalID(_ context.Context, userID int64, externalID string) (links.Link, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.links {
+		if l.UserID == userID && externalID != "" && l.ExternalID == externalID {
+			return s.cloneLink(l), nil
+		}
+	}
+	return links.Link{}, links.ErrLinkNotFound
+}
+
 // ListLinksForCampaign returns every link assigned to campaignID, scoped to
 // userID, most-recently-created first — mirrors
 // links.Store.ListLinksForCampaign.
@@ -1317,6 +1365,15 @@ func (s *Store) UpdateLink(_ context.Context, userID int64, key string, upd link
 	for i, l := range s.links {
 		if l.UserID != userID || l.Key != key {
 			continue
+		}
+		if upd.ExternalID != nil {
+			if *upd.ExternalID != "" && l.DeniedReason != 0 {
+				return links.Link{}, links.ErrLinkDenied
+			}
+			if holder, taken := s.externalIDHolder(userID, *upd.ExternalID, l.ID); taken {
+				return links.Link{}, &links.ExternalIDTakenError{ExternalID: *upd.ExternalID, Key: holder}
+			}
+			s.links[i].ExternalID = *upd.ExternalID
 		}
 		if upd.Title != nil {
 			s.links[i].Title = *upd.Title

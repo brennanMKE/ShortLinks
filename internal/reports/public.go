@@ -42,9 +42,11 @@ type PublicActivity struct {
 // lists at most limit pieces of content (links sharing a ContentKey collapse
 // into one entry that links to the most-clicked member), restricted to links a
 // visitor can follow and that are meant to be public: active, not denied, part
-// of a campaign and non-expiring. Expiring links are usually invites or other
-// private shares, and links outside a campaign are not curated, so neither is
-// ever listed. It is NOT a
+// of a campaign, non-expiring and without an external id. Expiring links are
+// usually invites or other private shares, and links outside a campaign are
+// not curated, so neither is ever listed; a link with an external_id (#0182)
+// is one a client created and tracks itself, such as an invitation, and is
+// never listed either. It is NOT a
 // registered report and is not reachable through /api/reports; it reveals only
 // titles, short URLs and counts, never destinations, campaigns or UTM values.
 func PublicSummary(ctx context.Context, q Querier, now time.Time, tzName, baseURL string, limit int) (*PublicActivity, error) {
@@ -97,7 +99,7 @@ func PublicSummary(ctx context.Context, q Querier, now time.Time, tzName, baseUR
 		 WHERE k.clicked_at >= $1 AND k.clicked_at < $2 AND NOT k.is_bot
 		   AND COALESCE(l.active, TRUE) AND l.denied_reason = 0
 		   AND l.campaign_id IS NOT NULL AND l.expires_at IS NULL
-		   -- TODO(#0182): also require l.external_id IS NULL once it exists.
+		   AND l.external_id IS NULL
 		 GROUP BY l.id
 		 ORDER BY n DESC, l.key
 		 LIMIT `+strconv.Itoa(maxLinkRows), w.Start, w.End)

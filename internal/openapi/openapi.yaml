@@ -191,7 +191,7 @@ paths:
         Paged, newest first, limited to the caller's own links. With none of the
         filter parameters the response is the plain `LinkList` with all-time
         `click_count`. Passing any of `q`, `campaign`, `source`, `medium`,
-        `status`, `content_key`, `sort`, `window` or `group`, even with an empty
+        `status`, `content_key`, `sort`, `window`, `group` or `external_id`, even with an empty
         value, returns the `EnrichedLinkList`, whose items add `content_key`,
         `label`, `campaign_slug` and, with `window`, `clicks_window`.
 
@@ -252,6 +252,14 @@ paths:
             by their newest link, `-created` by their oldest, `clicks` and
             `clicks_window` by the group's totals, `title` by group title.
           schema: { type: string, enum: [content, none] }
+        - name: external_id
+          in: query
+          description: |
+            The link whose `external_id` is exactly this value, or an empty
+            list. Matched per user and case-sensitively. `GET
+            /api/links/by-external-id/{id}` is the same lookup as one link
+            (`404` when there is none).
+          schema: { type: string }
         - name: tz
           in: query
           description: IANA time zone for `window` days. On its own it does not switch to the enriched response. Defaults to the server's `DEFAULT_TIMEZONE`.
@@ -285,6 +293,17 @@ paths:
         caller already shortened returns the existing link with
         `"duplicate": true`, reactivating it if it was inactive. Custom aliases
         are never deduplicated and answer `409` when taken.
+
+        With `external_id`, a destination already shortened under a different
+        `external_id` (or none) is never merged: a new link is created, so two
+        invitations never share a link. Equally, a link created without an
+        `external_id` never returns a link that has one. The same
+        destination and the same `external_id` still returns the existing
+        link. A deactivated link is never revived by an `external_id` create:
+        the existing link comes back unchanged, still `"active": false`, with
+        `"duplicate": true`. An `external_id` another link of the caller already holds
+        answers `409 external_id_taken` with that link's key. Idempotency keys
+        work as before and are independent of `external_id`.
       parameters:
         - { $ref: "#/components/parameters/IdempotencyKey" }
       requestBody:
@@ -310,12 +329,17 @@ paths:
         "404": { $ref: "#/components/responses/CampaignNotFound" }
         "409":
           description: |
-            The custom key is taken (`{"error":"key already taken"}`), or the
-            same `Idempotency-Key` is still being processed
+            The custom key is taken (`{"error":"key already taken"}`), the
+            `external_id` is already used by another of the caller's links
+            (`external_id_taken`, with that link's `key`), or the same
+            `Idempotency-Key` is still being processed
             (`idempotency_key_in_progress`, with `Retry-After`).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Error"
+                  - $ref: "#/components/schemas/ExternalIdTakenError"
         "413": { $ref: "#/components/responses/RequestTooLarge" }
         "422":
           description: |
@@ -328,6 +352,31 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/DeniedError"
                   - $ref: "#/components/schemas/IdempotencyError"
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/links/by-external-id/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: The link's `external_id`, 1 to 128 printable ASCII characters. Percent-encode characters that are not URL-safe, such as `/`. The ids `.` and `..` cannot be used here (path cleaning rewrites them); look those up with `GET /api/links?external_id=`.
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      tags: [Links]
+      operationId: getLinkByExternalId
+      summary: One link by its external id
+      description: |
+        The same response as `GET /api/links/{key}`, found by the
+        `external_id` set at creation. Only the caller's own links match, so an
+        id another user holds answers `404`.
+      responses:
+        "200":
+          description: The link, with UTM breakdowns and a daily click series.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LinkDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/LinkNotFound" }
         "500": { $ref: "#/components/responses/InternalError" }
         "429": { $ref: "#/components/responses/RateLimited" }
   /api/links/{key}:
@@ -357,11 +406,16 @@ paths:
         Field edits apply first, then `active`.
 
         - `active: false` is the same as `DELETE`.
+        - `external_id` can be cleared on any link but only set on a link not
+          denied by a URL filter (`400` otherwise).
         - `active: true` re-runs the URL filter against the effective
           destination before anything is written. A match answers `422
           destination_denied` and saves nothing. Links denied at creation are
           never reactivated. Reactivating an active link is a no-op.
         - Reactivation does not change `expires_at`.
+        - `external_id` sets, changes or (with `null` or an empty string)
+          clears the link's external id. An id another of the caller's links
+          holds answers `409 external_id_taken`.
         - If the destination changed during the check, the answer is
           `409 {"error":"conflict"}`. Retry.
       requestBody:
@@ -384,10 +438,15 @@ paths:
         "403": { $ref: "#/components/responses/ReadOnly" }
         "404": { $ref: "#/components/responses/LinkNotFound" }
         "409":
-          description: The destination changed during reactivation (`conflict`).
+          description: |
+            The destination changed during reactivation (`conflict`), or the
+            `external_id` is used by another link (`external_id_taken`).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Error"
+                  - $ref: "#/components/schemas/ExternalIdTakenError"
         "422":
           description: Reactivation refused by a URL filter (`destination_denied`).
           content:
@@ -683,7 +742,9 @@ paths:
       description: |
         Up to 50 rows. Either every row is created or none are. Blank rows are
         skipped and counted in `skipped_blank_rows`. Rows with the same source,
-        medium, content and placement are rejected. Batch create does not
+        medium, content and placement are rejected, as are rows sharing an
+        `external_id`. A row's `external_id` already used by another link
+        answers `409 external_id_taken` and creates nothing. Batch create does not
         deduplicate: send an `Idempotency-Key` to make a retry safe.
       parameters:
         - { $ref: "#/components/parameters/IdempotencyKey" }
@@ -710,11 +771,15 @@ paths:
         "404": { $ref: "#/components/responses/CampaignNotFound" }
         "409":
           description: |
-            A key is taken (`key already taken`), or the same `Idempotency-Key`
+            A key is taken (`key already taken`), a row's `external_id` is used
+            by another link (`external_id_taken`), or the same `Idempotency-Key`
             is still being processed (`idempotency_key_in_progress`).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Error" }
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Error"
+                  - $ref: "#/components/schemas/ExternalIdTakenError"
         "413": { $ref: "#/components/responses/RequestTooLarge" }
         "422":
           description: |
@@ -1123,6 +1188,15 @@ components:
       required: [error]
       properties:
         error: { type: string }
+    ExternalIdTakenError:
+      type: object
+      description: The `external_id` is already used by another of the caller's links.
+      required: [error, message, external_id, key]
+      properties:
+        error: { type: string, const: external_id_taken }
+        message: { type: string }
+        external_id: { type: string }
+        key: { type: string, description: The key of the link that holds it. }
     FieldError:
       description: A rejected list or report parameter.
       type: object
@@ -1259,6 +1333,7 @@ components:
         - utm_term
         - utm_content
         - placement
+        - external_id
       properties:
         id: { type: integer, format: int64 }
         key: { type: string, description: "The short URL is `{base_url}/u/{key}`." }
@@ -1282,6 +1357,9 @@ components:
         utm_term: { type: string }
         utm_content: { type: string }
         placement: { type: string, description: A free-text label for where the link is used, for example `lobby poster`. }
+        external_id:
+          type: [string, "null"]
+          description: The client-supplied id set at creation, unique per user, or `null`.
     LinkList:
       type: object
       required: [links, page, per_page, total]
@@ -1428,6 +1506,12 @@ components:
         utm_term: { type: string }
         utm_content: { type: string }
         placement: { type: string }
+        external_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 128
+          pattern: "^[ -~]{1,128}$"
+          description: Your own id for the link, 1 to 128 printable ASCII characters, unique per user. `null` or empty means none. Links with a different `external_id` are never merged by deduplication.
     PatchLinkRequest:
       type: object
       additionalProperties: false
@@ -1442,6 +1526,10 @@ components:
         utm_term: { type: string }
         utm_content: { type: string }
         placement: { type: string }
+        external_id:
+          type: [string, "null"]
+          maxLength: 128
+          description: "A string sets it (1 to 128 printable ASCII characters); `null` or an empty string clears it."
         active:
           type: boolean
           description: "`false` deactivates, `true` reactivates after a URL filter check."
@@ -1626,6 +1714,12 @@ components:
         utm_term: { type: string }
         utm_content: { type: string }
         placement: { type: string }
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[ -~]{1,128}$"
+          description: Your own id for this row's link, unique per user and within the batch.
     BatchCreateRequest:
       type: object
       additionalProperties: false

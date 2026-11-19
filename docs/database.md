@@ -127,6 +127,7 @@ described in the PRD.
 | `campaign_id` | `BIGINT` | FK → `campaigns(id)`, `ON DELETE SET NULL`, nullable (#0099). A link belongs to at most one campaign. |
 | `utm_source` / `utm_medium` / `utm_campaign` / `utm_term` / `utm_content` | `TEXT` | Nullable (#0099). Discrete copies of what the UTM builder baked into `destination_url` — see `docs/utm.md` |
 | `placement` | `TEXT` | Nullable (#0099). Free-text operational label (e.g. a physical poster location), deliberately separate from `utm_content` — see `docs/campaigns.md` |
+| `external_id` | `TEXT` | Nullable (#0182, `000025_links_external_id`). Client-supplied id, 1 to 128 printable ASCII characters (`links_external_id_format` CHECK), unique per user. Added without a default, so no rows are rewritten. |
 
 Existing rows from before migration `000011` keep `NULL` in all seven
 campaign/UTM/placement columns; they are not backfilled by parsing
@@ -140,6 +141,7 @@ campaign/UTM/placement columns; they are not backfilled by parsing
 | `idx_links_user_destination` | Per-user dedup lookup — partial, `WHERE denied_reason = 0` |
 | `idx_links_denied_reason` | Admin query for all denied links — partial, `WHERE denied_reason > 0` |
 | `idx_links_campaign_id` | Campaign-scoped link lookups — partial, `WHERE campaign_id IS NOT NULL` (#0099) |
+| `idx_links_user_external_id` | Unique `(user_id, external_id)`, partial `WHERE external_id IS NOT NULL` (#0182). Backs the per-user uniqueness and the lookup by external id. Built with a plain `CREATE UNIQUE INDEX` in the same file as the column, because a `CONCURRENTLY` build cannot run in golang-migrate's multi-statement transaction; it holds a write lock only for one scan of `links`. |
 
 ---
 

@@ -33,6 +33,46 @@ var ErrLinkDenied = errors.New("links: link was denied by the URL filter")
 // are checked for collision before the insert via GenerateUniqueKey.
 var ErrKeyTaken = errors.New("links: key already taken")
 
+// ExternalIDIndex is the name of the per-user partial unique index on
+// links.external_id (migration 000025, #0182). A unique violation naming it is
+// an external-id conflict; any other is the key.
+const ExternalIDIndex = "idx_links_user_external_id"
+
+// ExternalIDTakenError is returned when the user already has a link with the
+// given external id. Key is the existing link's key, so the handler can return
+// it with the 409. It matches ErrExternalIDTaken under errors.Is.
+type ExternalIDTakenError struct {
+	ExternalID string
+	Key        string
+}
+
+func (e *ExternalIDTakenError) Error() string {
+	return "links: external_id already taken"
+}
+
+// ErrExternalIDTaken is the sentinel an *ExternalIDTakenError matches.
+var ErrExternalIDTaken = errors.New("links: external_id already taken")
+
+// Is makes errors.Is(err, ErrExternalIDTaken) true for an *ExternalIDTakenError.
+func (e *ExternalIDTakenError) Is(target error) bool { return target == ErrExternalIDTaken }
+
+// MaxExternalIDLength is the longest external id accepted.
+const MaxExternalIDLength = 128
+
+// ValidExternalID reports whether s is 1 to 128 printable ASCII characters
+// (0x20 to 0x7E), matching the links_external_id_format CHECK.
+func ValidExternalID(s string) bool {
+	if len(s) == 0 || len(s) > MaxExternalIDLength {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7E {
+			return false
+		}
+	}
+	return true
+}
+
 // pgUniqueViolation is the PostgreSQL SQLSTATE for a unique_violation, returned
 // when an INSERT collides with a UNIQUE constraint (here, links.key). It lets
 // CreateLink distinguish a custom-alias clash from any other DB failure.
@@ -56,7 +96,8 @@ type querier interface {
 // of this shared constant.
 const linkColumns = `l.id, l.user_id, l.key, l.destination_url, l.title,
 	        l.active, l.denied_reason, l.created_at, l.expires_at,
-	        l.campaign_id, l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.utm_content, l.placement`
+	        l.campaign_id, l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.utm_content, l.placement,
+	        l.external_id`
 
 // Store is the data-access layer for links: create, list, fetch, update, and
 // deactivate. Every method is scoped to an owning user id so a request can only
@@ -103,8 +144,10 @@ type Link struct {
 	UTMTerm        string
 	UTMContent     string
 	Placement      string
-	CampaignName   string // populated only by GetLink; "" elsewhere (ListLinksFiltered sets only the slug)
-	CampaignSlug   string // populated only by GetLink and ListLinksFiltered; "" elsewhere
+	// ExternalID is the client-supplied id (#0182); empty when the column is NULL.
+	ExternalID   string
+	CampaignName string // populated only by GetLink; "" elsewhere (ListLinksFiltered sets only the slug)
+	CampaignSlug string // populated only by GetLink and ListLinksFiltered; "" elsewhere
 	// ClicksWindow is the non-bot click count inside the requested window; set
 	// only by ListLinksFiltered when a window was requested (#0144).
 	ClicksWindow int64
@@ -149,6 +192,9 @@ type NewLink struct {
 	UTMTerm     string
 	UTMContent  string
 	Placement   string
+	// ExternalID (#0182) is an optional client-supplied id, unique per user;
+	// "" stores NULL. The handler validates it with ValidExternalID.
+	ExternalID string
 	// MinKeyLength (#0179), when > 0, restricts the generated-key dedup in
 	// CreateOrReactivateLink to existing links whose key is at least this long,
 	// so a request for a longer key never gets a shorter existing one back. A
@@ -182,17 +228,17 @@ func (s *Store) CreateLink(ctx context.Context, in NewLink) (Link, error) {
 	}
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
-		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement)
-		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12)
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, in.Key, in.DestinationURL, title, in.ExpiresAt,
 		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
-		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID),
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-			return Link{}, ErrKeyTaken
+			return Link{}, s.uniqueViolation(ctx, pgErr, in)
 		}
 		return Link{}, fmt.Errorf("links: inserting link: %w", err)
 	}
@@ -219,6 +265,7 @@ func newLinkFromInput(in NewLink) Link {
 		UTMTerm:        in.UTMTerm,
 		UTMContent:     in.UTMContent,
 		Placement:      in.Placement,
+		ExternalID:     in.ExternalID,
 	}
 }
 
@@ -255,6 +302,9 @@ func (s *Store) CreateDeniedLink(ctx context.Context, in NewLink, reasonCode int
 	link.Key = key
 	link.Active = false
 	link.DeniedReason = reasonCode
+	// A denied row never claims an external id (it is stored NULL below), so a
+	// retry with the same id is not blocked by an attempt that was refused.
+	link.ExternalID = ""
 	var title *string
 	if in.Title != "" {
 		title = &in.Title
@@ -359,7 +409,7 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	// Dedup lookup: an existing non-denied link for this user + destination. The
 	// row is locked FOR UPDATE so a concurrent create of the same URL serializes
 	// behind this one rather than racing to a second insert.
-	existing, err := s.lockExisting(ctx, tx, in.UserID, in.DestinationURL, in.MinKeyLength)
+	existing, err := s.lockExisting(ctx, tx, in.UserID, in.DestinationURL, in.MinKeyLength, in.ExternalID)
 	switch {
 	case err == nil:
 		// A match exists. Active → forward-merge requested metadata, return;
@@ -369,6 +419,16 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 			if err != nil {
 				return Link{}, 0, err
 			}
+			if err := tx.Commit(ctx); err != nil {
+				return Link{}, 0, fmt.Errorf("links: commit dedup tx: %w", err)
+			}
+			return existing, OutcomeActiveDuplicate, nil
+		}
+		// #0182: a create carrying an external_id never revives a deactivated
+		// link (an admin or client may have turned an invitation off on
+		// purpose). The existing link comes back untouched and still
+		// inactive, as a duplicate; nothing is written.
+		if in.ExternalID != "" {
 			if err := tx.Commit(ctx); err != nil {
 				return Link{}, 0, fmt.Errorf("links: commit dedup tx: %w", err)
 			}
@@ -417,17 +477,17 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
-		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement)
-		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12)
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, key, in.DestinationURL, title, in.ExpiresAt,
 		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
-		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID),
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-			return Link{}, 0, ErrKeyTaken
+			return Link{}, 0, s.uniqueViolation(ctx, pgErr, in)
 		}
 		return Link{}, 0, fmt.Errorf("links: inserting link: %w", err)
 	}
@@ -555,17 +615,17 @@ func (s *Store) CreateLinksBatch(ctx context.Context, rows []NewLink, genKey fun
 		}
 		err = tx.QueryRow(ctx,
 			`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
-			                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement)
-			 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12)
+			                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id)
+			 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13)
 			 RETURNING id, created_at, expires_at`,
 			in.UserID, key, in.DestinationURL, title, in.ExpiresAt,
 			in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
-			nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement),
+			nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID),
 		).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 		if err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-				return nil, ErrKeyTaken
+				return nil, s.uniqueViolation(ctx, pgErr, in)
 			}
 			return nil, fmt.Errorf("links: inserting batch link: %w", err)
 		}
@@ -658,17 +718,18 @@ func applyRequestedMetadataTx(ctx context.Context, tx pgx.Tx, existing Link, in 
 // click_count excludes is_bot = TRUE clicks (#0101), matching
 // clicks.UTMStatsForLink's ClickCount so a link never carries two
 // contradictory totals across the API surface.
-func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, destinationURL string, minKeyLength int) (Link, error) {
+func (s *Store) lockExisting(ctx context.Context, q querier, userID int64, destinationURL string, minKeyLength int, externalID string) (Link, error) {
 	row := q.QueryRow(ctx,
 		`SELECT `+linkColumns+`,
 		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id AND c.is_bot = FALSE) AS click_count
 		   FROM links l
 		  WHERE l.user_id = $1 AND l.destination_url = $2 AND l.denied_reason = 0
 		    AND length(l.key) >= $3
+		    AND l.external_id IS NOT DISTINCT FROM $4
 		  ORDER BY l.id
 		  LIMIT 1
 		  FOR UPDATE`,
-		userID, destinationURL, minKeyLength,
+		userID, destinationURL, minKeyLength, nullIfEmpty(externalID),
 	)
 	return scanLink(row)
 }
@@ -809,6 +870,29 @@ func (s *Store) GetLink(ctx context.Context, userID int64, key string) (Link, er
 	return link, nil
 }
 
+// GetLinkByExternalID returns the user's link with the given external id
+// (#0182), shaped like GetLink. ErrLinkNotFound when there is none; another
+// user's link with the same id never matches.
+func (s *Store) GetLinkByExternalID(ctx context.Context, userID int64, externalID string) (Link, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+linkColumns+`,
+		        (SELECT COUNT(*) FROM clicks c WHERE c.link_id = l.id AND c.is_bot = FALSE) AS click_count,
+		        camp.name, camp.slug
+		   FROM links l
+		   LEFT JOIN campaigns camp ON camp.id = l.campaign_id
+		  WHERE l.user_id = $1 AND l.external_id = $2`,
+		userID, externalID,
+	)
+	link, err := scanLinkWithCampaign(row)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return Link{}, ErrLinkNotFound
+	case err != nil:
+		return Link{}, err
+	}
+	return link, nil
+}
+
 // LinkUpdate carries the optional fields a PATCH may change. A nil pointer means
 // "leave unchanged"; a non-nil pointer sets the field (Title to "" clears it).
 // The handler builds this from the request body, validating DestinationURL when
@@ -835,6 +919,8 @@ type LinkUpdate struct {
 	UTMTerm        *string
 	UTMContent     *string
 	Placement      *string
+	// ExternalID (#0182): nil = unchanged; pointer to "" clears it to NULL.
+	ExternalID *string
 }
 
 // UpdateLink applies a partial update to the user's own link and returns the
@@ -850,6 +936,18 @@ func (s *Store) UpdateLink(ctx context.Context, userID int64, key string, upd Li
 	// at $3.
 	args = append(args, userID, key)
 	next := 3
+
+	// #0182: a link denied by the URL filter never takes an external id
+	// (clearing one is fine).
+	if upd.ExternalID != nil && *upd.ExternalID != "" {
+		cur, err := s.GetLink(ctx, userID, key)
+		if err != nil {
+			return Link{}, err
+		}
+		if cur.DeniedReason != 0 {
+			return Link{}, ErrLinkDenied
+		}
+	}
 
 	if upd.Title != nil {
 		setClauses = append(setClauses, fmt.Sprintf("title = $%d", next))
@@ -891,6 +989,7 @@ func (s *Store) UpdateLink(ctx context.Context, userID int64, key string, upd Li
 	addNullableString("utm_term", upd.UTMTerm)
 	addNullableString("utm_content", upd.UTMContent)
 	addNullableString("placement", upd.Placement)
+	addNullableString("external_id", upd.ExternalID)
 
 	// Nothing to change: behave as a no-op fetch so the caller still gets the
 	// current row (and a proper 404 if it is not theirs).
@@ -913,6 +1012,10 @@ func (s *Store) UpdateLink(ctx context.Context, userID int64, key string, upd Li
 	case errors.Is(err, pgx.ErrNoRows):
 		return Link{}, ErrLinkNotFound
 	case err != nil:
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == ExternalIDIndex && upd.ExternalID != nil {
+			return Link{}, s.externalIDTaken(ctx, userID, *upd.ExternalID)
+		}
 		return Link{}, fmt.Errorf("links: updating link: %w", err)
 	}
 	// Re-read so the response carries the authoritative row plus click count.
@@ -976,16 +1079,19 @@ func scanLink(row pgx.Row) (Link, error) {
 	var l Link
 	var title *string
 	var expiresAt *time.Time
-	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement *string
+	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID *string
 	if err := row.Scan(
 		&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
-		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement,
+		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID,
 		&l.ClickCount,
 	); err != nil {
 		return Link{}, err
 	}
 	applyNullableLinkFields(&l, title, expiresAt, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement)
+	if externalID != nil {
+		l.ExternalID = *externalID
+	}
 	return l, nil
 }
 
@@ -996,17 +1102,20 @@ func scanLinkWithCampaign(row pgx.Row) (Link, error) {
 	var l Link
 	var title *string
 	var expiresAt *time.Time
-	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement *string
+	var utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID *string
 	var campaignName, campaignSlug *string
 	if err := row.Scan(
 		&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
-		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement,
+		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID,
 		&l.ClickCount, &campaignName, &campaignSlug,
 	); err != nil {
 		return Link{}, err
 	}
 	applyNullableLinkFields(&l, title, expiresAt, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement)
+	if externalID != nil {
+		l.ExternalID = *externalID
+	}
 	if campaignName != nil {
 		l.CampaignName = *campaignName
 	}
@@ -1043,4 +1152,24 @@ func applyNullableLinkFields(l *Link, title *string, expiresAt *time.Time, utmSo
 	if placement != nil {
 		l.Placement = *placement
 	}
+}
+
+// uniqueViolation maps a unique_violation raised by an insert of in: the
+// external-id index becomes an *ExternalIDTakenError carrying the existing
+// link's key, anything else (the global key constraint) is ErrKeyTaken.
+func (s *Store) uniqueViolation(ctx context.Context, pgErr *pgconn.PgError, in NewLink) error {
+	if pgErr.ConstraintName == ExternalIDIndex && in.ExternalID != "" {
+		return s.externalIDTaken(ctx, in.UserID, in.ExternalID)
+	}
+	return ErrKeyTaken
+}
+
+// externalIDTaken builds the conflict error, looking up the key of the link
+// that holds the id. It queries the pool, not the failed transaction.
+func (s *Store) externalIDTaken(ctx context.Context, userID int64, externalID string) error {
+	e := &ExternalIDTakenError{ExternalID: externalID}
+	_ = s.pool.QueryRow(ctx,
+		`SELECT key FROM links WHERE user_id = $1 AND external_id = $2`, userID, externalID,
+	).Scan(&e.Key)
+	return e
 }

@@ -46,6 +46,7 @@ type listLinksIn struct {
 	Sort       string `json:"sort,omitempty" jsonschema:"One of created (newest first, the default), -created, clicks, clicks_window or title. clicks_window needs window"`
 	Window     string `json:"window,omitempty" jsonschema:"7d, 30d or 90d. Adds a clicks_window count to each link over that window"`
 	TZ         string `json:"tz,omitempty" jsonschema:"IANA time zone for the window, such as America/Los_Angeles. Defaults to the instance's zone"`
+	ExternalID string `json:"external_id,omitempty" jsonschema:"Only the link with this exact external_id, the id a client set when it created the link"`
 	Page       int    `json:"page,omitempty" jsonschema:"Page number, starting at 1"`
 	PerPage    int    `json:"per_page,omitempty" jsonschema:"Links per page, up to 100"`
 }
@@ -87,6 +88,7 @@ type createLinkIn struct {
 	UTMTerm        string `json:"utm_term,omitempty" jsonschema:"utm_term label recorded with the link"`
 	UTMContent     string `json:"utm_content,omitempty" jsonschema:"utm_content label that identifies the piece of content"`
 	Placement      string `json:"placement,omitempty" jsonschema:"Where the link will be placed, such as a poster location or channel"`
+	ExternalID     string `json:"external_id,omitempty" jsonschema:"Your own id for this link, 1 to 128 printable ASCII characters, unique among your links. Use it to find the link again with get_link_by_external_id. A different external_id always gets a new link, even for a destination already shortened"`
 	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"A unique string for this create. Retrying with the same value returns the first result instead of creating a duplicate"`
 }
 
@@ -101,6 +103,11 @@ type updateLinkIn struct {
 	UTMTerm        *string `json:"utm_term,omitempty" jsonschema:"New utm_term label"`
 	UTMContent     *string `json:"utm_content,omitempty" jsonschema:"New utm_content label"`
 	Placement      *string `json:"placement,omitempty" jsonschema:"New placement label"`
+	ExternalID     *string `json:"external_id,omitempty" jsonschema:"New external_id, or an empty string to clear it"`
+}
+
+type externalIDIn struct {
+	ExternalID string `json:"external_id" jsonschema:"The external_id that was set when the link was created"`
 }
 
 func registerLinkTools(b *Builder) {
@@ -113,7 +120,7 @@ func registerLinkTools(b *Builder) {
 	}, func(ctx context.Context, c *Caller, in listLinksIn) (*mcp.CallToolResult, error) {
 		q := url.Values{}
 		for k, v := range map[string]string{"q": in.Q, "campaign": in.Campaign, "source": in.Source, "medium": in.Medium,
-			"content_key": in.ContentKey, "status": in.Status, "sort": in.Sort, "window": in.Window, "tz": in.TZ, "group": in.Group} {
+			"content_key": in.ContentKey, "status": in.Status, "sort": in.Sort, "window": in.Window, "tz": in.TZ, "group": in.Group, "external_id": in.ExternalID} {
 			if v != "" {
 				q.Set(k, v)
 			}
@@ -137,6 +144,18 @@ func registerLinkTools(b *Builder) {
 			return r, nil
 		}
 		return proxy(ctx, c, http.MethodGet, "/api/links/"+pathSeg(in.Key), nil, nil, nil, summarizeLink("Link"))
+	})
+
+	AddTool(b, Spec{
+		Name:        "get_link_by_external_id",
+		Title:       "Get a link by external id",
+		Description: "Get one link by the external_id a client set when it created it, with the same detail as get_link. Fails with not found when none of your links has that id.",
+		Routes:      []string{"GET /api/links/by-external-id/{id}"},
+	}, func(ctx context.Context, c *Caller, in externalIDIn) (*mcp.CallToolResult, error) {
+		if r := required("external_id", in.ExternalID); r != nil {
+			return r, nil
+		}
+		return proxy(ctx, c, http.MethodGet, "/api/links/by-external-id/"+pathSeg(in.ExternalID), nil, nil, nil, summarizeLink("Link"))
 	})
 
 	AddTool(b, Spec{
@@ -167,7 +186,7 @@ func registerLinkTools(b *Builder) {
 		Name:  "create_link",
 		Title: "Create a link",
 		Description: "Create a short link for a destination URL, optionally in a campaign and with UTM labels. " +
-			"If the same destination was already shortened it returns that link. Pass idempotency_key so a retry cannot create a duplicate.",
+			"If the same destination was already shortened it returns that link, unless external_id is set and differs, which always makes a new link. An external_id already in use is a conflict that names the existing link. Pass idempotency_key so a retry cannot create a duplicate.",
 		Write:  true,
 		Routes: []string{"POST /api/links"},
 	}, func(ctx context.Context, c *Caller, in createLinkIn) (*mcp.CallToolResult, error) {
@@ -180,7 +199,7 @@ func registerLinkTools(b *Builder) {
 	AddTool(b, Spec{
 		Name:        "update_link",
 		Title:       "Update a link",
-		Description: "Change a link's title, destination, expiry, UTM labels or placement. Only the fields you pass change; to turn a link off or on use deactivate_link or reactivate_link.",
+		Description: "Change a link's title, destination, expiry, UTM labels, placement or external_id. Only the fields you pass change; to turn a link off or on use deactivate_link or reactivate_link.",
 		Write:       true, Idempotent: true,
 		Routes: []string{"PATCH /api/links/{key}"},
 	}, func(ctx context.Context, c *Caller, in updateLinkIn) (*mcp.CallToolResult, error) {

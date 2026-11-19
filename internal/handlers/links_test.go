@@ -37,8 +37,9 @@ func linksMux(t *testing.T, pool *pgxpool.Pool) http.Handler {
 	mux.Handle("PATCH /api/links/{key}", requireSession(http.HandlerFunc(h.Patch)))
 	mux.Handle("DELETE /api/links/{key}", requireSession(http.HandlerFunc(h.Delete)))
 	// QR codes (#0106) — see qr_test.go.
-	mux.Handle("GET /api/links/{key}/qr.svg", requireSession(http.HandlerFunc(h.QRSVG)))
-	mux.Handle("GET /api/links/{key}/qr.png", requireSession(http.HandlerFunc(h.QRPNG)))
+	mux.Handle("GET /api/links/{key}/{file}", requireSession(http.HandlerFunc(h.File)))
+	// Lookup by external id (#0182).
+	mux.Handle("GET /api/links/by-external-id/{id}", requireSession(http.HandlerFunc(h.GetByExternalID)))
 	return mux
 }
 

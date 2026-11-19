@@ -74,7 +74,8 @@ func newEnv(t *testing.T) *env {
 	mux.Handle("GET /api/links", requireAPI(http.HandlerFunc(linksH.List)))
 	mux.Handle("GET /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Get)))
 	mux.Handle("PATCH /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Patch)))
-	mux.Handle("GET /api/links/{key}/qr.png", requireAPI(http.HandlerFunc(linksH.QRPNG)))
+	mux.Handle("GET /api/links/{key}/{file}", requireAPI(http.HandlerFunc(linksH.File)))
+	mux.Handle("GET /api/links/by-external-id/{id}", requireAPI(http.HandlerFunc(linksH.GetByExternalID)))
 	mux.Handle("GET /api/campaigns", requireAPI(http.HandlerFunc(campH.List)))
 	mux.Handle("POST /api/campaigns", requireAPI(idem(http.HandlerFunc(campH.Create))))
 	mux.Handle("GET /api/campaigns/{slug}", requireAPI(http.HandlerFunc(campH.Get)))
@@ -208,7 +209,7 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
 }
 
 var allTools = []string{
-	"whoami", "list_links", "get_link", "get_link_qr", "create_link", "update_link", "deactivate_link", "reactivate_link",
+	"whoami", "list_links", "get_link", "get_link_by_external_id", "get_link_qr", "create_link", "update_link", "deactivate_link", "reactivate_link",
 	"list_campaigns", "get_campaign", "list_campaign_links", "create_campaign", "update_campaign", "delete_campaign",
 	"batch_create_campaign_links", "assign_links_to_campaign", "remove_link_from_campaign",
 	"list_reports", "get_overview", "get_top_content", "get_top_links", "get_breakdown", "get_timeseries",

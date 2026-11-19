@@ -1209,6 +1209,9 @@ type batchCreateLinkRow struct {
 	UTMTerm        string `json:"utm_term"`
 	UTMContent     string `json:"utm_content"`
 	Placement      string `json:"placement"`
+	// ExternalID (#0182) is an optional client-supplied id for this row's link,
+	// unique per user. It is never trimmed, since it is matched exactly.
+	ExternalID string `json:"external_id"`
 }
 
 // trimmed returns a copy of r with every field trimmed — the shape every
@@ -1224,6 +1227,7 @@ func (r batchCreateLinkRow) trimmed() batchCreateLinkRow {
 		UTMTerm:        strings.TrimSpace(r.UTMTerm),
 		UTMContent:     strings.TrimSpace(r.UTMContent),
 		Placement:      strings.TrimSpace(r.Placement),
+		ExternalID:     r.ExternalID,
 	}
 }
 
@@ -1244,7 +1248,7 @@ func (r batchCreateLinkRow) trimmed() batchCreateLinkRow {
 // it is not an error.
 func (r batchCreateLinkRow) isBlank() bool {
 	return r.UTMSource == "" && r.UTMMedium == "" && r.UTMContent == "" &&
-		r.Placement == "" && r.Title == ""
+		r.Placement == "" && r.Title == "" && r.ExternalID == ""
 }
 
 // duplicateKey is the tuple this handler treats as "the same row" for the
@@ -1265,7 +1269,10 @@ func (r batchCreateLinkRow) isBlank() bool {
 // composeUtmUrl would bake them as different values, which is a worse
 // surprise than leaving the check exact.
 func (r batchCreateLinkRow) duplicateKey() string {
-	return r.UTMSource + "\x00" + r.UTMMedium + "\x00" + r.UTMContent + "\x00" + r.Placement
+	// external_id (#0182) is part of the tuple: rows that differ only in it are
+	// distinct links (two invitations to one page); equal non-empty ids are
+	// rejected separately, with their own message.
+	return r.UTMSource + "\x00" + r.UTMMedium + "\x00" + r.UTMContent + "\x00" + r.Placement + "\x00" + r.ExternalID
 }
 
 // batchCreateLinksRequest is the POST /api/campaigns/{slug}/links/batch body.
@@ -1421,6 +1428,27 @@ func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Reque
 		seen[key] = row.origIndex
 	}
 
+	// external_id (#0182): each must be valid and unique within the batch, so
+	// two rows never claim one id. A clash with an existing link is a 409 from
+	// the insert below.
+	seenExt := map[string]int{}
+	for _, row := range rows {
+		if row.ExternalID == "" {
+			continue
+		}
+		if !links.ValidExternalID(row.ExternalID) {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("row %d: external_id must be 1 to 128 printable ASCII characters", row.origIndex))
+			return
+		}
+		if first, ok := seenExt[row.ExternalID]; ok {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("row %d duplicates row %d (same external_id)", row.origIndex, first))
+			return
+		}
+		seenExt[row.ExternalID] = row.origIndex
+	}
+
 	// URL syntax validation — every row, before any insert, so a single
 	// malformed row fails the whole batch rather than creating the rows
 	// before it and silently dropping the rest.
@@ -1521,6 +1549,7 @@ func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Reque
 			UTMTerm:        row.UTMTerm,
 			UTMContent:     row.UTMContent,
 			Placement:      row.Placement,
+			ExternalID:     row.ExternalID,
 		})
 	}
 
@@ -1534,6 +1563,8 @@ func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Reque
 		// (see links.Store.CreateLinksBatch) — but mapped defensively rather
 		// than falling into the generic 500 below.
 		writeError(w, http.StatusConflict, "key already taken")
+		return
+	case writeExternalIDTaken(w, err):
 		return
 	default:
 		writeError(w, http.StatusInternalServerError, "internal server error")

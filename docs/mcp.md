@@ -153,6 +153,7 @@ answer `405`, which clients treat as "no server-to-client stream".
 | `whoami` | `GET /api/me` | read-only |
 | `list_links` | `GET /api/links` (all the [links.md](links.md) search params) | read-only |
 | `get_link` | `GET /api/links/{key}` | read-only |
+| `get_link_by_external_id` | `GET /api/links/by-external-id/{id}`: the link a client tagged with `external_id` at creation (#0182) | read-only |
 | `get_link_qr` | `GET /api/links/{key}/qr.png`, returned as image content | read-only |
 | `create_link` | `POST /api/links`. `key` sets a custom key (1-32 characters), `key_length` (6-32, default 6) makes a longer generated one for links that must not be guessable | write |
 | `update_link` | `PATCH /api/links/{key}` | write, idempotent |

@@ -41,6 +41,8 @@ type ListOptions struct {
 	Status string
 	// ContentKey keeps only links whose reports.ContentKey equals it.
 	ContentKey string
+	// ExternalID keeps only the link with this external id (#0182).
+	ExternalID string
 	Sort       string
 	// HasWindow adds ClicksWindow to every link: non-bot clicks
 	// with clicked_at in [Start, End).
@@ -99,6 +101,9 @@ func (s *Store) ListLinksFiltered(ctx context.Context, userID int64, opts ListOp
 		conds = append(conds, fmt.Sprintf("((NOT COALESCE(l.active, TRUE) OR l.denied_reason <> 0) AND (l.expires_at IS NULL OR l.expires_at > %s))", nowP))
 	case StatusExpired:
 		conds = append(conds, fmt.Sprintf("(l.expires_at IS NOT NULL AND l.expires_at <= %s)", nowP))
+	}
+	if opts.ExternalID != "" {
+		conds = append(conds, "l.external_id = "+arg(opts.ExternalID))
 	}
 	if opts.ContentKey != "" {
 		conds = append(conds, fmt.Sprintf(`l.destination_url ILIKE %s ESCAPE '\'`, arg("%"+EscapeLike(ContentKeyHost(opts.ContentKey))+"%")))
@@ -183,17 +188,20 @@ func (s *Store) ListLinksFiltered(ctx context.Context, userID int64, opts ListOp
 	var total int64
 	for rows.Next() {
 		var l Link
-		var title, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, slug *string
+		var title, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement, externalID, slug *string
 		var expiresAt *time.Time
 		if err := rows.Scan(
 			&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 			&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
-			&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement,
+			&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID,
 			&l.ClickCount, &l.ClicksWindow, &slug, &total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("links: scanning filtered link: %w", err)
 		}
 		applyNullableLinkFields(&l, title, expiresAt, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, placement)
+		if externalID != nil {
+			l.ExternalID = *externalID
+		}
 		if slug != nil {
 			l.CampaignSlug = *slug
 		}
