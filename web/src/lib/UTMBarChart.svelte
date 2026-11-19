@@ -7,6 +7,12 @@
   Accessibility: the underlying table is visible (not hidden), so it doubles as
   the accessible fallback. The bars are aria-hidden decorations.
   Design tokens only — no hardcoded colours.
+
+  Selection (#0161): when the parent passes `onselect`, each row's label
+  becomes a real <button> (and the bar a click target) that calls it with
+  { dimension, value } — the raw bucket value, so "(none)" arrives as
+  NONE_BUCKET. Without `onselect` the rows stay plain text, so views with no
+  filter to apply look unchanged.
 -->
 <script lang="ts">
   import type { UTMBucket } from './types';
@@ -17,9 +23,11 @@
     buckets: UTMBucket[] | undefined | null;
     dimension: string;  // e.g. "source"
     label: string;      // e.g. "Source"
+    /** Called when a bar is clicked / activated. Omit where no filter exists. */
+    onselect?: (detail: { dimension: string; value: string }) => void;
   }
 
-  let { buckets, dimension, label }: Props = $props();
+  let { buckets, dimension, label, onselect }: Props = $props();
 
   const rows = $derived(toBarRows(buckets));
   const isEmpty = $derived(rows.length === 0);
@@ -35,12 +43,27 @@
         {#each rows as row (row.value)}
           {@const displayValue = row.value === NONE_BUCKET ? '(none)' : row.value}
           {@const isNone = row.value === NONE_BUCKET}
-          <tr>
-            <td class="bar-label" class:none={isNone} title={displayValue}>
-              {displayValue}
+          <tr class:selectable={!!onselect}>
+            <td class="bar-label" class:none={isNone} title="{displayValue}: {row.count.toLocaleString()} ({row.pct}%)">
+              {#if onselect}
+                <button
+                  type="button"
+                  class="bar-btn"
+                  aria-label="Filter {label} to {displayValue}, {row.count.toLocaleString()} clicks"
+                  onclick={() => onselect({ dimension, value: row.value })}
+                >{displayValue}</button>
+              {:else}
+                {displayValue}
+              {/if}
             </td>
             <td class="bar-cell" aria-hidden="true">
-              <div class="bar-track">
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="bar-track"
+                class:clickable={!!onselect}
+                onclick={onselect ? () => onselect({ dimension, value: row.value }) : undefined}
+              >
                 <div class="bar-fill" style="width: {row.pct}%"></div>
               </div>
             </td>
@@ -108,6 +131,30 @@
     border-radius: var(--radius);
     min-width: 2px; /* Always show a sliver for non-zero rows */
     transition: width 0.2s ease;
+  }
+  .bar-btn {
+    all: unset;
+    box-sizing: border-box;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    color: var(--accent);
+    border-radius: var(--radius);
+  }
+  .bar-btn:hover {
+    text-decoration: underline;
+  }
+  .bar-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .bar-track.clickable {
+    cursor: pointer;
+  }
+  .bar-table tr.selectable:hover .bar-fill {
+    background: var(--accent-hover);
   }
   .bar-count {
     font-variant-numeric: tabular-nums;

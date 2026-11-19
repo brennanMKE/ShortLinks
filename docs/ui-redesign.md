@@ -477,7 +477,7 @@ Applies to `ClicksChart`, `CampaignClicksChart`, `UTMBarChart` and the new spark
 - `partialLast` prop to draw today hollow.
 - Explicit `from`/`to` props so the component stops deriving its own window (`lib/charts.ts:100`), which currently has to mirror the server's.
 - Direct end-of-line labels in the campaign chart instead of a legend when four or fewer series.
-- `Sparkline.svelte`: 80×20, no axes, last point dotted, `aria-label` with the total.
+- `Sparkline.svelte`: 110×22, no axes, last point dotted, `aria-label` with the total.
 - Bars in `UTMBarChart` become clickable where a filter exists (click "mastodon" to add `source=mastodon`).
 
 ---

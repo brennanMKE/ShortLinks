@@ -358,6 +358,127 @@ export function xCoord(i: number, n: number, geo: ChartGeometry = DEFAULT_CHART_
   return padLeft + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW);
 }
 
+// ── Read-out / crosshair helpers (#0161) ────────────────────────────────────
+
+/** Geometry with a wider right pad, for charts that draw end-of-line labels. */
+export function geoWithPadRight(padRight: number, base: ChartGeometry = DEFAULT_CHART_GEO): ChartGeometry {
+  return { ...base, padRight, innerW: base.width - base.padLeft - padRight };
+}
+
+/**
+ * Index of the point nearest to an SVG-space x coordinate, clamped to
+ * [0, n-1]. Returns -1 for an empty series. Mirrors xCoord's spacing, so a
+ * single point is always index 0.
+ */
+export function nearestIndex(svgX: number, n: number, geo: ChartGeometry = DEFAULT_CHART_GEO): number {
+  if (n <= 0) return -1;
+  if (n === 1) return 0;
+  const frac = (svgX - geo.padLeft) / geo.innerW;
+  const i = Math.round(frac * (n - 1));
+  return Math.min(n - 1, Math.max(0, i));
+}
+
+/** Convert a pointer's clientX into SVG user units for an element whose box is [left, left+width]. */
+export function clientToSvgX(clientX: number, left: number, width: number, geo: ChartGeometry = DEFAULT_CHART_GEO): number {
+  if (width <= 0) return 0;
+  return ((clientX - left) / width) * geo.width;
+}
+
+/**
+ * Next crosshair index for a keyboard event on a chart of n points. `current`
+ * is null when no crosshair is showing yet (ArrowLeft then starts from the
+ * last point, ArrowRight from the first). Returns the new index, or
+ * `undefined` when the key is not one the chart handles (so the caller
+ * leaves the event alone). Escape returns null (hide the crosshair).
+ */
+export function stepIndex(current: number | null, key: string, n: number): number | null | undefined {
+  if (n <= 0) return undefined;
+  const last = n - 1;
+  switch (key) {
+    case 'ArrowRight':
+    case 'ArrowUp':
+      return current === null ? 0 : Math.min(last, current + 1);
+    case 'ArrowLeft':
+    case 'ArrowDown':
+      return current === null ? last : Math.max(0, current - 1);
+    case 'PageUp':
+      return current === null ? 0 : Math.min(last, current + 7);
+    case 'PageDown':
+      return current === null ? last : Math.max(0, current - 7);
+    case 'Home':
+      return 0;
+    case 'End':
+      return last;
+    case 'Escape':
+      return null;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Gap-filled points for an INCLUSIVE [from, to] window (both "YYYY-MM-DD").
+ * Components never derive a window themselves (#0161).
+ */
+export function pointsForWindow(days: DayBucket[] | undefined | null, from: string, to: string): TimeseriesPoint[] {
+  return toTimeseriesPoints(fillDayGaps(days ?? [], from, to));
+}
+
+/** Shift a "YYYY-MM-DD" date by `delta` calendar days (UTC). Returns the input on parse failure. */
+export function shiftDate(iso: string, delta: number): string {
+  const d = parseDateUTC(iso);
+  if (!d) return iso;
+  d.setUTCDate(d.getUTCDate() + delta);
+  return toDateString(d);
+}
+
+/**
+ * Comparison points aligned day for day with a window of `n` days: index i
+ * of the result is the i-th day from `comparisonFrom` (default: the n days
+ * immediately before `from`). The result is always exactly n points.
+ */
+export function alignComparison(
+  days: DayBucket[] | undefined | null,
+  from: string,
+  n: number,
+  comparisonFrom?: string,
+): TimeseriesPoint[] {
+  if (!days || n <= 0) return [];
+  const start = comparisonFrom ?? shiftDate(from, -n);
+  return pointsForWindow(days, start, shiftDate(start, n - 1));
+}
+
+/** Long date for read-outs, e.g. "Tue, Nov 17". Falls back to the raw string. */
+export function longDateLabel(iso: string): string {
+  const d = parseDateUTC(iso);
+  if (!d) return iso;
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+/**
+ * Vertically de-collide end-of-line labels: given desired y positions, return
+ * adjusted ys (same order) at least `minGap` apart and within [minY, maxY].
+ */
+export function spreadLabels(ys: number[], minGap: number, minY: number, maxY: number): number[] {
+  const order = ys.map((y, i) => ({ y, i })).sort((a, b) => a.y - b.y);
+  for (let k = 0; k < order.length; k++) {
+    const prev = k === 0 ? minY - minGap : order[k - 1].y;
+    order[k].y = Math.max(order[k].y, prev + minGap);
+  }
+  for (let k = order.length - 1; k >= 0; k--) {
+    const next = k === order.length - 1 ? maxY + minGap : order[k + 1].y;
+    order[k].y = Math.min(order[k].y, next - minGap);
+  }
+  const out = new Array<number>(ys.length);
+  for (const o of order) out[o.i] = o.y;
+  return out;
+}
+
+/** Truncate a label to `max` characters with an ellipsis. */
+export function truncateLabel(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, Math.max(1, max - 1)) + '…';
+}
+
 // ── Private utilities ───────────────────────────────────────────────────────
 
 /** Parse "YYYY-MM-DD" as a UTC Date. Returns null on invalid input. */

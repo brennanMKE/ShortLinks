@@ -50,6 +50,7 @@
   import UTMBarChart from '../lib/UTMBarChart.svelte';
   import UtmField from '../lib/UtmField.svelte';
   import UtmConventions from '../lib/UtmConventions.svelte';
+  import { defaultDateRange } from '../lib/charts';
 
   interface Props {
     /** The link key — a route param from /links/:key (#0120). */
@@ -57,6 +58,15 @@
   }
 
   let { key }: Props = $props();
+
+  // The server's timeseries window is the 30 days ending yesterday (UTC); the
+  // chart takes it as explicit props rather than deriving it itself (#0161).
+  // Recomputed whenever `detail` reloads so a tab left open past midnight
+  // does not keep a stale window.
+  const chartRange = $derived.by(() => {
+    void detail;
+    return defaultDateRange(30);
+  });
 
   let loading = $state(true);
   let notFound = $state(false);
@@ -387,7 +397,7 @@
     {/if}
 
     <Panel title="Clicks over time">
-      <ClicksChart timeseries={detail.timeseries} days={30} title="Clicks over the last 30 days" />
+      <ClicksChart timeseries={detail.timeseries} from={chartRange[0]} to={chartRange[1]} title="Clicks over the last 30 days" />
     </Panel>
 
     <Panel title="UTM breakdown">

@@ -18,6 +18,15 @@ import {
   CAMPAIGN_SERIES_COLOR_COUNT,
   CAMPAIGN_OTHER_SERIES_COLOR_VAR,
   buildCampaignSeries,
+  nearestIndex,
+  clientToSvgX,
+  stepIndex,
+  pointsForWindow,
+  alignComparison,
+  shiftDate,
+  spreadLabels,
+  truncateLabel,
+  geoWithPadRight,
 } from './charts';
 
 function day(date: string, count: number): DayBucket {
@@ -497,5 +506,121 @@ describe('buildCampaignSeries', () => {
     const result = buildCampaignSeries(series, from, to);
     const total = result.reduce((sum, s) => sum + s.total, 0);
     expect(total).toBe(10);
+  });
+});
+
+// ── Read-out / crosshair helpers (#0161) ────────────────────────────────────
+
+describe('nearestIndex', () => {
+  const geo = DEFAULT_CHART_GEO;
+  it('returns -1 for no points and 0 for a single point', () => {
+    expect(nearestIndex(100, 0)).toBe(-1);
+    expect(nearestIndex(500, 1)).toBe(0);
+  });
+  it('snaps to the point whose xCoord is closest', () => {
+    const n = 30;
+    for (const i of [0, 1, 7, 15, 28, 29]) {
+      expect(nearestIndex(xCoord(i, n, geo), n)).toBe(i);
+      // A nudge less than half a step still lands on the same point.
+      expect(nearestIndex(xCoord(i, n, geo) + 3, n)).toBe(i);
+    }
+  });
+  it('picks the nearer neighbour between two points', () => {
+    const n = 11;
+    const mid = (xCoord(4, n) + xCoord(5, n)) / 2;
+    expect(nearestIndex(mid - 1, n)).toBe(4);
+    expect(nearestIndex(mid + 1, n)).toBe(5);
+  });
+  it('clamps pointers in the padding to the first/last point', () => {
+    expect(nearestIndex(-50, 10)).toBe(0);
+    expect(nearestIndex(0, 10)).toBe(0);
+    expect(nearestIndex(9999, 10)).toBe(9);
+  });
+});
+
+describe('clientToSvgX', () => {
+  it('scales the pixel offset into viewBox units', () => {
+    expect(clientToSvgX(150, 100, 300)).toBe(100); // 50/300 * 600
+    expect(clientToSvgX(100, 100, 300)).toBe(0);
+  });
+  it('is safe for a zero-width box', () => {
+    expect(clientToSvgX(5, 0, 0)).toBe(0);
+  });
+});
+
+describe('stepIndex', () => {
+  it('starts from the first point on ArrowRight and the last on ArrowLeft', () => {
+    expect(stepIndex(null, 'ArrowRight', 30)).toBe(0);
+    expect(stepIndex(null, 'ArrowLeft', 30)).toBe(29);
+  });
+  it('steps by one and clamps at both ends', () => {
+    expect(stepIndex(5, 'ArrowRight', 30)).toBe(6);
+    expect(stepIndex(5, 'ArrowLeft', 30)).toBe(4);
+    expect(stepIndex(29, 'ArrowRight', 30)).toBe(29);
+    expect(stepIndex(0, 'ArrowLeft', 30)).toBe(0);
+  });
+  it('jumps a week with PageUp/PageDown and to the ends with Home/End', () => {
+    expect(stepIndex(10, 'PageUp', 30)).toBe(17);
+    expect(stepIndex(10, 'PageDown', 30)).toBe(3);
+    expect(stepIndex(28, 'PageUp', 30)).toBe(29);
+    expect(stepIndex(10, 'Home', 30)).toBe(0);
+    expect(stepIndex(10, 'End', 30)).toBe(29);
+  });
+  it('Escape hides the crosshair', () => {
+    expect(stepIndex(3, 'Escape', 30)).toBeNull();
+  });
+  it('ignores other keys and empty charts', () => {
+    expect(stepIndex(3, 'a', 30)).toBeUndefined();
+    expect(stepIndex(3, 'Tab', 30)).toBeUndefined();
+    expect(stepIndex(null, 'ArrowRight', 0)).toBeUndefined();
+  });
+});
+
+describe('pointsForWindow / shiftDate / alignComparison', () => {
+  it('fills an inclusive window', () => {
+    const pts = pointsForWindow([day('2026-11-02', 4)], '2026-11-01', '2026-11-03');
+    expect(pts.map((p) => p.value)).toEqual([0, 4, 0]);
+    expect(pointsForWindow(null, '2026-11-01', '2026-11-02')).toHaveLength(2);
+  });
+  it('shifts dates across month boundaries', () => {
+    expect(shiftDate('2026-11-01', -1)).toBe('2026-10-31');
+    expect(shiftDate('2026-12-31', 1)).toBe('2027-01-01');
+    expect(shiftDate('nope', 3)).toBe('nope');
+  });
+  it('aligns the previous period day for day, defaulting to the n days before from', () => {
+    const prev = [day('2026-10-30', 9), day('2026-10-31', 8), day('2026-11-02', 1)];
+    const cmp = alignComparison(prev, '2026-11-01', 3);
+    expect(cmp.map((p) => p.date)).toEqual(['2026-10-29', '2026-10-30', '2026-10-31']);
+    expect(cmp.map((p) => p.value)).toEqual([0, 9, 8]);
+  });
+  it('honours an explicit comparisonFrom and returns [] without data', () => {
+    const cmp = alignComparison([day('2026-09-01', 5)], '2026-11-01', 2, '2026-09-01');
+    expect(cmp.map((p) => p.value)).toEqual([5, 0]);
+    expect(alignComparison(null, '2026-11-01', 3)).toEqual([]);
+  });
+});
+
+describe('spreadLabels / truncateLabel / geoWithPadRight', () => {
+  it('leaves well-separated labels alone', () => {
+    expect(spreadLabels([20, 60, 100], 13, 10, 150)).toEqual([20, 60, 100]);
+  });
+  it('pushes colliding labels apart while keeping their order', () => {
+    const out = spreadLabels([50, 50, 51], 13, 10, 150);
+    expect(out[1] - out[0]).toBeGreaterThanOrEqual(13);
+    expect(out[2] - out[1]).toBeGreaterThanOrEqual(13);
+  });
+  it('stays within bounds when pushed past the bottom edge', () => {
+    const out = spreadLabels([148, 149, 150], 13, 10, 150);
+    expect(Math.max(...out)).toBeLessThanOrEqual(150);
+    expect(out[1] - out[0]).toBeGreaterThanOrEqual(13);
+  });
+  it('truncates with an ellipsis only when needed', () => {
+    expect(truncateLabel('short', 14)).toBe('short');
+    expect(truncateLabel('a very long link title', 10)).toBe('a very lo…');
+  });
+  it('recomputes innerW for a wider right pad', () => {
+    const g = geoWithPadRight(112);
+    expect(g.innerW).toBe(600 - 36 - 112);
+    expect(g.padRight).toBe(112);
   });
 });

@@ -30,7 +30,7 @@
   that function's doc comment).
 -->
 <script lang="ts">
-  import type { LinkSeries, TimeseriesResult } from './types';
+  import type { DayBucket, LinkSeries, TimeseriesResult } from './types';
   import {
     fillDayGapsInWindow,
     toTimeseriesPoints,
@@ -40,9 +40,18 @@
     yCoord,
     xCoord,
     DEFAULT_CHART_GEO,
+    geoWithPadRight,
+    alignComparison,
+    nearestIndex,
+    clientToSvgX,
+    stepIndex,
+    longDateLabel,
+    spreadLabels,
+    truncateLabel,
     type CampaignSeriesChartData,
   } from './charts';
   import Button from './Button.svelte';
+  import ChartReadout, { type ReadoutRow } from './ChartReadout.svelte';
 
   interface Props {
     /** Combined clicks-over-time for the whole campaign (CampaignRollup/CampaignDetail's `timeseries`). */
@@ -54,11 +63,30 @@
     /** CampaignStats.window_to — "YYYY-MM-DD", UTC, EXCLUSIVE (half-open). */
     windowTo: string;
     title?: string;
+    /** Previous-period days for the combined series, aligned day for day (grey dashed). */
+    comparison?: DayBucket[] | null;
+    /** First day of the comparison data; defaults to the same number of days before windowFrom. */
+    comparisonFrom?: string;
+    /** Draw each series' last point hollow with a dotted final segment ("today so far"). */
+    partialLast?: boolean;
   }
 
-  let { timeseries, seriesByLink, windowFrom, windowTo, title = 'Clicks over time' }: Props = $props();
+  let {
+    timeseries,
+    seriesByLink,
+    windowFrom,
+    windowTo,
+    title = 'Clicks over time',
+    comparison = null,
+    comparisonFrom,
+    partialLast = false,
+  }: Props = $props();
 
-  const geo = DEFAULT_CHART_GEO;
+  /** At most this many series get direct end-of-line labels instead of a legend. */
+  const DIRECT_LABEL_MAX = 4;
+  /** Below this rendered width the SVG scales its 11px labels to unreadable; fall back to the legend. */
+  const DIRECT_LABEL_MIN_WIDTH = 480;
+  let plotW = $state(600);
 
   let mode = $state<'combined' | 'per-link'>('combined');
 
@@ -82,7 +110,12 @@
   // a stale toggle (e.g. flipped before the second request resolved) falls
   // back to combined rather than rendering nothing.
   const activeSeries = $derived(mode === 'per-link' && hasPerLinkData ? linkSeries : [combinedSeries]);
-  const showLegend = $derived(mode === 'per-link' && activeSeries.length > 1);
+  const directLabels = $derived(
+    mode === 'per-link' && activeSeries.length > 1 && activeSeries.length <= DIRECT_LABEL_MAX && plotW >= DIRECT_LABEL_MIN_WIDTH,
+  );
+  const showLegend = $derived(mode === 'per-link' && activeSeries.length > 1 && !directLabels);
+  // Direct labels need room to the right of the plot.
+  const geo = $derived(directLabels ? geoWithPadRight(112) : DEFAULT_CHART_GEO);
 
   // Every series in activeSeries was filled against the SAME [windowFrom,
   // windowTo) window, so they share the same point count and date sequence
@@ -90,8 +123,12 @@
   // series happens to be first.
   const axisPoints = $derived(activeSeries[0]?.points ?? []);
 
+  const cmpPoints = $derived(
+    mode === 'combined' && comparison ? alignComparison(comparison, windowFrom, combinedPoints.length, comparisonFrom) : [],
+  );
+  const hasCmp = $derived(cmpPoints.length > 0);
   const maxValue = $derived(
-    Math.max(0, ...activeSeries.flatMap((s) => s.points.map((p) => p.value))),
+    Math.max(0, ...activeSeries.flatMap((s) => s.points.map((p) => p.value)), ...cmpPoints.map((p) => p.value)),
   );
   const ticks = $derived(yAxisTicks(maxValue, 4));
   const tickData = $derived(
@@ -148,6 +185,94 @@
   function seriesX(points: { value: number }[], i: number): number {
     return xCoord(i, points.length, geo);
   }
+  function round(n: number): number {
+    return Math.round(n * 100) / 100;
+  }
+  const isHollow = (pts: { value: number }[]) => partialLast && pts.length > 1;
+  /** Polyline coordinates on the shared y scale; x spacing follows the full series length `n`. */
+  function line(pts: { value: number }[], n: number): string {
+    return pts.map((p, i) => `${round(xCoord(i, n, geo))},${round(yCoord(p.value, maxValue, geo))}`).join(' ');
+  }
+  /** The series without its last point when that point is drawn hollow. */
+  function solidOf<T>(pts: T[]): T[] {
+    return isHollow(pts as { value: number }[]) ? pts.slice(0, -1) : pts;
+  }
+  /** The dotted final segment (last two points), or '' when not partial. */
+  function dotted(pts: { value: number }[]): string {
+    const n = pts.length;
+    if (!isHollow(pts)) return '';
+    return [n - 2, n - 1]
+      .map((i) => `${round(xCoord(i, n, geo))},${round(yCoord(pts[i].value, maxValue, geo))}`)
+      .join(' ');
+  }
+
+  // Direct end-of-line labels, vertically de-collided.
+  const endLabels = $derived.by(() => {
+    if (!directLabels) return [];
+    const ys = activeSeries.map((s) => yCoord(s.points[s.points.length - 1]?.value ?? 0, maxValue, geo));
+    const spread = spreadLabels(ys, 13, geo.padTop + 4, geo.padTop + geo.innerH);
+    return activeSeries.map((s, i) => ({
+      key: s.key,
+      text: truncateLabel(s.label, 14),
+      y: spread[i],
+      color: s.colorVar,
+      isOther: s.isOther,
+    }));
+  });
+
+  // ── Crosshair ──────────────────────────────────────────────────────────
+  let active = $state<number | null>(null);
+  // Only keyboard stepping is announced; hover/tap stay silent so a mouse sweep does not flood the live region.
+  let viaKeyboard = $state(false);
+  let plotEl = $state<HTMLDivElement | null>(null);
+  const activeIdx = $derived(active !== null && active < axisPoints.length ? active : null);
+  const crossX = $derived(activeIdx !== null ? xCoord(activeIdx, axisPoints.length, geo) : 0);
+  const isTodayPartial = $derived(partialLast && activeIdx !== null && activeIdx === axisPoints.length - 1);
+  const readoutRows = $derived.by<ReadoutRow[]>(() => {
+    if (activeIdx === null) return [];
+    const withVal = activeSeries.map((s) => ({
+      label: s.label,
+      n: s.points[activeIdx]?.value ?? 0,
+      color: s.colorVar,
+    }));
+    // Highest first so the read-out matches the visual stacking.
+    withVal.sort((a, b) => b.n - a.n);
+    const rows: ReadoutRow[] = withVal.map((r) => ({ label: r.label, value: r.n.toLocaleString(), color: r.color }));
+    const c = hasCmp ? cmpPoints[activeIdx] : null;
+    if (c) {
+      rows.push({ label: `Previous (${c.label})`, value: c.value.toLocaleString(), color: 'var(--text-faint)', dashed: true });
+    }
+    return rows;
+  });
+  const announceText = $derived(
+    activeIdx === null
+      ? ''
+      : `${longDateLabel(axisPoints[activeIdx].date)}: ` +
+          readoutRows.map((r) => `${r.label} ${r.value}`).join(', ') +
+          (isTodayPartial ? ', today so far' : ''),
+  );
+  function onPointer(e: PointerEvent) {
+    viaKeyboard = false;
+    if (!plotEl || axisPoints.length === 0) return;
+    const r = plotEl.getBoundingClientRect();
+    active = nearestIndex(clientToSvgX(e.clientX, r.left, r.width, geo), axisPoints.length, geo);
+  }
+  function onPointerLeave(e: PointerEvent) {
+    if (e.pointerType === 'mouse') active = null;
+  }
+  // iOS Safari does not focus (or blur) a tap target, so onblur alone never
+  // dismisses a tapped read-out; any pointerdown outside the plot clears it.
+  function onOutside(e: PointerEvent) {
+    if (plotEl && !plotEl.contains(e.target as Node)) active = null;
+  }
+  const announce = $derived(viaKeyboard ? announceText : '');
+  function onKey(e: KeyboardEvent) {
+    const next = stepIndex(activeIdx, e.key, axisPoints.length);
+    if (next === undefined) return;
+    e.preventDefault();
+    viaKeyboard = true;
+    active = next;
+  }
 
   const rangeStart = $derived(axisPoints[0]?.date ?? windowFrom);
   const rangeEnd = $derived(axisPoints[axisPoints.length - 1]?.date ?? windowFrom);
@@ -165,6 +290,8 @@
   const titleId = `${svgId}-title`;
   const descId = `${svgId}-desc`;
 </script>
+
+<svelte:window onpointerdown={onOutside} />
 
 <div class="chart-wrap">
   {#if hasPerLinkData}
@@ -186,6 +313,21 @@
     </div>
   {/if}
 
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
+  <div
+    class="plot"
+    bind:this={plotEl}
+    bind:clientWidth={plotW}
+    role="application"
+    aria-roledescription="chart"
+    aria-label="{title}. Use the arrow keys to read each day."
+    tabindex="0"
+    onpointermove={onPointer}
+    onpointerdown={onPointer}
+    onpointerleave={onPointerLeave}
+    onkeydown={onKey}
+    onblur={() => (active = null)}
+  >
   <svg
     role="img"
     aria-labelledby="{titleId} {descId}"
@@ -211,11 +353,16 @@
       <text class="axis-label" x={xl.x} y={geo.padTop + geo.innerH + 18} text-anchor={xl.anchor}>{xl.label}</text>
     {/each}
 
+    {#if hasCmp}
+      <polyline class="comparison-line" points={line(cmpPoints, cmpPoints.length)} aria-hidden="true" />
+    {/if}
+
     {#each activeSeries as s (s.key)}
-      {@const poly = toPolylinePoints(s.points, geo, maxValue)}
+      {@const solid = solidOf(s.points)}
+      {@const poly = line(solid, s.points.length)}
       {#if mode === 'combined' && poly}
         {@const firstX = xCoord(0, s.points.length, geo)}
-        {@const lastX = xCoord(s.points.length - 1, s.points.length, geo)}
+        {@const lastX = xCoord(solid.length - 1, s.points.length, geo)}
         {@const baseY = geo.padTop + geo.innerH}
         <polygon class="chart-area" points="{firstX},{baseY} {poly} {lastX},{baseY}" aria-hidden="true" />
       {/if}
@@ -227,24 +374,60 @@
         points={poly}
         aria-hidden="true"
       />
+      {#if isHollow(s.points)}
+        <polyline class="chart-line partial-segment" style="stroke: {s.colorVar}" points={dotted(s.points)} aria-hidden="true" />
+      {/if}
 
-      {#each s.points as p, i (p.date)}
+      {#each solid as p, i (p.date)}
         {#if p.value > 0}
           <circle
             class="chart-dot"
             class:other-dot={s.isOther}
             style="fill: {s.colorVar}"
-            cx={Math.round(seriesX(s.points, i) * 100) / 100}
-            cy={Math.round(yCoord(p.value, maxValue, geo) * 100) / 100}
+            cx={round(seriesX(s.points, i))}
+            cy={round(yCoord(p.value, maxValue, geo))}
             r="3"
             aria-hidden="true"
-          >
-            <title>{s.label} — {p.label}: {p.value.toLocaleString()} clicks</title>
-          </circle>
+          />
         {/if}
       {/each}
+      {#if isHollow(s.points)}
+        {@const lp = s.points[s.points.length - 1]}
+        <circle
+          class="chart-dot hollow"
+          data-testid="partial-dot"
+          style="stroke: {s.colorVar}"
+          cx={round(seriesX(s.points, s.points.length - 1))}
+          cy={round(yCoord(lp.value, maxValue, geo))}
+          r="3.5"
+          aria-hidden="true"
+        />
+      {/if}
     {/each}
+
+    {#each endLabels as el (el.key)}
+      <line class="end-tick" x1={geo.padLeft + geo.innerW + 3} x2={geo.padLeft + geo.innerW + 11} y1={el.y} y2={el.y} style="stroke: {el.color}" aria-hidden="true" />
+      <text class="end-label" class:end-other={el.isOther} x={geo.padLeft + geo.innerW + 15} y={el.y} dominant-baseline="middle" aria-hidden="true">{el.text}</text>
+    {/each}
+
+    {#if activeIdx !== null}
+      <line class="crosshair" x1={crossX} y1={geo.padTop} x2={crossX} y2={geo.padTop + geo.innerH} aria-hidden="true" />
+      {#each activeSeries as s (s.key)}
+        <circle class="focus-dot" style="fill: {s.colorVar}" cx={crossX} cy={yCoord(s.points[activeIdx]?.value ?? 0, maxValue, geo)} r="4.5" aria-hidden="true" />
+      {/each}
+    {/if}
   </svg>
+
+  {#if activeIdx !== null}
+    <ChartReadout
+      leftPct={(crossX / geo.width) * 100}
+      title={longDateLabel(axisPoints[activeIdx].date)}
+      note={isTodayPartial ? 'today so far' : undefined}
+      rows={readoutRows}
+    />
+  {/if}
+  </div>
+  <div class="sr-only" aria-live="polite" role="status">{announce}</div>
 
   {#if showLegend}
     <ul class="chart-legend" aria-hidden="true">
@@ -294,6 +477,52 @@
     display: flex;
     gap: var(--space-2);
     margin-bottom: var(--space-3);
+  }
+  .plot {
+    position: relative;
+    touch-action: pan-y;
+    cursor: crosshair;
+    border-radius: var(--radius);
+  }
+  .plot:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .partial-segment {
+    stroke-dasharray: 1 5;
+  }
+  .comparison-line {
+    fill: none;
+    stroke: var(--text-faint);
+    stroke-width: 1.5;
+    stroke-dasharray: 5 4;
+    stroke-linejoin: round;
+  }
+  .chart-dot.hollow {
+    fill: var(--bg-panel) !important;
+    stroke-width: 2;
+  }
+  .crosshair {
+    stroke: var(--text-muted);
+    stroke-width: 1;
+    pointer-events: none;
+  }
+  .focus-dot {
+    stroke: var(--bg-panel);
+    stroke-width: 2;
+    pointer-events: none;
+  }
+  .end-tick {
+    stroke-width: 3;
+    stroke-linecap: round;
+  }
+  .end-label {
+    font-size: 11px;
+    fill: var(--text);
+  }
+  .end-label.end-other {
+    fill: var(--text-faint);
+    font-style: italic;
   }
   .chart-svg {
     display: block;
