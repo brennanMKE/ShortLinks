@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  componentToPreload,
   HOME_REDIRECT_DELAY_MS,
   shouldShowHome,
   redirectHost,
@@ -63,5 +64,25 @@ describe('constants and routing', () => {
   });
   it('loginPathWithRedirect("/") is still /login', () => {
     expect(loginPathWithRedirect('/')).toBe('/login');
+  });
+});
+
+describe('componentToPreload (#0186)', () => {
+  const overview = { lazy: 'overview' };
+  const route = { path: '/', component: overview };
+  const showHome = { redirect_url: 'https://example.com', registrations_enabled: false } as HomeInfo;
+
+  it('loads nothing when the public home will show, so signed-out visitors skip the Overview chunk', () => {
+    expect(componentToPreload(false, route, showHome)).toBeNull();
+  });
+  it('loads the route component for a signed-in user, even if home info was fetched', () => {
+    expect(componentToPreload(true, route, showHome)).toBe(overview);
+  });
+  it('loads the route component when there is no home info', () => {
+    expect(componentToPreload(false, route, null)).toBe(overview);
+  });
+  it('loads the route component off the bare root', () => {
+    const other = { path: '/links', component: { lazy: 'links' } };
+    expect(componentToPreload(false, other, showHome)).toBe(other.component);
   });
 });

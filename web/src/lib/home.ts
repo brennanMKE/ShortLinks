@@ -24,6 +24,20 @@ export function shouldShowHome(
   return info.redirect_url !== '' && !info.registrations_enabled;
 }
 
+/**
+ * The route-table component enterApp should wait for once auth is known, or
+ * null when nothing should load: the public home is about to show, and it is
+ * eager, so fetching Overview for it would cost every signed-out visitor
+ * the chunk (#0186).
+ */
+export function componentToPreload<T>(
+  signedIn: boolean,
+  route: { path: string; component: T },
+  info: HomeInfo | null,
+): T | null {
+  return shouldShowHome(signedIn, route.path, info) ? null : route.component;
+}
+
 /** Host shown in "Taking you to <host>…"; falls back to the raw string if it does not parse. */
 export function redirectHost(url: string): string {
   try {

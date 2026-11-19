@@ -81,6 +81,22 @@ export interface LinkPerformance {
   };
 }
 
+/**
+ * True only for a real link-performance body. The in-memory dev server has no
+ * /api/reports route, so the request falls through to the SPA catch-all and
+ * "succeeds" with the HTML shell as a string; treating that as a report threw
+ * when the view read report.window (#0169 fallback).
+ */
+export function isLinkPerformance(x: unknown): x is LinkPerformance {
+  if (typeof x !== 'object' || x === null) return false;
+  const r = x as { window?: unknown; data?: unknown };
+  const w = r.window as { from?: unknown; to?: unknown } | null | undefined;
+  return (
+    typeof w === 'object' && w !== null && typeof w.from === 'string' && typeof w.to === 'string' &&
+    typeof r.data === 'object' && r.data !== null
+  );
+}
+
 /** Report days are {date, clicks}; the chart takes {date, count}. */
 export function toDayBuckets(days: DayCount[] | null | undefined): DayBucket[] {
   return (days ?? []).map((d) => ({ date: d.date, count: d.clicks }));

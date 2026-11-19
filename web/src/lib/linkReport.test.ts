@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  isLinkPerformance,
   parseRange,
   rangeQuery,
   reportQuery,
@@ -81,5 +82,25 @@ describe('display helpers', () => {
   it('maps report days to chart buckets', () => {
     expect(toDayBuckets([{ date: '2026-11-01', clicks: 3 }])).toEqual([{ date: '2026-11-01', count: 3 }]);
     expect(toDayBuckets(null)).toEqual([]);
+  });
+});
+
+describe('isLinkPerformance', () => {
+  const ok = {
+    report: 'link-performance',
+    window: { from: '2026-10-21', to: '2026-11-19', tz: 'UTC', partial_last_day: false },
+    previous_window: null,
+    data: { link: {}, totals: {}, timeseries: [], previous_timeseries: null, by_referer: [], siblings: [] },
+  };
+  it('accepts a real report body', () => {
+    expect(isLinkPerformance(ok)).toBe(true);
+  });
+  it('rejects what the dev server returns in place of a report', () => {
+    expect(isLinkPerformance('<!doctype html>')).toBe(false);
+    expect(isLinkPerformance({})).toBe(false);
+    expect(isLinkPerformance(undefined)).toBe(false);
+    expect(isLinkPerformance(null)).toBe(false);
+    expect(isLinkPerformance({ ...ok, window: null })).toBe(false);
+    expect(isLinkPerformance({ ...ok, data: undefined })).toBe(false);
   });
 });

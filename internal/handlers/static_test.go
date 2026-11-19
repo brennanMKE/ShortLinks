@@ -261,3 +261,42 @@ func TestSPANoAssetsDirStillConstructs(t *testing.T) {
 		t.Errorf("status %d", rec.Code)
 	}
 }
+
+// #0186: route-level code splitting emits many hashed chunks under /assets/.
+// Every one must be precompressed and immutable like the entry, and a chunk
+// from a previous release (absent from this build) must be a 404, never the
+// shell, so a stale tab's failed import() is recognised and recovers.
+func TestSPALazyChunksPrecompressedImmutableAndStaleChunk404(t *testing.T) {
+	fsys := distFS(map[string]string{
+		"index.html":                "<!doctype html><title>Short Links</title>",
+		"assets/index-new1.js":      compressibleJS,
+		"assets/Overview-new2.js":   compressibleJS + "a",
+		"assets/Admin-new3.js":      compressibleJS + "b",
+		"assets/LinksList-new4.css": strings.Repeat(".x{color:red}\n", 400),
+	})
+	for _, p := range []string{"/assets/index-new1.js", "/assets/Overview-new2.js", "/assets/Admin-new3.js", "/assets/LinksList-new4.css"} {
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := serveSPAReq(fsys, req)
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Encoding") != "gzip" {
+			t.Errorf("%s: status %d, Content-Encoding %q", p, rec.Code, rec.Header().Get("Content-Encoding"))
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+			t.Errorf("%s: Cache-Control = %q", p, got)
+		}
+	}
+
+	// A chunk the previous release had and this one does not.
+	req := httptest.NewRequest(http.MethodGet, "/assets/Overview-old9.js", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := serveSPAReq(fsys, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("stale chunk: status %d, want 404", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("stale chunk: Cache-Control = %q, want no-cache", got)
+	}
+	if strings.Contains(rec.Body.String(), "<!doctype") {
+		t.Errorf("stale chunk: served the HTML shell")
+	}
+}

@@ -7,22 +7,12 @@
     loginPathWithRedirect,
     parseHash,
     redirectTargetFrom,
-    type RouteDef,
   } from './lib/routing';
-  import { shouldShowHome, type HomeInfo } from './lib/home';
+  import { componentToPreload, shouldShowHome, type HomeInfo } from './lib/home';
   import Home from './views/Home.svelte';
-  import Login from './views/Login.svelte';
-  import Overview from './views/Overview.svelte';
-  import LinksList from './views/LinksList.svelte';
-  import NewLink from './views/NewLink.svelte';
-  import LinkDetail from './views/LinkDetail.svelte';
-  import CampaignsList from './views/CampaignsList.svelte';
-  import CampaignDetail from './views/CampaignDetail.svelte';
-  import Account from './views/Account.svelte';
-  import Admin from './views/Admin.svelte';
-  import NotFound from './views/NotFound.svelte';
-  import RegisterVerify from './views/RegisterVerify.svelte';
-  import RecoverVerify from './views/RecoverVerify.svelte';
+  import { routes } from './lib/routeTable';
+  import { preloadComponent } from './lib/routeViews';
+  import LazyView from './lib/LazyView.svelte';
   import Router from './lib/Router.svelte';
   import AppShell from './lib/AppShell.svelte';
   import Footer from './lib/Footer.svelte';
@@ -30,27 +20,6 @@
   import Button from './lib/Button.svelte';
   import { reloadToSameURL, restoreScrollAfterReload, startVersionWatch } from './lib/versionCheck';
   import { setUnsaved } from './lib/unsavedWork';
-
-  // The route table lives HERE, not in hashRouter.svelte.ts, because it needs
-  // the actual view components — hashRouter.svelte.ts stays free of any view
-  // import so routing.ts's matching logic can be unit-tested with no Svelte
-  // runtime at all (#0120). Match in declaration order; '*' (NotFound) goes last.
-  const routes: RouteDef<unknown>[] = [
-    { path: '/', component: Overview },
-    { path: '/login', component: Login },
-    { path: '/links', component: LinksList },
-    { path: '/links/:key', component: LinkDetail },
-    // '/new', not '/links/new': 'new' is a legal custom key, so /links/new
-    // must stay the detail page of the link whose key is 'new' (#0153).
-    { path: '/new', component: NewLink },
-    { path: '/campaigns', component: CampaignsList },
-    { path: '/campaigns/:slug', component: CampaignDetail },
-    { path: '/account', component: Account },
-    // Bare /admin redirects to /admin/settings inside the view (#0154).
-    { path: '/admin', component: Admin },
-    { path: '/admin/:section', component: Admin },
-    { path: '*', component: NotFound },
-  ];
 
   // 'loading': the initial /api/me check (or the magic-link path check) is
   // still in flight. 'verify-register'/'verify-recover': a magic-link landing
@@ -113,7 +82,7 @@
   // RegisterVerify/RecoverVerify call this (via the callback props below)
   // once their ceremony finishes, to hand control from their standalone
   // rendering over to the router.
-  function enterApp(initialPath?: string) {
+  async function enterApp(initialPath?: string) {
     initRouter(routes);
     setUnsaved('verify-ceremony', false);
     if (initialPath) {
@@ -122,6 +91,13 @@
       replace('/');
     }
     redirectIfNeeded();
+    // Wait for the chunk of the view that will show, now that auth has settled
+    // and any redirect has landed, so the first paint is the view itself and
+    // not a second "Loading..." (#0186). `mode` is still 'loading', which shows
+    // the same text, so nothing flashes. A failed chunk has already started the
+    // once-per-URL reload; if that is spent, LazyView shows its failure state.
+    // The public home is eager: when it is what will show, load nothing.
+    await preloadComponent(componentToPreload($currentUser !== null, getRoute(), homeInfo));
     mode = 'app';
   }
 
@@ -197,9 +173,9 @@
     <p class="text-muted">Loading…</p>
   </div>
 {:else if mode === 'verify-register'}
-  <RegisterVerify onverified={() => enterApp('/')} ongotologin={(path) => enterApp(path ?? '/login')} />
+  <LazyView view="register-verify" onverified={() => enterApp('/')} ongotologin={(path?: string) => enterApp(path ?? '/login')} />
 {:else if mode === 'verify-recover'}
-  <RecoverVerify onverified={() => enterApp('/')} ongotologin={(path) => enterApp(path ?? '/login')} />
+  <LazyView view="recover-verify" onverified={() => enterApp('/')} ongotologin={(path?: string) => enterApp(path ?? '/login')} />
 {:else if showHome && homeInfo}
   <Home info={homeInfo} />
 {:else if $currentUser !== null && getRoute().path !== '/login'}

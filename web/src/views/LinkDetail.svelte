@@ -46,6 +46,7 @@
     stripScheme,
     urlSegments,
     rangeLabel,
+    isLinkPerformance,
     type LinkPerformance,
     type RangeSel,
   } from '../lib/linkReport';
@@ -119,7 +120,10 @@
     reportLoading = true;
     getLinkPerformance(q)
       .then((r) => {
-        if (seq === reportSeq) { report = r; hadReport = true; reportFailed = false; }
+        if (seq !== reportSeq) return;
+        // Not a report (dev server, proxy error page): same as no report.
+        if (!isLinkPerformance(r)) throw new Error('not a link-performance report');
+        report = r; hadReport = true; reportFailed = false;
       })
       .catch((err) => {
         if (seq !== reportSeq) return;
