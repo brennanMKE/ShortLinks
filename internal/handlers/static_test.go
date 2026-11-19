@@ -300,3 +300,48 @@ func TestSPALazyChunksPrecompressedImmutableAndStaleChunk404(t *testing.T) {
 		t.Errorf("stale chunk: served the HTML shell")
 	}
 }
+
+// An unmatched /api path is a JSON 404 with no-store, never the shell (#0192);
+// a known path with the wrong method is the mux's 405; the shell and assets
+// are unchanged.
+func TestSPAUnknownAPIPathIsJSON404(t *testing.T) {
+	fsys := distFS(map[string]string{"index.html": "<html>shell</html>"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/known", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.Handle("GET /", NewSPAHandler(fsys))
+
+	do := func(method, target string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
+		return rec
+	}
+
+	for _, target := range []string{"/api/nope", "/api/nope/deeper", "/api", "/api/"} {
+		rec := do(http.MethodGet, target)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", target, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("%s: Content-Type = %q", target, ct)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("%s: Cache-Control = %q, want no-store", target, cc)
+		}
+		if !strings.Contains(rec.Body.String(), `"error"`) || strings.Contains(rec.Body.String(), "shell") {
+			t.Errorf("%s: body = %q", target, rec.Body.String())
+		}
+	}
+
+	if rec := do(http.MethodPost, "/api/known"); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("wrong method: status = %d, want 405", rec.Code)
+	}
+	if rec := do(http.MethodGet, "/api/known"); rec.Code != http.StatusOK {
+		t.Errorf("known path: status = %d", rec.Code)
+	}
+	if rec := do(http.MethodGet, "/"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "shell") {
+		t.Errorf("shell changed: %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := do(http.MethodGet, "/apiary"); rec.Code != http.StatusOK {
+		t.Errorf("/apiary should still be shell, got %d", rec.Code)
+	}
+}

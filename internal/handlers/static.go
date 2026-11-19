@@ -117,6 +117,15 @@ func (h *SPAHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// to index.html, handled below.
 	name := strings.TrimPrefix(r.URL.Path, "/")
 
+	// An unmatched /api path is a JSON 404, never the HTML shell (#0192). Every
+	// real /api route is a more specific mux pattern, so reaching here means no
+	// route is mounted (for example /api/reports in dev mode).
+	if name == "api" || strings.HasPrefix(name, "api/") {
+		w.Header().Set("Cache-Control", "no-store")
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
 	if name != "" && h.fileExists(name) {
 		if strings.HasPrefix(name, "assets/") {
 			w.Header().Set("Cache-Control", cacheImmutable)
