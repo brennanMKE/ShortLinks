@@ -126,7 +126,7 @@
             </th>
           {/if}
           {#each columns as col (col.key)}
-            <th scope="col" class:right={col.align === 'right'} aria-sort={ariaSort(col)}>
+            <th scope="col" class:right={col.align === 'right'} class:inset={col.inset} aria-sort={ariaSort(col)}>
               {#if col.sortable}
                 <button type="button" class="sort-btn" class:active={sort?.key === col.key} onclick={() => clickSort(col)}>
                   <span class:sr-only={col.hideLabel}>{col.label}</span>
@@ -197,6 +197,7 @@
   .dt th { vertical-align: middle; }
   .dt th.right,
   .dt td.right { text-align: right; }
+  .dt th.inset { padding-right: calc(var(--space-3) + var(--space-2)); }
   .dt td.sel,
   .dt th.sel { padding-right: 0; }
   .dt td { height: 52px; }

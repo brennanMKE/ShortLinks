@@ -37,4 +37,8 @@
     font-variant-numeric: tabular-nums;
     font-weight: 600;
   }
+  /* Phone cards: the number sits in a narrow cell, so drop the bar behind it. */
+  @media (max-width: 899px) {
+    .bar { display: none; }
+  }
 </style>

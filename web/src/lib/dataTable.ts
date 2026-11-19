@@ -18,6 +18,8 @@ export interface Column<T> {
   value?: (row: T) => string | number | null | undefined;
   /** Phone cards (<900px): how this column renders. Default 'hide'. */
   mobile?: 'title' | 'meta' | 'metric' | 'actions' | 'hide';
+  /** Right-aligned header over an InlineBar column: inset to sit over the numbers. */
+  inset?: boolean;
   /** Visually hide the header label (actions column). */
   hideLabel?: boolean;
 }

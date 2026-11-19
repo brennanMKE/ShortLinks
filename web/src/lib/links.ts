@@ -289,3 +289,30 @@ export function destinationDomain(destinationUrl: string): string {
     return destinationUrl;
   }
 }
+
+/**
+ * The path (plus query) of a destination URL, for the second line of a links
+ * table row (#0156): the hostname is the same on nearly every row, the path is
+ * what tells them apart. Falls back to the raw string if it does not parse.
+ */
+export function destinationPath(destinationUrl: string): string {
+  try {
+    const u = new URL(destinationUrl);
+    // utm_* params repeat the source and channel shown beside the path.
+    for (const k of [...u.searchParams.keys()]) if (k.startsWith('utm_')) u.searchParams.delete(k);
+    const path = u.pathname + u.search;
+    return path === '/' ? u.hostname : path;
+  } catch {
+    return destinationUrl;
+  }
+}
+
+/**
+ * Second line of a link row: `/u/key · source · channel · /destination/path`.
+ * Empty parts are skipped.
+ */
+export function linkMeta(link: Link): string {
+  return [`/u/${link.key}`, link.utm_source, link.utm_medium, destinationPath(link.destination_url)]
+    .filter((p) => !!p)
+    .join(' · ');
+}
