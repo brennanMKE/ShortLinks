@@ -4,23 +4,146 @@ ShortLinks embeds a [Model Context Protocol](https://modelcontextprotocol.io)
 server at **`/mcp`**, so an AI agent can create and manage links and campaigns
 as tools. It is part of the one binary; there is nothing extra to deploy.
 
+## Create a token
+
+Sign in, open **Account** (`/#/account`), and create a token under **API
+tokens** ([using-api-tokens.md](using-api-tokens.md) has the full steps and
+storage advice). Copy it at once; it is shown once. Two kinds matter here:
+
+- **Full token.** Every tool, including create, update, deactivate and delete.
+- **Read-only token.** Tick **Read-only** when creating it. `tools/list` leaves
+  out every write tool, the report and list tools and the three prompts all
+  work, and calling a write tool anyway returns a tool error ("this API token
+  is read-only, so write tools such as ... are not available"). The REST
+  layer's `403 api_token_read_only` is the second line of defence. Use one for an agent that only answers
+  questions about link activity.
+
+Give each agent its own token and keep it in an environment variable:
+
+```bash
+export SHORTLINKS_TOKEN=slk_…
+```
+
+Tokens are the only credential. A browser cookie or session bearer gets
+`403 api_token_required`; a missing, revoked or expired token gets `401`.
+
 ## Connect
 
-Mint an API token in the web UI ([api-tokens.md](api-tokens.md)), then:
+Any MCP client that speaks Streamable HTTP and can send a header works.
+Replace `<host>` with your instance, for example `go.sstools.co`.
+
+### Claude Code
 
 ```bash
 claude mcp add --transport http shortlinks https://<host>/mcp \
-  --header "Authorization: Bearer slk_…"
+  --header "Authorization: Bearer $SHORTLINKS_TOKEN"
 ```
 
-Any MCP client that speaks Streamable HTTP and can send a header works the
-same way. Tokens are the only credential: a browser cookie or session bearer
-gets `403 api_token_required`, a missing, revoked or expired token gets `401`.
+That command writes the expanded token into your Claude config. To keep it
+out of the file, share the setup through a project `.mcp.json` that reads the
+token from the environment instead:
+
+```json
+{
+  "mcpServers": {
+    "shortlinks": {
+      "type": "http",
+      "url": "https://<host>/mcp",
+      "headers": { "Authorization": "Bearer ${SHORTLINKS_TOKEN}" }
+    }
+  }
+}
+```
+
+Claude Code expands `${SHORTLINKS_TOKEN}` when it starts, so launch it from a
+shell where the variable is set. For a one-off run, pass the same JSON with
+`claude --mcp-config file.json --strict-mcp-config`. Run `/mcp` inside Claude
+Code to see the server and its tools.
+
+### Claude Desktop
+
+Claude Desktop's config file launches local servers, and the connector UI does
+not take a custom `Authorization` header, so bridge with
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote). Add this to
+`claude_desktop_config.json` (needs Node.js), then restart Desktop:
+
+```json
+{
+  "mcpServers": {
+    "shortlinks": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://<host>/mcp",
+               "--header", "Authorization:${AUTH_HEADER}"],
+      "env": { "AUTH_HEADER": "Bearer slk_…" }
+    }
+  }
+}
+```
+
+The token sits in that file, so use a read-only or short-lived token.
+
+### MCP Inspector
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+Choose transport **Streamable HTTP**, URL `https://<host>/mcp`, add a custom
+header `Authorization: Bearer slk_…`, and click Connect. You can then list
+tools and prompts and call them by hand.
+
+### Check it with the smoke script
+
+```bash
+SHORTLINKS_TOKEN=slk_… scripts/mcp-smoke.sh https://<host>
+```
+
+It sends `initialize`, `tools/list` and a `whoami` call with curl, prints the
+tool count, and exits non-zero on any failure. The token comes from the
+environment, never from an argument, so it does not appear in `ps`.
 
 The server is **stateless**. Every POST is authenticated on its own and gets a
 server built for that token, so there is no session id, nothing to expire, and
 a revoked token stops working on its next call. `GET` and `DELETE` on `/mcp`
 answer `405`, which clients treat as "no server-to-client stream".
+
+## Example prompts
+
+| Ask the agent | Tool it uses |
+|---|---|
+| "What were my top links this week?" | `get_top_links` (`range: 7d`) |
+| "Which links got no clicks in the last 30 days?" | `get_idle_links` |
+| "Compare the spring-launch and summer-sale campaigns." | `compare_campaigns` |
+| "Make a short link to https://example.com/pricing with the key `pricing`." | `create_link` |
+| "Create one link per channel (email, twitter, print) for the launch page in the `spring-launch` campaign." | `batch_create_campaign_links` |
+| "Turn off the `old-promo` link." | `deactivate_link` |
+| "Give me the QR code for `pricing`." | `get_link_qr` |
+| "Write me the weekly summary." | the `weekly_summary` prompt, which calls the report tools |
+
+## Limits
+
+- **Rate limit.** `POST /mcp` goes through the same API-token limiter as
+  `/api`: 600 requests per minute per token, bursts of 60. A tool call costs
+  one request (the in-process REST call it makes is not charged again). Twenty
+  invalid-token attempts a minute from one IP trip a separate failure limit
+  that answers `429` even for a valid token. See [api-tokens.md](api-tokens.md).
+- **Body size.** A request body is capped at 256 KiB; larger gets `413`.
+- **No batches.** A JSON-RPC batch array gets `400`, because one batch would
+  run many tools for one rate-limit charge. Send one request per POST.
+- **No streaming.** Responses are plain JSON, not SSE.
+
+## Troubleshooting
+
+| Status | Meaning | Fix |
+|---|---|---|
+| `401` `unauthenticated` | No `Authorization` header, or the token is wrong, revoked or expired. A `.mcp.json` with an unset variable sends the literal text `${SHORTLINKS_TOKEN}`. | Check `echo "${SHORTLINKS_TOKEN:0:8}"` prints `slk_`; mint a new token in Account. |
+| `403` `api_token_required` | The request carried a browser session cookie or session bearer, not an API token. Typical when a page in the signed-in browser calls `/mcp`, or in dev mode with auto-login and no header. | Send `Authorization: Bearer slk_…`. |
+| `403` `cross-origin request detected…` | The request had an `Origin` header that does not match the host, which is how a browser page on another site looks. Agents and curl send no `Origin`. | Call `/mcp` from a non-browser client. Behind a proxy, keep `ProxyPreserveHost On` so `Host` is the public name. |
+| tool error "this API token is read-only, so write tools such as X are not available" | A read-only token called a write tool. The REST `403 api_token_read_only` behind it is only the second layer. | Use a full token for that agent. |
+| `400` JSON-RPC batches are not supported | The client sent an array. | Send one request per POST. |
+| `405` on `GET` / `DELETE` | Expected: the server has no stream or session. | None. Clients ignore it. |
+| `413` | Body over 256 KiB. | Send smaller input. |
+| `429` | Rate limit. The `Retry-After` header says how many seconds to wait. | Slow the agent down, or give it its own token. |
 
 ## Tools
 
@@ -69,10 +192,7 @@ the SSE stream, campaign `/stats`, `DELETE /api/links/{key}` and the public home
 info. The parity test keeps that
 list complete.
 
-**Limits.** A request body is capped at 256 KiB (`413` above that). JSON-RPC
-batch arrays are rejected with `400` and a JSON-RPC error, because a batch
-would run many tools for one rate-limit charge: send one request per POST.
-Keys and slugs of `.`, `..` or containing `/` are refused. Cross-origin
+**Limits.** Rate limit, body size and batches are described once, under [Limits](#limits) above. Keys and slugs of `.`, `..` or containing `/` are refused. Cross-origin
 browser requests are refused by Go's `http.CrossOriginProtection`. A panic in
 a tool or the dispatched handler becomes an `internal_error` tool error.
 

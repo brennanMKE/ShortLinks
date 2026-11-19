@@ -268,6 +268,28 @@ sudo cp deploy/apache/go.sstools.co.conf /etc/httpd/conf.d/
 sudo systemctl reload httpd
 ```
 
+**MCP (`/mcp`).** The template also has a block for `/mcp`, the endpoint AI
+agents use ([docs/mcp.md](docs/mcp.md)). The catch-all `ProxyPass /` would
+already carry it: the `Authorization` header, the `Origin` header the
+server's cross-origin check reads (which is why `ProxyPreserveHost On` must
+stay) and the POST body all pass through. The server is stateless and
+replies with plain JSON, so nothing is strictly required. The block adds
+`flushpackets=on`, `SetEnv no-gzip 1` and `timeout=120` so that a streamed
+response would not be buffered, gzipped or cut off at the default 60 seconds.
+It must stay above the wildcard line. Apache does not rate limit; the app
+does (600 requests/minute per token).
+
+The same template applies to every instance on the host (go.opencircuitsf.com,
+go.dustalmanac.com, go.coupledozen.com, go.shouteureka.com): change
+`ServerName`, the certificate paths and the backend port. Existing vhosts
+keep working without the block, so adding it is optional per instance. To
+roll it out, merge the `/mcp` block into each vhost, then:
+
+```bash
+sudo apachectl configtest && sudo systemctl reload httpd
+SHORTLINKS_TOKEN=slk_… scripts/mcp-smoke.sh https://go.sstools.co
+```
+
 ---
 
 ## 9. TLS

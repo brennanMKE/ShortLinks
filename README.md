@@ -10,6 +10,7 @@ A self-hosted URL shortener built with Go, PostgreSQL, and Svelte. Deployed on A
 - **URL filtering** — admin-managed regex rules block malware, phishing, and spam links
 - **Click analytics** — UTM parameter capture and breakdown per link, with automated bot/preview-crawler traffic classified and excluded from stats by default
 - **Campaigns** — group links across channels (email, social, print) under one campaign, with per-campaign click totals, timeseries, and channel breakdowns; batch-create a link per channel in one request; per-link QR codes (SVG/PNG, plus a bulk zip) for print placements; per-link CSV export — see [`docs/campaigns.md`](docs/campaigns.md)
+- **AI agents (MCP)** — an embedded MCP server at `/mcp` exposes link, campaign and report tools to agents such as Claude Code, authenticated with API tokens (read-only tokens supported) — see [`docs/mcp.md`](docs/mcp.md)
 - **Real-time dashboard** — new links appear instantly via Server-Sent Events
 - **Audit log** — append-only record of every significant action
 - **Admin panel** — user management, URL filter CRUD, registration toggle
