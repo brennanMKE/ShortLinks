@@ -272,6 +272,50 @@ export const DEFAULT_CHART_GEO: ChartGeometry = {
 };
 
 /**
+ * Geometry for a narrow container (a phone). The viewBox is close to the
+ * rendered width, so user units are close to pixels: a 12-unit label renders
+ * at about 11px, and the 260-unit height keeps the plot from going flat.
+ */
+export const PHONE_CHART_GEO: ChartGeometry = {
+  width: 360,
+  height: 260,
+  padLeft: 42,
+  padRight: 10,
+  padTop: 14,
+  padBottom: 30,
+  innerW: 360 - 42 - 10,
+  innerH: 260 - 14 - 30,
+};
+
+/** Containers narrower than this use PHONE_CHART_GEO. */
+export const PHONE_CHART_MAX_WIDTH = 520;
+
+/** Pick the geometry for a container of `width` CSS pixels (0 = not measured yet). */
+export function chartGeoForWidth(width: number): ChartGeometry {
+  return width > 0 && width < PHONE_CHART_MAX_WIDTH ? PHONE_CHART_GEO : DEFAULT_CHART_GEO;
+}
+
+/**
+ * Indices of the x-axis labels for `n` points: at most `maxLabels`, evenly
+ * spaced, always ending on the last point. `maxLabels` comes from the
+ * drawable width, so neighbouring labels never collide.
+ */
+export function xLabelIndices(n: number, maxLabels: number): number[] {
+  if (n <= 0) return [];
+  if (n === 1) return [0];
+  const count = Math.max(2, Math.min(maxLabels, n));
+  const step = Math.ceil((n - 1) / (count - 1));
+  const out: number[] = [];
+  for (let i = 0; i < n; i += step) out.push(i);
+  const last = n - 1;
+  if (out[out.length - 1] !== last) out.push(last);
+  // The closing label sits closer to its neighbour when the step does not
+  // divide the span; drop that neighbour rather than let the two collide.
+  if (out.length > 2 && last - out[out.length - 2] < step * 0.75) out.splice(out.length - 2, 1);
+  return out;
+}
+
+/**
  * Map an array of TimeseriesPoint[] to SVG polyline coordinates.
  * Returns an empty string ("") when points is empty (safe for the `points`
  * attribute of <polyline>).

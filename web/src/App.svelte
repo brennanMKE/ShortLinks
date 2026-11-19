@@ -12,7 +12,7 @@
   import { shouldShowHome, type HomeInfo } from './lib/home';
   import Home from './views/Home.svelte';
   import Login from './views/Login.svelte';
-  import Dashboard from './views/Dashboard.svelte';
+  import Overview from './views/Overview.svelte';
   import LinksList from './views/LinksList.svelte';
   import NewLink from './views/NewLink.svelte';
   import LinkDetail from './views/LinkDetail.svelte';
@@ -32,8 +32,7 @@
   // import so routing.ts's matching logic can be unit-tested with no Svelte
   // runtime at all (#0120). Match in declaration order; '*' (NotFound) goes last.
   const routes: RouteDef<unknown>[] = [
-    // '/' is the old Dashboard until #0162 replaces it with the Overview.
-    { path: '/', component: Dashboard },
+    { path: '/', component: Overview },
     { path: '/login', component: Login },
     { path: '/links', component: LinksList },
     { path: '/links/:key', component: LinkDetail },

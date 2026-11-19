@@ -9,11 +9,13 @@
     dim?: boolean;
     /** Abnormal-state tag only (e.g. "Inactive"); never a normal-state pill. */
     tag?: string;
+    /** Phone cards: let the title wrap to two lines instead of one. */
+    wrap?: boolean;
   }
-  let { title, meta = '', href, dim = false, tag = '' }: Props = $props();
+  let { title, meta = '', href, dim = false, tag = '', wrap = false }: Props = $props();
 </script>
 
-<div class="two-line" class:dim>
+<div class="two-line" class:dim class:wrap>
   <span class="l1row">
     {#if href}
       <a class="line1" {href} {title}>{title}</a>
@@ -49,6 +51,15 @@
     text-decoration: none;
   }
   a.line1:hover { color: var(--accent); text-decoration: underline; }
+  @media (max-width: 899px) {
+    .wrap .line1 {
+      white-space: normal;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+  }
   .line2 {
     font-size: var(--fs-sm);
     color: var(--text-muted);

@@ -29,7 +29,8 @@
     stepIndex,
     longDateLabel,
     defaultDateRange,
-    DEFAULT_CHART_GEO,
+    chartGeoForWidth,
+    xLabelIndices,
   } from './charts';
   import ChartReadout, { type ReadoutRow } from './ChartReadout.svelte';
 
@@ -64,7 +65,10 @@
     seriesLabel = 'Clicks',
   }: Props = $props();
 
-  const geo = DEFAULT_CHART_GEO;
+  // Narrow containers get a taller, near-1:1 geometry so labels stay legible (#0162).
+  let boxWidth = $state(0);
+  const geo = $derived(chartGeoForWidth(boxWidth));
+  const phone = $derived(geo.width < 600);
 
   const dateRange = $derived<[string, string]>(from && to ? [from, to] : defaultDateRange(days));
   const rangeStart = $derived(dateRange[0]);
@@ -111,27 +115,15 @@
     ticks.map((v) => ({ value: v, y: yCoord(v, max, geo), label: v.toLocaleString() })),
   );
 
-  // X-axis: show roughly 5 evenly-spaced date labels to avoid crowding.
-  const xLabelCount = 5;
+  // X-axis: as many labels as fit (about 56 units each, at most 5), evenly spaced.
   const xLabels = $derived(
     points.length === 0
       ? []
-      : (() => {
-          const step = Math.max(1, Math.floor(points.length / (xLabelCount - 1)));
-          const indices: number[] = [];
-          for (let i = 0; i < points.length; i += step) indices.push(i);
-          const lastIdx = points.length - 1;
-          const lastPicked = indices[indices.length - 1];
-          if (lastPicked !== lastIdx) {
-            if (lastIdx - lastPicked < step / 2) indices[indices.length - 1] = lastIdx;
-            else indices.push(lastIdx);
-          }
-          return indices.map((i) => ({
-            label: points[i].label,
-            x: round(xCoord(i, points.length, geo)),
-            anchor: points.length === 1 ? 'middle' : i === 0 ? 'start' : i === lastIdx ? 'end' : 'middle',
-          }));
-        })(),
+      : xLabelIndices(points.length, Math.min(5, Math.floor(geo.innerW / 56))).map((i) => ({
+          label: points[i].label,
+          x: round(xCoord(i, points.length, geo)),
+          anchor: points.length === 1 ? 'middle' : i === 0 ? 'start' : i === points.length - 1 ? 'end' : 'middle',
+        })),
   );
 
   // ── Crosshair ──────────────────────────────────────────────────────────
@@ -201,7 +193,7 @@
 
 <svelte:window onpointerdown={onOutside} />
 
-<div class="chart-wrap">
+<div class="chart-wrap" bind:clientWidth={boxWidth}>
   {#if isEmpty}
     <div class="chart-empty text-muted" aria-label="{title}: no data yet">
       No click data in this period.
@@ -228,6 +220,7 @@
         width="100%"
         xmlns="http://www.w3.org/2000/svg"
         class="chart-svg"
+        class:phone
       >
         <title id={titleId}>{title}</title>
         <desc id={descId}>{totalClicks.toLocaleString()} clicks from {rangeStart} to {rangeEnd}.</desc>
@@ -357,6 +350,10 @@
     font-size: 10px;
     fill: var(--text-faint);
     font-family: var(--font-mono);
+  }
+  /* Phone geometry is near 1:1 with pixels, so a 12-unit label renders at about 11px. */
+  .chart-svg.phone .axis-label {
+    font-size: 12px;
   }
 
   .chart-line {

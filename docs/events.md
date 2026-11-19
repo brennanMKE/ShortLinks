@@ -266,14 +266,14 @@ which automatically reconnects after a drop with exponential back-off.
 
 ### `prependUniqueByKey(list, link)`
 
-Pure, immutable helper used by the Dashboard store mutation. Prepends `link` to
+Pure, immutable helper used by the Links page store mutation. Prepends `link` to
 `list`, deduping by `key`: if a link with the same key already exists (e.g.
 from an optimistic create), it is replaced at the front rather than inserted
 again. Returns a new array; never mutates the input.
 
-### Dashboard integration (`web/src/views/Dashboard.svelte`)
+### Links page integration (`web/src/views/LinksList.svelte`)
 
-Inside `onMount`, the Dashboard opens the SSE stream and wires each incoming
+Inside `onMount`, the Links page opens the SSE stream and wires each incoming
 `link.created` event directly into the shared `links` Svelte store:
 
 ```ts
@@ -289,10 +289,14 @@ onMount(() => {
 ```
 
 Returning `unsubscribe` from `onMount` is the Svelte lifecycle idiom for
-teardown: when the Dashboard is unmounted (e.g. user navigates to Account),
+teardown: when the Links page is unmounted (e.g. user navigates to Account),
 Svelte calls the returned function, which calls `es.close()`, which terminates
 the long-lived SSE connection and triggers the server-side `ctx.Done()` path,
 causing the handler goroutine to unsubscribe and exit.
+
+The Overview (`web/src/views/Overview.svelte`, #0162) subscribes the same way, but
+its callback only bumps a reload counter so the reports are fetched again: the
+Overview shows report totals, not the link list.
 
 ---
 

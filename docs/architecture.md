@@ -89,7 +89,7 @@ SPA views (in `web/src/views/`):
 | View | Shown when |
 |---|---|
 | `Login` | No active session |
-| `Dashboard` | Active session — lists links, SSE live-updates |
+| `Overview` | Active session — 30-day click overview from the reports API, refetches on SSE `link.created` |
 | `LinkDetail` | User navigates to a link's detail/analytics |
 | `Account` | Credential management, settings |
 | `Admin` | Authenticated admin — user management, filter rules, audit log |

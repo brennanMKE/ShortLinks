@@ -11,8 +11,6 @@
   shared `links` store.
 -->
 <script lang="ts">
-  // Dashboard embeds this view under its own heading and passes false.
-  let { showTitle = true }: { showTitle?: boolean } = $props();
   import { onMount } from 'svelte';
   import { currentUser, links } from '../lib/stores';
   import { listLinks, listCampaigns, deactivateLink, ApiError } from '../lib/api';
@@ -185,7 +183,7 @@
 <svelte:window onpaste={onPaste} />
 
 <div class="app-shell">
-{#if showTitle}<h1 class="page-title">Links</h1>{/if}
+<h1 class="page-title">Links</h1>
 <Panel title="Your links" noPadding={!loadError}>
   {#if loadError}
     <div class="err">

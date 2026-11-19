@@ -44,7 +44,7 @@ web/
     │   └── UTMBarChart.svelte   # Horizontal proportional bar chart (UTM dimension)
     └── views/
         ├── Login.svelte         # Passkey auth: conditional UI autofill + explicit sign-in
-        ├── Dashboard.svelte     # Link create form + paginated link list + SSE updates
+        ├── Overview.svelte      # Signed-in home: tiles, 30-day chart, campaign chips, top content (reports API)
         ├── LinkDetail.svelte    # Single-link stats: clicks chart, UTM breakdown, edit/deactivate
         ├── CampaignsList.svelte   # Campaign create form + paginated campaign list
         ├── CampaignDetail.svelte  # Single-campaign stats, links table, batch create, assign/unassign
@@ -79,13 +79,13 @@ There is no URL-based router library — hash routing (`#/…`) is hand-rolled a
 
 - **`lib/routing.ts`** — pure functions with no DOM or Svelte dependency, unit-tested in `routing.test.ts`: `parseHash` (splits `location.hash` into a path + `URLSearchParams` query), `matchRoute` (matches a path against a route table, extracting `:param` segments — a malformed percent-encoded segment is treated as no match rather than thrown), `isActiveLink` (the `Link.svelte` active rule: exact match for `/`, prefix match otherwise), and `loginPathWithRedirect`/`redirectTargetFrom` (encode/decode the `?redirect=` target carried on the `/login` route).
 - **`lib/hashRouter.svelte.ts`** — the Svelte 5 runes state around it: `initRouter(routes)` wires the route table (declared in App.svelte, since it needs the actual view components) and listens for `hashchange`; `getRoute()` is the reactive accessor; `navigate(path)` sets `location.hash` (pushes history); `replace(path)` uses `location.replace('#' + path)` (no history entry) for redirects/normalization.
-- **`lib/Router.svelte`** — renders the component for the current route inside `{#key route.path}`, so a path change (not a query-only change) always destroys and remounts the view, guaranteeing a cold-load fetch by route param and a clean unmount of anything the previous view's `onMount` set up (e.g. Dashboard's SSE subscription).
+- **`lib/Router.svelte`** — renders the component for the current route inside `{#key route.path}`, so a path change (not a query-only change) always destroys and remounts the view, guaranteeing a cold-load fetch by route param and a clean unmount of anything the previous view's `onMount` set up (e.g. the Overview's and Links page's SSE subscriptions).
 
 The route table (in `App.svelte`) is matched in declaration order, first match wins, with `*` (NotFound) last:
 
 ```ts
 const routes = [
-  { path: '/',                component: Dashboard },
+  { path: '/',                component: Overview },
   { path: '/login',           component: Login },
   { path: '/links/:key',      component: LinkDetail },
   { path: '/campaigns',       component: CampaignsList },
@@ -115,7 +115,7 @@ An unmatched hash renders `NotFound` via the catch-all route.
 |---|---|---|
 | Login | `views/Login.svelte` | Two-path WebAuthn auth: conditional-UI (passkey autofill) fires in background on mount; explicit "Sign in" button calls `/auth/login/start` then `/auth/login/finish`. On success, replaces to the `redirect` target from the route's query (or `/`). The Register link and sub-form show only when `GET /api/public/home` reports `registrations_enabled: true` (hidden when closed or when the fetch fails; the server gate is the enforcement). Registration and recovery sub-forms POST to `/auth/register/start` and `/auth/recover`. |
 | Home | `views/Home.svelte` | Signed-out root page shown only when `shouldShowHome` is true: instance name, "Taking you to <host>…", a "Go now" anchor to the primary URL, and a small "Sign in" `Link` to `/login`. After `HOME_REDIRECT_DELAY_MS` (3000, fixed) it calls `window.location.replace(url)` so Back skips it; `onDestroy` clears the timer. No animation. |
-| Dashboard | `views/Dashboard.svelte` | Link create form (destination URL, optional title/key/expiry, UTM builder) + paginated link list. Opens an SSE connection to `/api/events` on mount and prepends `link.created` events to the `links` store in real time; the subscription is closed on unmount (see Routing above). |
+| Overview | `views/Overview.svelte` | The signed-in home page (`#/`, #0162): four stat tiles (Clicks, Visitors, Best day, Top content, each with its change vs the previous period), a daily-clicks `ClicksChart` with the previous period, campaign focus chips (`CampaignChips`) and the ranked Top content list (`TopContent`, built on `DataTable`), grouped by Content, Link or Source. All numbers come from `GET /api/reports/{overview,top-content,top-links,breakdown}` (cookie session, `tz` from the chart time-zone preference). View state (range, from/to, campaign, group) lives in the hash query (`lib/overviewQuery.ts`). Opens an SSE connection to `/api/events` on mount and refetches when a link is created; closed on unmount. |
 | LinkDetail | `views/LinkDetail.svelte` | Full stats for the link named by the `key` route param (`/links/:key`), fetched fresh on every mount. Shows the short URL, destination, status, dates, total click count, a `ClicksChart` (30-day timeseries), and `UTMBarChart` breakdowns by source/medium/campaign. Inline edit and deactivate actions. |
 | CampaignsList | `views/CampaignsList.svelte` | Campaign create form + paginated campaign list; a row's name is a `Link` to `/campaigns/:slug`. |
 | CampaignDetail | `views/CampaignDetail.svelte` | Full stats for the campaign named by the `slug` route param (`/campaigns/:slug`), fetched fresh on every mount: summary, clicks-over-time chart, channel breakdown, links table (each key a `Link` to `/links/:key`), batch create, and assign/unassign. |
@@ -134,7 +134,7 @@ An unmatched hash renders `NotFound` via the catch-all route.
 | Store | Type | Purpose |
 |---|---|---|
 | `currentUser` | `User \| null` | Authenticated user profile from `/api/me`; `null` = signed out |
-| `links` | `Link[]` | Dashboard link list; populated by REST and extended by SSE |
+| `links` | `Link[]` | Links page list; populated by REST and extended by SSE |
 | `pendingVerifyToken` | `string \| null` | Magic-link token captured by App.svelte on landing |
 
 ---
@@ -154,7 +154,7 @@ Each helper module is pure TypeScript with no DOM or Svelte dependencies, making
 | Module | Key exports |
 |---|---|
 | `links.ts` | `shortUrl`, `isValidHttpUrl`, `linkStatus`, `destinationDomain`, `deniedReasonLabel`, `noticeForCreated`, `noticeForError`. Holds `SHORT_URL_BASE = 'https://go.sstools.co'` — the production display base used for all generated short-link URLs shown in the UI. |
-| `events.ts` | `subscribeLinks` (opens `/api/events` EventSource, invokes callback per `link.created` frame), `prependUniqueByKey` (pure dedup-prepend used by the Dashboard store update). |
+| `events.ts` | `subscribeLinks` (opens `/api/events` EventSource, invokes callback per `link.created` frame), `prependUniqueByKey` (pure dedup-prepend used by the Links page store update). |
 | `utm.ts` | `composeUtmUrl` — merges non-empty UTM fields onto a base URL via `URLSearchParams`, replacing existing same-named params; falls back to string manipulation when the base is not yet a valid URL (for live preview while typing). |
 | `linkDetail.ts` | `utmDimensions`, `sortBuckets`, `isEmptyStats`, `statusLabel`, `formatDate`. |
 | `account.ts` | `validateDeviceName`, `canRevoke`, `revokeErrorMessage`, `lastUsedLabel`, `formatDate`. Maps the backend's `409 cannot_revoke_last_credential` to a human message. |
