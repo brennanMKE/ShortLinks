@@ -289,7 +289,7 @@ func (s *LoginService) FinishLogin(ctx context.Context, ip string, r *http.Reque
 	if err != nil {
 		return LoginResult{}, err
 	}
-	sessionExpires, err := s.store.CreateSession(ctx, tx, rec.UserID, sessionToken, now)
+	sessionExpires, err := s.store.CreateSessionForCredential(ctx, tx, rec.UserID, sessionToken, now, rec.CredentialID)
 	if err != nil {
 		return LoginResult{}, err
 	}

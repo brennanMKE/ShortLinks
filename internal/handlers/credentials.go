@@ -61,6 +61,28 @@ type credentialView struct {
 	SignCount  int64      `json:"sign_count"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
+	// Current is true for the passkey the caller's session was created with
+	// (#0188). Synced is the passkey's backup state: true when it syncs between
+	// devices (iCloud Keychain, Google Password Manager), false when it is bound
+	// to one device.
+	Current bool `json:"current"`
+	Synced  bool `json:"synced"`
+}
+
+// newCredentialView builds the JSON view of c for a caller whose session was
+// created with the passkey row currentID (nil when it is not tied to one).
+func newCredentialView(c auth.ManagedCredential, currentID *int64) credentialView {
+	return credentialView{
+		ID:         c.ID,
+		DeviceName: c.DeviceName,
+		AAGUID:     c.AAGUID,
+		DeviceHint: deviceHint(c.AAGUID),
+		SignCount:  c.SignCount,
+		CreatedAt:  c.CreatedAt,
+		LastUsedAt: c.LastUsedAt,
+		Current:    currentID != nil && *currentID == c.ID,
+		Synced:     c.BackupState,
+	}
 }
 
 // List handles GET /account/credentials. It returns the authenticated user's
@@ -84,15 +106,7 @@ func (h *CredentialsHandler) List(w http.ResponseWriter, r *http.Request) {
 	// for an account with zero credentials.
 	views := make([]credentialView, 0, len(creds))
 	for _, c := range creds {
-		views = append(views, credentialView{
-			ID:         c.ID,
-			DeviceName: c.DeviceName,
-			AAGUID:     c.AAGUID,
-			DeviceHint: deviceHint(c.AAGUID),
-			SignCount:  c.SignCount,
-			CreatedAt:  c.CreatedAt,
-			LastUsedAt: c.LastUsedAt,
-		})
+		views = append(views, newCredentialView(c, u.CredentialID))
 	}
 	writeJSON(w, http.StatusOK, views)
 }
@@ -159,15 +173,7 @@ func (h *CredentialsHandler) Rename(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range creds {
 		if c.ID == id {
-			writeJSON(w, http.StatusOK, credentialView{
-				ID:         c.ID,
-				DeviceName: c.DeviceName,
-				AAGUID:     c.AAGUID,
-				DeviceHint: deviceHint(c.AAGUID),
-				SignCount:  c.SignCount,
-				CreatedAt:  c.CreatedAt,
-				LastUsedAt: c.LastUsedAt,
-			})
+			writeJSON(w, http.StatusOK, newCredentialView(c, u.CredentialID))
 			return
 		}
 	}

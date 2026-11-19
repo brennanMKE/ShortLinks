@@ -273,7 +273,7 @@ func (s *RecoveryService) FinishRecovery(ctx context.Context, token, deviceName,
 	if err != nil {
 		return RecoveryResult{}, err
 	}
-	sessionExpires, err := s.store.CreateSession(ctx, tx, userID, sessionToken, now)
+	sessionExpires, err := s.store.CreateSessionForCredential(ctx, tx, userID, sessionToken, now, credential.ID)
 	if err != nil {
 		return RecoveryResult{}, err
 	}

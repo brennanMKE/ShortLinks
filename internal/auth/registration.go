@@ -274,7 +274,7 @@ func (s *RegistrationService) FinishRegistration(ctx context.Context, token, dev
 	if err != nil {
 		return FinishResult{}, err
 	}
-	sessionExpires, err := s.store.CreateSession(ctx, tx, created.ID, sessionToken, now)
+	sessionExpires, err := s.store.CreateSessionForCredential(ctx, tx, created.ID, sessionToken, now, credential.ID)
 	if err != nil {
 		return FinishResult{}, err
 	}

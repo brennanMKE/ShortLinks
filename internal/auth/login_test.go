@@ -158,6 +158,14 @@ func TestLogin_EndToEnd_DiscoverableCreatesSession(t *testing.T) {
 	if after := countSessionsForUser(t, pool, acct.user.ID); after != sessionsBefore+1 {
 		t.Errorf("user sessions = %d, want %d (one new)", after, sessionsBefore+1)
 	}
+	// #0188: the session records the passkey it was created with.
+	var linked int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM sessions s JOIN passkey_credentials c ON c.id = s.credential_id
+		  WHERE s.token = $1 AND c.user_id = $2`,
+		result.SessionToken, acct.user.ID).Scan(&linked); err != nil || linked != 1 {
+		t.Errorf("session credential_id link = %d, %v; want 1 (the passkey used)", linked, err)
+	}
 	// last_login_at must be set; the challenge must have been consumed.
 	if !lastLoginSet(t, pool, acct.user.ID) {
 		t.Error("users.last_login_at was not set")

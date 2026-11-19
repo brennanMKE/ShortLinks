@@ -16,17 +16,20 @@
     ApiError,
   } from '../lib/api';
   import {
-    formatDate,
-    lastUsedLabel,
+    syncLabel,
+    formatMonthYear,
     validateDeviceName,
     canRevoke,
     revokeErrorMessage,
+    ONLY_PASSKEY_NOTE,
   } from '../lib/account';
   import type { Credential } from '../lib/types';
   import { replace } from '../lib/hashRouter.svelte';
   import Button from '../lib/Button.svelte';
   import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   import Panel from '../lib/Panel.svelte';
+  import AccountRowMenu from '../lib/AccountRowMenu.svelte';
+  import RelativeDate from '../lib/RelativeDate.svelte';
   import ApiTokens from '../lib/ApiTokens.svelte';
   import Preferences from '../lib/Preferences.svelte';
 
@@ -175,10 +178,10 @@
 
 <ConfirmDialog
   open={revokeTarget !== null}
-  title="Revoke passkey?"
+  title="Remove passkey?"
   message={`You will no longer be able to sign in with "${revokeTarget?.device_name ?? ''}".`}
-  confirmLabel="Revoke passkey"
-  busyLabel="Revoking…"
+  confirmLabel="Remove passkey"
+  busyLabel="Removing…"
   oncancel={() => (revokeTarget = null)}
   onconfirm={() => (revokeTarget ? performRevoke(revokeTarget) : undefined)}
 />
@@ -213,11 +216,6 @@
   </Panel>
 
   <Panel title="Passkeys">
-    <p class="text-muted intro">
-      These are the passkeys registered to your account. Add a new passkey through
-      account recovery; you cannot revoke your only passkey.
-    </p>
-
     {#if loading}
       <p class="text-muted" role="status">Loading passkeys…</p>
     {:else if loadError}
@@ -258,44 +256,49 @@
                   <p class="text-error" role="alert">{editError}</p>
                 {/if}
               {:else}
-                <div class="name-row">
-                  <span class="cred-name">{cred.device_name || 'Unnamed passkey'}</span>
-                  <Button variant="subtle" onclick={() => startEdit(cred)}>Rename</Button>
+                <div class="cred-line">
+                  <span class="cred-name" title={cred.device_hint}>
+                    {cred.device_name || 'Unnamed passkey'}
+                  </span>
+                  {#if cred.current}<span class="tag tag-current">This device</span>{/if}
+                  <span class="tag">{syncLabel(cred)}</span>
+                  <span class="cred-used text-muted">
+                    {#if cred.last_used_at}
+                      Used <RelativeDate date={cred.last_used_at} />
+                    {:else}
+                      Never used
+                    {/if}
+                    · Added {formatMonthYear(cred.created_at)}
+                  </span>
                 </div>
               {/if}
-
-              <dl class="meta">
-                <div>
-                  <dt>Device</dt>
-                  <dd>{cred.device_hint}</dd>
-                </div>
-                <div>
-                  <dt>Added</dt>
-                  <dd>{formatDate(cred.created_at)}</dd>
-                </div>
-                <div>
-                  <dt>Last used</dt>
-                  <dd>{lastUsedLabel(cred.last_used_at)}</dd>
-                </div>
-              </dl>
 
               {#if rowErrors[cred.id]}
                 <p class="text-error" role="alert">{rowErrors[cred.id]}</p>
               {/if}
             </div>
 
-            <div class="cred-actions">
-              <Button
-                variant="danger"
-                disabled={!revokeAllowed || revokingId === cred.id}
-                onclick={() => handleRevoke(cred)}
-              >
-                {revokingId === cred.id ? 'Revoking…' : 'Revoke'}
-              </Button>
-            </div>
+            {#if editingId !== cred.id}
+              <AccountRowMenu
+                label={`Actions for ${cred.device_name || 'passkey'}`}
+                busy={revokingId === cred.id}
+                items={[
+                  { label: 'Rename', onselect: () => startEdit(cred) },
+                  {
+                    label: 'Remove',
+                    danger: true,
+                    disabled: !revokeAllowed,
+                    onselect: () => handleRevoke(cred),
+                  },
+                ]}
+              />
+            {/if}
           </li>
         {/each}
       </ul>
+      {#if !revokeAllowed}
+        <p class="text-muted note" data-testid="only-passkey-note">{ONLY_PASSKEY_NOTE}</p>
+      {/if}
     {/if}
   </Panel>
 
@@ -308,75 +311,57 @@
   .account-shell {
     max-width: 760px;
   }
-
-  @media (max-width: 480px) {
-    /* Credential cards: stack the main content and revoke button vertically */
-    .cred {
-      flex-direction: column;
-    }
-    .cred-actions {
-      align-self: flex-start;
-    }
-  }
   .intro {
     margin: 0 0 var(--space-3);
   }
+  .note {
+    font-size: var(--fs-sm);
+    margin: var(--space-3) 0 0;
+  }
+  /* One line per passkey (#0188, docs/ui-redesign.md 3.8). */
   .creds {
     list-style: none;
     margin: 0;
     padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
   }
   .cred {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    border: var(--border-w) solid var(--border);
-    border-radius: var(--radius);
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-2) var(--space-3);
     background: var(--bg-subtle);
+  }
+  .cred + .cred {
+    border-top: var(--border-w) solid var(--border);
   }
   .cred-main {
     flex: 1;
     min-width: 0;
   }
-  .name-row {
+  .cred-line {
     display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    margin-bottom: var(--space-2);
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
   }
   .cred-name {
     font-weight: 600;
     overflow-wrap: anywhere;
   }
+  .cred-used {
+    font-size: var(--fs-sm);
+  }
+  .tag-current {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
   .edit-form {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    margin-bottom: var(--space-2);
     flex-wrap: wrap;
-  }
-  .meta {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-    gap: var(--space-2) var(--space-4);
-    margin: 0;
-  }
-  .meta dt {
-    color: var(--text-muted);
-    font-weight: 600;
-    font-size: var(--fs-sm);
-  }
-  .meta dd {
-    margin: 0;
-    font-size: var(--fs-base);
-    overflow-wrap: anywhere;
-  }
-  .cred-actions {
-    flex-shrink: 0;
   }
 </style>

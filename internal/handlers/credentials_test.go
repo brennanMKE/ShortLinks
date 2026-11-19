@@ -395,3 +395,89 @@ func TestCredentials_Unauthenticated(t *testing.T) {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 }
+
+// TestCredentialsList_CurrentAndSynced (#0188): a session created with one
+// passkey marks only that passkey current, and synced mirrors backup_state.
+func TestCredentialsList_CurrentAndSynced(t *testing.T) {
+	pool := credsTestPool(t)
+	store := auth.NewStore(pool)
+	srv := httptest.NewServer(credsMux(store))
+	defer srv.Close()
+
+	alice := seedUser(t, pool, "alice@example.com")
+	mac := seedCredential(t, pool, alice, "MacBook", "a1")
+	phone := seedCredential(t, pool, alice, "iPhone", "a2")
+	if _, err := pool.Exec(context.Background(),
+		`UPDATE passkey_credentials SET backup_state = TRUE WHERE id = $1`, phone); err != nil {
+		t.Fatalf("set backup_state: %v", err)
+	}
+
+	// A session created through the real store path records its passkey.
+	if _, err := store.CreateSessionForCredential(context.Background(), pool, alice, "tok-mac", time.Now(), []byte("cred-a1")); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	// A session with no passkey marks nothing current.
+	if _, err := store.CreateSession(context.Background(), pool, alice, "tok-none", time.Now()); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	list := func(token string) map[int64]map[string]any {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/account/credentials", nil)
+		resp, err := srv.Client().Do(withCookie(req, token))
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+		var raw []map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		out := map[int64]map[string]any{}
+		for _, c := range raw {
+			out[int64(c["id"].(float64))] = c
+		}
+		return out
+	}
+
+	got := list("tok-mac")
+	if got[mac]["current"] != true || got[phone]["current"] != false {
+		t.Errorf("current flags = mac:%v phone:%v, want true/false", got[mac]["current"], got[phone]["current"])
+	}
+	if got[mac]["synced"] != false || got[phone]["synced"] != true {
+		t.Errorf("synced flags = mac:%v phone:%v, want false/true", got[mac]["synced"], got[phone]["synced"])
+	}
+
+	none := list("tok-none")
+	if none[mac]["current"] != false || none[phone]["current"] != false {
+		t.Errorf("a session without a passkey must mark none current: %v", none)
+	}
+
+	// Revoking the passkey a session used leaves the session valid, unlinked.
+	if err := store.RevokeCredential(context.Background(), alice, mac); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	after := list("tok-mac")
+	if len(after) != 1 || after[phone]["current"] != false {
+		t.Errorf("after revoking the session's passkey: %v", after)
+	}
+}
+
+// TestNewCredentialView (#0188): current needs a matching id; synced is the
+// backup state. No database needed.
+func TestNewCredentialView(t *testing.T) {
+	c := auth.ManagedCredential{ID: 7, BackupState: true}
+	id7, id8 := int64(7), int64(8)
+	if v := newCredentialView(c, &id7); !v.Current || !v.Synced {
+		t.Errorf("matching id: %+v", v)
+	}
+	if v := newCredentialView(c, &id8); v.Current {
+		t.Errorf("other id marked current: %+v", v)
+	}
+	if v := newCredentialView(c, nil); v.Current {
+		t.Errorf("nil id marked current: %+v", v)
+	}
+	if v := newCredentialView(auth.ManagedCredential{ID: 7}, &id7); v.Synced {
+		t.Errorf("backup_state false marked synced: %+v", v)
+	}
+}

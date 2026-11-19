@@ -17,6 +17,8 @@ import {
   canRevoke,
   formatDate,
   lastUsedLabel,
+  syncLabel,
+  formatMonthYear,
 } from './account';
 
 function credential(overrides: Partial<Credential> = {}): Credential {
@@ -28,6 +30,8 @@ function credential(overrides: Partial<Credential> = {}): Credential {
     sign_count: 0,
     created_at: '2026-05-25T12:00:00Z',
     last_used_at: null,
+    current: false,
+    synced: false,
     ...overrides,
   };
 }
@@ -119,5 +123,24 @@ describe('lastUsedLabel', () => {
 
   it('formats a recorded last-used timestamp', () => {
     expect(lastUsedLabel('2026-05-20T09:00:00Z')).toMatch(/2026/);
+  });
+});
+
+describe('syncLabel (#0188)', () => {
+  it('says "Synced" for a synced passkey', () => {
+    expect(syncLabel(credential({ synced: true }))).toBe('Synced');
+  });
+  it('says "Not synced" for a device-bound passkey', () => {
+    expect(syncLabel(credential({ synced: false }))).toBe('Not synced');
+  });
+});
+
+describe('formatMonthYear (#0188)', () => {
+  it('formats as Mon YYYY', () => {
+    expect(formatMonthYear('2026-03-19T12:00:00Z')).toBe('Mar 2026');
+  });
+  it('handles empty and unparseable values', () => {
+    expect(formatMonthYear(null)).toBe('');
+    expect(formatMonthYear('nope')).toBe('nope');
   });
 });

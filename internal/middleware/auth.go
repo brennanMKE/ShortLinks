@@ -53,6 +53,10 @@ type AuthUser struct {
 	Email   string
 	IsAdmin bool
 
+	// CredentialID is the passkey_credentials.id the session was created with
+	// (#0188); nil for API-token requests and sessions not tied to a passkey.
+	CredentialID *int64
+
 	// APITokenID is non-zero when the request authenticated with an API token
 	// rather than a session (RequireSessionOrAPIToken); APITokenName and
 	// ReadOnly describe that token. IsAdmin is always false in that case.
@@ -151,7 +155,7 @@ func RequireSession(resolver SessionResolver) func(http.Handler) http.Handler {
 				return
 			}
 
-			authUser := &AuthUser{ID: u.ID, Email: u.Email, IsAdmin: u.IsAdmin}
+			authUser := &AuthUser{ID: u.ID, Email: u.Email, IsAdmin: u.IsAdmin, CredentialID: u.CredentialID}
 			next.ServeHTTP(w, r.WithContext(withUser(r.Context(), authUser)))
 		})
 	}

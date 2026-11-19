@@ -58,6 +58,8 @@ type Store struct {
 	sessions  map[string]sessionEntry // token → session
 	settings  []auth.Setting
 	apiTokens []apiTokenEntry
+	// credentials are the seeded dev passkeys (#0188).
+	credentials []devCredential
 	// nextLinkID is the auto-increment counter for link IDs.
 	nextLinkID int64
 	// nextRuleID is the auto-increment counter for filter rule IDs.
@@ -126,6 +128,7 @@ func New(adminEmail string) *Store {
 		},
 	}
 
+	s.credentials = seedCredentials(now)
 	s.seedAuditLog(now)
 
 	// Seed the registrations_enabled setting.
@@ -200,7 +203,18 @@ func (s *Store) ResolveSession(ctx context.Context, token string, now time.Time)
 	}
 	for _, u := range s.users {
 		if u.ID == entry.userID {
-			return auth.SessionUser{ID: u.ID, Email: u.Email, IsAdmin: u.IsAdmin}, nil
+			su := auth.SessionUser{ID: u.ID, Email: u.Email, IsAdmin: u.IsAdmin}
+			// SET NULL parity: once the seeded passkey is removed, the
+			// session is no longer tied to one.
+			if u.ID == seedAdminID {
+				for _, c := range s.credentials {
+					if c.ID == seedCurrentCredentialID && c.userID == u.ID {
+						cur := seedCurrentCredentialID
+						su.CredentialID = &cur
+					}
+				}
+			}
+			return su, nil
 		}
 	}
 	return auth.SessionUser{}, auth.ErrSessionInvalid
@@ -290,21 +304,84 @@ func (s *Store) UpdateSetting(_ context.Context, key, value string, now time.Tim
 }
 
 // ── credentialStore (handlers.CredentialsHandler) ──────────────────────────
-// Passkey management is not available in dev; stub returns empty/not-found.
+// Dev mode has no WebAuthn ceremony, but it seeds two passkeys for the admin so
+// the Account page has something to show: a device-bound one, which every dev
+// session counts as having signed in with (see ResolveSession), and a synced one.
 
-// ListCredentialsForUser returns an empty slice — no passkeys in dev mode.
-func (s *Store) ListCredentialsForUser(_ context.Context, _ int64) ([]auth.ManagedCredential, error) {
-	return []auth.ManagedCredential{}, nil
+// seedCurrentCredentialID is the seeded passkey every dev session "used".
+const seedCurrentCredentialID int64 = 1
+
+func seedCredentials(now time.Time) []devCredential {
+	used1 := now.Add(-2 * time.Hour)
+	used2 := now.Add(-72 * time.Hour)
+	return []devCredential{
+		{userID: seedAdminID, ManagedCredential: auth.ManagedCredential{
+			ID: seedCurrentCredentialID, DeviceName: "MacBook Touch ID",
+			AAGUID: "00000000-0000-0000-0000-000000000000", SignCount: 14,
+			BackupState: false, CreatedAt: now.AddDate(0, -8, 0), LastUsedAt: &used1,
+		}},
+		{userID: seedAdminID, ManagedCredential: auth.ManagedCredential{
+			ID: 2, DeviceName: "iPhone",
+			AAGUID: "fbfc3007-154e-4ecc-8c0b-6e020557d7bd", SignCount: 0,
+			BackupState: true, CreatedAt: now.AddDate(0, -8, 0), LastUsedAt: &used2,
+		}},
+	}
 }
 
-// RenameCredential always returns ErrCredentialNotFound in dev mode.
-func (s *Store) RenameCredential(_ context.Context, _, _ int64, _ string) error {
+type devCredential struct {
+	userID int64
+	auth.ManagedCredential
+}
+
+// ListCredentialsForUser returns the caller's seeded dev passkeys, newest first.
+func (s *Store) ListCredentialsForUser(_ context.Context, userID int64) ([]auth.ManagedCredential, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []auth.ManagedCredential{}
+	for _, c := range s.credentials {
+		if c.userID == userID {
+			out = append(out, c.ManagedCredential)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return out, nil
+}
+
+// RenameCredential renames one of the caller's dev passkeys.
+func (s *Store) RenameCredential(_ context.Context, userID, id int64, deviceName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.credentials {
+		if s.credentials[i].ID == id && s.credentials[i].userID == userID {
+			s.credentials[i].DeviceName = deviceName
+			return nil
+		}
+	}
 	return auth.ErrCredentialNotFound
 }
 
-// RevokeCredential always returns ErrCredentialNotFound in dev mode.
-func (s *Store) RevokeCredential(_ context.Context, _, _ int64) error {
-	return auth.ErrCredentialNotFound
+// RevokeCredential removes one of the caller's dev passkeys, refusing the last.
+func (s *Store) RevokeCredential(_ context.Context, userID, id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx, owned := -1, 0
+	for i, c := range s.credentials {
+		if c.userID != userID {
+			continue
+		}
+		owned++
+		if c.ID == id {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return auth.ErrCredentialNotFound
+	}
+	if owned <= 1 {
+		return auth.ErrLastCredential
+	}
+	s.credentials = append(s.credentials[:idx], s.credentials[idx+1:]...)
+	return nil
 }
 
 // ── userStore (handlers.AdminUsersHandler) ──────────────────────────────────

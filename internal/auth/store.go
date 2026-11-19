@@ -683,6 +683,10 @@ type SessionUser struct {
 	ID      int64
 	Email   string
 	IsAdmin bool
+	// CredentialID is the passkey_credentials.id the session was created with
+	// (#0188); nil for sessions that predate the column or whose passkey has
+	// since been revoked.
+	CredentialID *int64
 }
 
 // ResolveSession validates a raw session cookie value and, on success, applies
@@ -721,9 +725,9 @@ func (s *Store) ResolveSession(ctx context.Context, token string, now time.Time)
 		    AND s.user_id = u.id
 		    AND s.expires_at > $2
 		    AND u.active = TRUE
-		RETURNING u.id, u.email, u.is_admin`,
+		RETURNING u.id, u.email, u.is_admin, s.credential_id`,
 		token, now, newExpiry,
-	).Scan(&u.ID, &u.Email, &u.IsAdmin)
+	).Scan(&u.ID, &u.Email, &u.IsAdmin, &u.CredentialID)
 	if err == nil {
 		return u, nil
 	}
@@ -764,13 +768,24 @@ func (s *Store) ResolveSession(ctx context.Context, token string, now time.Time)
 }
 
 // CreateSession inserts a sessions row with the given token and a 30-day expiry
-// and returns the expiry. Reused by the login ceremony in #0016.
+// and returns the expiry. Reused by the login ceremony in #0016. The session is
+// not tied to a passkey; use CreateSessionForCredential for that.
 func (s *Store) CreateSession(ctx context.Context, q querier, userID int64, token string, now time.Time) (time.Time, error) {
+	return s.CreateSessionForCredential(ctx, q, userID, token, now, nil)
+}
+
+// CreateSessionForCredential is CreateSession for a session created by a
+// passkey ceremony: credentialID is the WebAuthn credential id (the raw bytes
+// stored in passkey_credentials.credential_id) the user authenticated with, and
+// the session records that passkey's row id (#0188). A nil or unknown id leaves
+// the session unlinked.
+func (s *Store) CreateSessionForCredential(ctx context.Context, q querier, userID int64, token string, now time.Time, credentialID []byte) (time.Time, error) {
 	expiresAt := now.Add(sessionTTL)
 	if _, err := q.Exec(ctx,
-		`INSERT INTO sessions (user_id, token, created_at, expires_at, last_seen_at)
-		 VALUES ($1, $2, $3, $4, $3)`,
-		userID, token, now, expiresAt,
+		`INSERT INTO sessions (user_id, token, created_at, expires_at, last_seen_at, credential_id)
+		 VALUES ($1, $2, $3, $4, $3,
+		         (SELECT id FROM passkey_credentials WHERE credential_id = $5 AND user_id = $1))`,
+		userID, token, now, expiresAt, nilIfEmpty(credentialID),
 	); err != nil {
 		return time.Time{}, fmt.Errorf("auth: creating session: %w", err)
 	}
@@ -784,12 +799,13 @@ func (s *Store) CreateSession(ctx context.Context, q querier, userID int64, toke
 // its canonical string form (or "" when NULL) so the handler can map it to a
 // human device hint without re-encoding.
 type ManagedCredential struct {
-	ID         int64
-	DeviceName string     // user-assigned label; may be empty
-	AAGUID     string     // canonical UUID string, or "" when NULL/absent
-	SignCount  int64      // clone-detection counter (0 for synced passkeys)
-	CreatedAt  time.Time  // when the credential was registered
-	LastUsedAt *time.Time // last successful assertion; nil if never used since column add
+	ID          int64
+	DeviceName  string     // user-assigned label; may be empty
+	AAGUID      string     // canonical UUID string, or "" when NULL/absent
+	SignCount   int64      // clone-detection counter (0 for synced passkeys)
+	BackupState bool       // BS flag from the last assertion: true when the passkey is synced
+	CreatedAt   time.Time  // when the credential was registered
+	LastUsedAt  *time.Time // last successful assertion; nil if never used since column add
 }
 
 // ListCredentialsForUser returns every passkey owned by userID as display-only
@@ -798,7 +814,7 @@ type ManagedCredential struct {
 // management API. Scoped strictly to the caller's own rows.
 func (s *Store) ListCredentialsForUser(ctx context.Context, userID int64) ([]ManagedCredential, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, device_name, aaguid, sign_count, created_at, last_used_at
+		`SELECT id, device_name, aaguid, sign_count, backup_state, created_at, last_used_at
 		   FROM passkey_credentials
 		  WHERE user_id = $1
 		  ORDER BY created_at DESC, id DESC`, userID)
@@ -814,7 +830,7 @@ func (s *Store) ListCredentialsForUser(ctx context.Context, userID int64) ([]Man
 		var aaguid *[16]byte
 		var createdAt *time.Time
 		var lastUsedAt *time.Time
-		if err := rows.Scan(&c.ID, &deviceName, &aaguid, &c.SignCount, &createdAt, &lastUsedAt); err != nil {
+		if err := rows.Scan(&c.ID, &deviceName, &aaguid, &c.SignCount, &c.BackupState, &createdAt, &lastUsedAt); err != nil {
 			return nil, fmt.Errorf("auth: scanning managed credential row: %w", err)
 		}
 		if deviceName != nil {

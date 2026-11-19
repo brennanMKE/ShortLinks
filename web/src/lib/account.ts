@@ -111,3 +111,20 @@ export function formatDate(iso: string | null | undefined, fallback = 'Never'): 
 export function lastUsedLabel(iso: string | null | undefined): string {
   return formatDate(iso, 'Never used');
 }
+
+/** The sync tag for a passkey (#0188): in words, not a flag. */
+export function syncLabel(cred: Pick<Credential, 'synced'>): string {
+  return cred.synced ? 'Synced' : 'Not synced';
+}
+
+/** Shown in place of Remove when the account has just the one passkey. */
+export const ONLY_PASSKEY_NOTE =
+  'This is your only passkey, so it cannot be removed. Add another through account recovery first.';
+
+/** "Mar 2026" for the "Added" text on a passkey row (#0188); raw string if unparseable. */
+export function formatMonthYear(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+}

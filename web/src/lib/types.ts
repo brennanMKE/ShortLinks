@@ -348,6 +348,10 @@ export interface Credential {
   sign_count: number;
   created_at: string;
   last_used_at: string | null;
+  /** True for the passkey this session was signed in with (#0188). */
+  current: boolean;
+  /** True when the passkey syncs between devices (backup state). */
+  synced: boolean;
 }
 
 /**
