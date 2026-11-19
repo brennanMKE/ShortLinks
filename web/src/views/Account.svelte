@@ -25,6 +25,7 @@
   import type { Credential } from '../lib/types';
   import { replace } from '../lib/hashRouter.svelte';
   import Button from '../lib/Button.svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   import Panel from '../lib/Panel.svelte';
   import ApiTokens from '../lib/ApiTokens.svelte';
   import Preferences from '../lib/Preferences.svelte';
@@ -104,11 +105,17 @@
     }
   }
 
-  async function handleRevoke(cred: Credential) {
+  // #0160: Revoke asks first via ConfirmDialog; confirming runs performRevoke.
+  let revokeTarget = $state<Credential | null>(null);
+  let signOutAllPrompt = $state(false);
+
+  function handleRevoke(cred: Credential) {
     if (!revokeAllowed) return;
-    if (!confirm(`Revoke "${cred.device_name}"? You will no longer be able to sign in with it.`)) {
-      return;
-    }
+    revokeTarget = cred;
+  }
+
+  async function performRevoke(cred: Credential) {
+    if (!revokeAllowed) return;
     revokingId = cred.id;
     clearRowError(cred.id);
     try {
@@ -116,7 +123,7 @@
       credentials = credentials.filter((c) => c.id !== cred.id);
     } catch (err) {
       if (handleAuthError(err)) return;
-      rowErrors = { ...rowErrors, [cred.id]: revokeErrorMessage(err) };
+      throw new Error(revokeErrorMessage(err));
     } finally {
       revokingId = null;
     }
@@ -143,24 +150,18 @@
   // back, so every session — including the one on the device the user is
   // trying to lock out — is still live. Only a 401 (the session backing this
   // very request is already gone) legitimately takes the signed-out branch.
-  async function handleSignOutEverywhere() {
-    const confirmed = confirm(
-      'Sign out everywhere?\n\n' +
-        'This immediately signs out every device and app currently signed in to ' +
-        'this account, including the iPhone app — not just this browser.\n\n' +
-        'Your passkeys are not affected. You can sign back in right away with ' +
-        'your existing passkey.',
-    );
-    if (!confirmed) return;
+  function handleSignOutEverywhere() {
+    signOutAllPrompt = true;
+  }
 
+  async function performSignOutEverywhere() {
     signingOutAll = true;
     signOutAllError = null;
     try {
       await logoutAll();
     } catch (err) {
       if (handleAuthError(err)) return;
-      signOutAllError = 'Could not sign out everywhere. Your other sessions may still be active. Please try again.';
-      return;
+      throw new Error('Could not sign out everywhere. Your other sessions may still be active. Please try again.');
     } finally {
       signingOutAll = false;
     }
@@ -171,6 +172,25 @@
 
   onMount(load);
 </script>
+
+<ConfirmDialog
+  open={revokeTarget !== null}
+  title="Revoke passkey?"
+  message={`You will no longer be able to sign in with "${revokeTarget?.device_name ?? ''}".`}
+  confirmLabel="Revoke passkey"
+  busyLabel="Revoking…"
+  oncancel={() => (revokeTarget = null)}
+  onconfirm={() => (revokeTarget ? performRevoke(revokeTarget) : undefined)}
+/>
+<ConfirmDialog
+  open={signOutAllPrompt}
+  title="Sign out everywhere?"
+  message="This immediately signs out every device and app signed in to this account, including the iPhone app. Your passkeys are not affected; you can sign back in right away."
+  confirmLabel="Sign out everywhere"
+  busyLabel="Signing out…"
+  oncancel={() => (signOutAllPrompt = false)}
+  onconfirm={performSignOutEverywhere}
+/>
 
 <div class="app-shell account-shell">
   <h1 class="page-title">Account</h1>

@@ -25,6 +25,7 @@
   import { formatDate, lastUsedLabel } from './account';
   import type { ApiToken } from './types';
   import Button from './Button.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
   import Panel from './Panel.svelte';
   import AccountRowMenu from './AccountRowMenu.svelte';
 
@@ -129,14 +130,14 @@
     copied = null;
   }
 
-  async function handleRevoke(token: ApiToken) {
-    if (
-      !confirm(
-        `Revoke "${token.name}"?\n\nAnything using this token stops working immediately. This cannot be undone.`,
-      )
-    ) {
-      return;
-    }
+  // #0160: Revoke asks first via ConfirmDialog; confirming runs performRevoke.
+  let revokeTarget = $state<ApiToken | null>(null);
+
+  function handleRevoke(token: ApiToken) {
+    revokeTarget = token;
+  }
+
+  async function performRevoke(token: ApiToken) {
     revokingId = token.id;
     if (token.id in rowErrors) {
       const { [token.id]: _removed, ...rest } = rowErrors;
@@ -151,7 +152,7 @@
         await load();
         return;
       }
-      rowErrors = { ...rowErrors, [token.id]: 'Could not revoke this token. Please try again.' };
+      throw new Error('Could not revoke this token. Please try again.');
     } finally {
       revokingId = null;
     }
@@ -159,6 +160,16 @@
 
   onMount(load);
 </script>
+
+<ConfirmDialog
+  open={revokeTarget !== null}
+  title="Revoke API token?"
+  message={`Anything using "${revokeTarget?.name ?? ''}" stops working immediately. This cannot be undone.`}
+  confirmLabel="Revoke token"
+  busyLabel="Revoking…"
+  oncancel={() => (revokeTarget = null)}
+  onconfirm={() => (revokeTarget ? performRevoke(revokeTarget) : undefined)}
+/>
 
 {#snippet tokenRow(token: ApiToken)}
   {@const warning = expiryWarning(token)}

@@ -60,6 +60,7 @@
   import NotFound from './NotFound.svelte';
   import type { Setting, FilterRule, AdminUser, AuditEntry } from '../lib/types';
   import Button from '../lib/Button.svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   import Panel from '../lib/Panel.svelte';
 
   // The section comes from the route (#0154): `#/admin/:section`, and bare
@@ -253,18 +254,21 @@
     }
   }
 
-  async function handleDeleteRule(rule: FilterRule) {
-    if (!confirm(`Delete the rule "${rule.pattern}"? This cannot be undone.`)) return;
+  // #0160: Delete asks first via ConfirmDialog; confirming runs performDeleteRule.
+  let deleteRuleTarget = $state<FilterRule | null>(null);
+
+  function handleDeleteRule(rule: FilterRule) {
+    deleteRuleTarget = rule;
+  }
+
+  async function performDeleteRule(rule: FilterRule) {
     clearRuleRowError(rule.id);
     try {
       await deleteFilterRule(rule.id);
       await loadRules();
     } catch (err) {
       if (handleAuthError(err)) return;
-      ruleRowError = {
-        ...ruleRowError,
-        [rule.id]: 'Could not delete the rule. Please try again.',
-      };
+      throw new Error('Could not delete the rule. Please try again.');
     }
   }
 
@@ -463,6 +467,16 @@
     void loadAudit();
   });
 </script>
+
+<ConfirmDialog
+  open={deleteRuleTarget !== null}
+  title="Delete filter rule?"
+  message={`The rule "${deleteRuleTarget?.pattern ?? ''}" will stop blocking URLs. This cannot be undone.`}
+  confirmLabel="Delete rule"
+  busyLabel="Deleting…"
+  oncancel={() => (deleteRuleTarget = null)}
+  onconfirm={() => (deleteRuleTarget ? performDeleteRule(deleteRuleTarget) : undefined)}
+/>
 
 {#if action.kind === 'not-found' && $currentUser?.is_admin}
   <NotFound />

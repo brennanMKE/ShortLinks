@@ -148,6 +148,7 @@
   import { formatDate } from '../lib/linkDetail';
   import type { CampaignDetail, LinkBucket, LinkSeries, PlacementBucket } from '../lib/types';
   import Button from '../lib/Button.svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
   import Breadcrumb from '../lib/Breadcrumb.svelte';
@@ -406,7 +407,14 @@
   let unassigning = $state<Record<string, boolean>>({});
   let unassignError = $state<string | null>(null);
 
-  async function handleUnassign(key: string) {
+  // #0160: Remove asks first via ConfirmDialog (until #0165 adds Undo).
+  let unassignTarget = $state<string | null>(null);
+
+  function handleUnassign(key: string) {
+    unassignTarget = key;
+  }
+
+  async function performUnassign(key: string) {
     if (!detail) return;
     const campaignSlug = detail.slug;
     unassigning = { ...unassigning, [key]: true };
@@ -419,7 +427,7 @@
         currentUser.set(null);
         return;
       }
-      unassignError = 'Could not remove this link. Please try again.';
+      throw new Error('Could not remove this link. Please try again.');
     } finally {
       const { [key]: _removed, ...rest } = unassigning;
       unassigning = rest;
@@ -430,6 +438,16 @@
     load(slug);
   });
 </script>
+
+<ConfirmDialog
+  open={unassignTarget !== null}
+  title="Remove link from campaign?"
+  message={`The short link "${unassignTarget ?? ''}" will no longer count towards this campaign. The link itself stays active.`}
+  confirmLabel="Remove link"
+  busyLabel="Removing…"
+  oncancel={() => (unassignTarget = null)}
+  onconfirm={() => (unassignTarget ? performUnassign(unassignTarget) : undefined)}
+/>
 
 <div class="app-shell detail-shell">
   <Breadcrumb crumbs={[{ label: 'Campaigns', to: '/campaigns' }, { label: detail?.name || slug }]} />

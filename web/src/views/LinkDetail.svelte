@@ -65,6 +65,7 @@
   import type { UtmParams } from '../lib/utm';
   import type { LinkDetail } from '../lib/types';
   import Button from '../lib/Button.svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
   import Breadcrumb from '../lib/Breadcrumb.svelte';
@@ -321,7 +322,15 @@
     }
   }
 
-  async function handleDeactivate() {
+  // #0160: Deactivate asks first via ConfirmDialog (until #0165 adds Undo).
+  let confirmDeactivate = $state(false);
+
+  function handleDeactivate() {
+    if (!detail || !canDeactivate) return;
+    confirmDeactivate = true;
+  }
+
+  async function performDeactivate() {
     if (!detail || !canDeactivate) return;
     const key = detail.key;
     deactivating = true;
@@ -334,7 +343,7 @@
         currentUser.set(null);
         return;
       }
-      loadError = 'Could not deactivate this link. Please try again.';
+      throw new Error('Could not deactivate this link. Please try again.');
     } finally {
       deactivating = false;
     }
@@ -344,6 +353,17 @@
     load(key);
   });
 </script>
+
+<ConfirmDialog
+  open={confirmDeactivate}
+  title="Deactivate link?"
+  message={`The short link "${detail?.key ?? ''}" will stop redirecting. Its click history is kept.`}
+  confirmLabel="Deactivate link"
+  busyLabel="Deactivating…"
+  returnFocus={moreBtn}
+  oncancel={() => (confirmDeactivate = false)}
+  onconfirm={performDeactivate}
+/>
 
 <svelte:document onclick={onDocClick} onkeydown={onDocKey} />
 
@@ -384,6 +404,7 @@
                 <button
                   type="button"
                   class="more-btn"
+                  bind:this={moreBtn}
                   aria-label="More actions"
                   aria-expanded={menuOpen}
                   aria-controls="more-actions"
@@ -396,7 +417,7 @@
                       type="button"
                       class="menu-item menu-item-danger"
                       disabled={deactivating}
-                      onclick={() => { menuOpen = false; handleDeactivate(); }}
+                      onclick={() => { menuOpen = false; moreBtn?.focus(); handleDeactivate(); }}
                     >{deactivating ? 'Deactivating…' : 'Deactivate link'}</button>
                   </div>
                 {/if}

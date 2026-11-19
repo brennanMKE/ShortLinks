@@ -56,6 +56,9 @@
             disabled={item.disabled}
             onclick={() => {
               open = false;
+              // Refocus the ⋯ button now: this item is about to unmount, and a
+              // dialog opened by onselect (#0160) returns focus to the trigger.
+              root?.querySelector<HTMLButtonElement>('.trigger')?.focus();
               item.onselect();
             }}
           >

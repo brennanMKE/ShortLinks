@@ -27,6 +27,7 @@
   import RowMenu from '../lib/RowMenu.svelte';
   import InlineBar from '../lib/InlineBar.svelte';
   import Button from '../lib/Button.svelte';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   import Panel from '../lib/Panel.svelte';
   import { pastedUrl } from '../lib/newLink';
   import { openNewLink } from '../lib/newLinkDialog';
@@ -102,16 +103,23 @@
     return '#/links/' + encodeURIComponent(key);
   }
 
-  async function handleDeactivate(link: Link) {
-    // Native confirm until ConfirmDialog (#0160) and undo (#0165) land.
-    if (!window.confirm(`Deactivate "${link.title || link.key}"? Its short URL will stop redirecting.`)) return;
+  // #0160: Deactivate asks first via ConfirmDialog (until #0165 adds Undo).
+  let deactivateTarget = $state<Link | null>(null);
+
+  function handleDeactivate(link: Link) {
+    deactivateTarget = link;
+  }
+
+  async function performDeactivate(key: string) {
     try {
-      await deactivateLink(link.key);
-      links.update((cur) => cur.map((l) => (l.key === link.key ? { ...l, active: false } : l)));
+      await deactivateLink(key);
+      links.update((cur) => cur.map((l) => (l.key === key ? { ...l, active: false } : l)));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
+        return;
       }
+      throw new Error('Could not deactivate this link. Please try again.');
     }
   }
 
@@ -163,6 +171,16 @@
     return unsubscribe;
   });
 </script>
+
+<ConfirmDialog
+  open={deactivateTarget !== null}
+  title="Deactivate link?"
+  message={`"${deactivateTarget?.title || deactivateTarget?.key || ''}" will stop redirecting. Its click history is kept.`}
+  confirmLabel="Deactivate link"
+  busyLabel="Deactivating…"
+  oncancel={() => (deactivateTarget = null)}
+  onconfirm={() => (deactivateTarget ? performDeactivate(deactivateTarget.key) : undefined)}
+/>
 
 <svelte:window onpaste={onPaste} />
 
