@@ -3,10 +3,10 @@ package handlers
 import (
 	"compress/gzip"
 	"io"
-	"strconv"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -38,8 +38,8 @@ func serveSPA(fsys fs.FS, path string) *httptest.ResponseRecorder {
 func TestSPAFaviconServedFromDist(t *testing.T) {
 	pngMagic := "\x89PNG\r\n\x1a\n" // first 8 bytes of any PNG file
 	fsys := distFS(map[string]string{
-		"index.html":       "<!doctype html><title>Short Links</title><div id=\"app\"></div>",
-		"favicon.png":      pngMagic + "fake-favicon-body",
+		"index.html":           "<!doctype html><title>Short Links</title><div id=\"app\"></div>",
+		"favicon.png":          pngMagic + "fake-favicon-body",
 		"apple-touch-icon.png": pngMagic + "fake-apple-touch-icon-body",
 	})
 
@@ -137,7 +137,6 @@ func TestSPAUnknownPathFallsBackToIndex(t *testing.T) {
 		t.Error("SPA fallback did not return index.html for unknown deep-link path")
 	}
 }
-
 
 // #0184: cache headers and precompressed assets.
 
