@@ -58,6 +58,7 @@
   import ClicksChart from '../lib/ClicksChart.svelte';
   import StatTile from '../lib/StatTile.svelte';
   import CampaignChips from '../lib/CampaignChips.svelte';
+  import { linksHrefFromOverview } from '../lib/linksList';
   import FilterBar from '../lib/FilterBar.svelte';
   import TopContent from '../lib/TopContent.svelte';
   import Link from '../lib/Link.svelte';
@@ -289,8 +290,9 @@
   // Dropdown and chip changes push history, so Back undoes them.
   const setFilter = (key: UtmKey, values: string[]) => navigate(overviewPath(withFilter(view, key, values)));
   const clearAll = () => navigate(overviewPath(clearFilters(view)));
-  // "View all links" carries the campaign focus where the Links page can use it (#0163).
-  const allLinksHref = '/links';
+  // "View all links" carries the campaign focus and the Source/Medium filters
+  // into the Links page (#0167); its other UTM filters have no list equivalent.
+  const allLinksHref = $derived(linksHrefFromOverview(view));
 
   // Custom range form.
   let customOpen = $state(false);

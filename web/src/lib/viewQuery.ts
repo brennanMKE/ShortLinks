@@ -36,6 +36,12 @@ export interface ViewState {
   sort: string;
   /** A view-specific tab key; '' is the view's default. */
   tab: string;
+  /** Links list search text (#0167); '' is no search. */
+  q: string;
+  /** Links list status (#0167): '' is Active; 'inactive', 'expired' or 'all'. */
+  status: string;
+  /** Links list page, 1-based (#0167). */
+  page: number;
 }
 
 export function emptyFilters(): UtmFilters {
@@ -51,6 +57,9 @@ export const DEFAULT_STATE: ViewState = {
   group: 'content',
   sort: '',
   tab: '',
+  q: '',
+  status: '',
+  page: 1,
 };
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -107,6 +116,11 @@ export function parse(query: string): ViewState {
   if (g === 'link' || g === 'source') s.group = g;
   s.sort = val('sort');
   s.tab = val('tab');
+  s.q = val('q');
+  const st = val('status');
+  if (st === 'inactive' || st === 'expired' || st === 'all') s.status = st;
+  const pg = Number(val('page'));
+  if (Number.isInteger(pg) && pg > 1) s.page = pg;
   return s;
 }
 
@@ -134,6 +148,9 @@ export function serialize(s: ViewState): string {
   if (s.group !== DEFAULT_STATE.group) add('group', s.group);
   if (s.sort) add('sort', encodeURIComponent(s.sort));
   if (s.tab) add('tab', encodeURIComponent(s.tab));
+  if (s.q) add('q', encodeURIComponent(s.q));
+  if (s.status) add('status', s.status);
+  if (s.page > 1) add('page', String(s.page));
   return parts.join('&');
 }
 
@@ -167,6 +184,15 @@ export function clearFilters(s: ViewState): ViewState {
  * lone value has its commas (and backslashes) escaped with a backslash. Either
  * way a value that contains a comma matches exactly (#0187).
  */
+/**
+ * Appends one filter parameter's values: a repeated parameter per value; a
+ * lone value has its commas and backslashes escaped (#0187). Shared by the
+ * reports and GET /api/links, which parse filters the same way.
+ */
+export function appendFilterValues(q: URLSearchParams, key: string, vals: string[]): void {
+  for (const v of vals) q.append(key, vals.length === 1 ? v.replace(/[\\,]/g, '\\$&') : v);
+}
+
 export function reportQuery(s: ViewState, tz: string, extra: Record<string, string> = {}): string {
   const q = new URLSearchParams();
   q.set('tz', tz);
@@ -178,8 +204,7 @@ export function reportQuery(s: ViewState, tz: string, extra: Record<string, stri
   }
   if (s.campaign) q.set('campaign', s.campaign);
   for (const k of UTM_KEYS) {
-    const vals = s.filters[k];
-    for (const v of vals) q.append(k, vals.length === 1 ? v.replace(/[\\,]/g, '\\$&') : v);
+    appendFilterValues(q, k, s.filters[k]);
   }
   for (const [k, v] of Object.entries(extra)) q.set(k, v);
   return q.toString();

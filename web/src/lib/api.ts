@@ -4,6 +4,7 @@
 // `credentials: 'include'`, and throw a typed ApiError on a non-2xx response.
 
 import type { HomeInfo } from './home';
+import { appendFilterValues } from './viewQuery';
 import type { TopContentData } from './campaignLinks';
 import type { LinkPerformance } from './linkReport';
 import type {
@@ -128,6 +129,43 @@ export function getPublicHome(): Promise<HomeInfo> {
 /** GET /api/links — the caller's links (paginated, most-recent-first). */
 export function listLinks(page = 1, perPage = 20): Promise<LinkList> {
   return apiGet<LinkList>(`/api/links?page=${page}&per_page=${perPage}`);
+}
+
+/** Parameters of the #0144 enriched list; the first request that sends any switches the response shape. */
+export interface LinkListQuery {
+  page: number;
+  perPage: number;
+  q?: string;
+  campaign?: string;
+  source?: string[];
+  medium?: string[];
+  /** 'active' | 'inactive' | 'expired' | 'all'. An absent status means all, so the SPA always sends one. */
+  status: string;
+  /** 'created' | '-created' | 'clicks' | 'clicks_window' | 'title' */
+  sort: string;
+  window?: '7d' | '30d' | '90d';
+  tz?: string;
+}
+
+/** The query string for GET /api/links with the #0144 parameters. */
+export function linkListQueryString(p: LinkListQuery): string {
+  const q = new URLSearchParams();
+  q.set('page', String(p.page));
+  q.set('per_page', String(p.perPage));
+  if (p.q) q.set('q', p.q);
+  if (p.campaign) q.set('campaign', p.campaign);
+  appendFilterValues(q, 'source', p.source ?? []);
+  appendFilterValues(q, 'medium', p.medium ?? []);
+  q.set('status', p.status);
+  q.set('sort', p.sort);
+  if (p.window) q.set('window', p.window);
+  if (p.tz) q.set('tz', p.tz);
+  return q.toString();
+}
+
+/** GET /api/links with search, filters and sort (#0144), across all pages. */
+export function searchLinks(p: LinkListQuery): Promise<LinkList> {
+  return apiGet<LinkList>('/api/links?' + linkListQueryString(p));
 }
 
 /** GET /api/links/{key} — link detail plus UTM click stats. */

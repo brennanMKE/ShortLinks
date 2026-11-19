@@ -238,6 +238,7 @@
 
   .bulk-bar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-2) var(--space-3);

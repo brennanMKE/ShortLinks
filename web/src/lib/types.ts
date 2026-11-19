@@ -48,6 +48,12 @@ export interface Link {
   utm_term: string;
   utm_content: string;
   placement: string;
+  /** Present on the enriched list response (#0144), i.e. when search/filter/sort params are sent. */
+  content_key?: string;
+  label?: string;
+  campaign_slug?: string | null;
+  /** Clicks in the requested `window` (#0144). */
+  clicks_window?: number;
 }
 
 /** GET /api/links — paginated list envelope. */
@@ -111,7 +117,7 @@ export interface LinkDetail extends Link {
    * "" otherwise, matching campaign_id being null.
    */
   campaign_name?: string;
-  campaign_slug?: string;
+  campaign_slug?: string | null;
 }
 
 /**
