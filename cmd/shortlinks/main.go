@@ -597,5 +597,7 @@ func buildMux(
 	if outerMiddleware != nil {
 		handler = outerMiddleware(mux.mux)
 	}
-	return handler, mux.patterns
+	// Compress (#0184) gzips text responses; the MCP dispatcher above stays on
+	// the bare mux. SSE and MCP streams are never compressed.
+	return middleware.Compress(handler), mux.patterns
 }

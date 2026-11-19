@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"compress/gzip"
+	"io"
+	"strconv"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -135,3 +138,127 @@ func TestSPAUnknownPathFallsBackToIndex(t *testing.T) {
 	}
 }
 
+
+// #0184: cache headers and precompressed assets.
+
+func serveSPAReq(fsys fs.FS, req *http.Request) *httptest.ResponseRecorder {
+	h := NewSPAHandler(fsys)
+	mux := http.NewServeMux()
+	mux.Handle("GET /", h)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+var compressibleJS = strings.Repeat("console.log('x');\n", 500)
+
+func assetFS() fs.FS {
+	return distFS(map[string]string{
+		"index.html":          "<!doctype html><title>Short Links</title>",
+		"assets/index-abc.js": compressibleJS,
+		"favicon.png":         "\x89PNG\r\n\x1a\nxxxx",
+	})
+}
+
+func TestSPAHashedAssetCacheImmutable(t *testing.T) {
+	for _, ae := range []string{"", "gzip"} {
+		req := httptest.NewRequest(http.MethodGet, "/assets/index-abc.js", nil)
+		if ae != "" {
+			req.Header.Set("Accept-Encoding", ae)
+		}
+		rec := serveSPAReq(assetFS(), req)
+		if got := rec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+			t.Errorf("AE=%q: Cache-Control = %q", ae, got)
+		}
+	}
+}
+
+func TestSPAShellCacheNoCache(t *testing.T) {
+	for _, p := range []string{"/", "/campaigns/x", "/no-such-page"} {
+		rec := serveSPA(assetFS(), p)
+		if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("%s: Cache-Control = %q, want no-cache", p, got)
+		}
+	}
+}
+
+func TestSPAMissingAssetIs404NoCacheNotShell(t *testing.T) {
+	for _, p := range []string{"/assets/missing-abc.js", "/assets/chunk", "/assets/"} {
+		rec := serveSPA(assetFS(), p)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404", p, rec.Code)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("%s: Cache-Control = %q, want no-cache", p, got)
+		}
+		if strings.Contains(rec.Body.String(), "<!doctype") {
+			t.Errorf("%s: served the HTML shell", p)
+		}
+	}
+}
+
+func TestSPARootFileHasNoImmutable(t *testing.T) {
+	rec := serveSPA(assetFS(), "/favicon.png")
+	if strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
+		t.Errorf("favicon got immutable Cache-Control")
+	}
+}
+
+func TestSPAPrecompressedAssetGzip(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/assets/index-abc.js", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := serveSPAReq(assetFS(), req)
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("Content-Encoding = %q", rec.Header().Get("Content-Encoding"))
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	if cl := rec.Header().Get("Content-Length"); cl != strconv.Itoa(rec.Body.Len()) {
+		t.Errorf("Content-Length = %q, body %d", cl, rec.Body.Len())
+	}
+	if !strings.Contains(strings.Join(rec.Header().Values("Vary"), ","), "Accept-Encoding") {
+		t.Errorf("Vary missing Accept-Encoding")
+	}
+	zr, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _ := io.ReadAll(zr)
+	if string(out) != compressibleJS {
+		t.Errorf("decompressed body mismatch")
+	}
+}
+
+func TestSPAPrecompressedAssetHead(t *testing.T) {
+	req := httptest.NewRequest(http.MethodHead, "/assets/index-abc.js", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := serveSPAReq(assetFS(), req)
+	if rec.Body.Len() != 0 {
+		t.Errorf("HEAD returned a body")
+	}
+}
+
+func TestSPAPrecompressedAssetIdentity(t *testing.T) {
+	rec := serveSPA(assetFS(), "/assets/index-abc.js")
+	if rec.Header().Get("Content-Encoding") != "" || rec.Body.String() != compressibleJS {
+		t.Errorf("identity response altered: encoding %q", rec.Header().Get("Content-Encoding"))
+	}
+}
+
+func TestSPAPrecompressedAssetRangeFallsBack(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/assets/index-abc.js", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Range", "bytes=0-9")
+	rec := serveSPAReq(assetFS(), req)
+	if rec.Code != http.StatusPartialContent || rec.Body.String() != compressibleJS[:10] {
+		t.Errorf("status %d body %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSPANoAssetsDirStillConstructs(t *testing.T) {
+	rec := serveSPA(distFS(map[string]string{"index.html": "<!doctype html>"}), "/")
+	if rec.Code != http.StatusOK {
+		t.Errorf("status %d", rec.Code)
+	}
+}
