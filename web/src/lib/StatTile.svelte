@@ -92,6 +92,17 @@
     color: var(--text-muted);
     cursor: pointer;
   }
+  @media (max-width: 899px) {
+    /* 16px glyph, 40px hit area. */
+    .help {
+      position: relative;
+    }
+    .help::after {
+      content: '';
+      position: absolute;
+      inset: -13px;
+    }
+  }
   .help:hover {
     color: var(--text);
     border-color: var(--text-muted);

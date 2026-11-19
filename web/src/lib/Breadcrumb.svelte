@@ -61,6 +61,17 @@
     color: var(--text-muted);
     text-decoration: none;
   }
+  @media (max-width: 899px) {
+    :global(.crumb-link) {
+      display: inline-flex;
+      align-items: center;
+      min-height: 40px;
+    }
+    li {
+      display: inline-flex;
+      align-items: center;
+    }
+  }
   :global(.crumb-link:hover) {
     color: var(--accent);
     text-decoration: underline;

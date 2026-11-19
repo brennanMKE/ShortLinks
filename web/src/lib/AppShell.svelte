@@ -252,9 +252,19 @@
       margin-right: 0;
     }
     :global(.new-link-btn) {
-      width: 36px;
+      width: 40px;
+      min-height: 40px;
       justify-content: center;
       padding: 0;
+    }
+    .avatar {
+      width: 40px;
+      height: 40px;
+    }
+    :global(.shell-brand) {
+      min-height: 40px;
+      display: inline-flex;
+      align-items: center;
     }
     .shell-tabs {
       order: 3;

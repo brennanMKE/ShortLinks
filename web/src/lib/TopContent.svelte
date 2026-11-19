@@ -207,6 +207,12 @@
     border-radius: var(--radius);
     font-size: 12px;
   }
+  @media (max-width: 899px) {
+    .exp {
+      width: 40px;
+      height: 40px;
+    }
+  }
   .exp:hover {
     background: var(--bg-header);
     color: var(--text);
@@ -254,6 +260,11 @@
     color: var(--accent);
     text-decoration: underline;
     cursor: pointer;
+  }
+  @media (max-width: 899px) {
+    .more {
+      min-height: 40px;
+    }
   }
   .tail {
     margin-left: auto;

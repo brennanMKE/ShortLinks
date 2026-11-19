@@ -20,9 +20,11 @@
     values: FacetValue[];
     selected: string[];
     onchange: (next: string[]) => void;
+    /** Phone filter sheet (#0173): no trigger or popover, just the heading and the checkbox list as a section. */
+    inline?: boolean;
   }
 
-  let { label, values, selected, onchange }: Props = $props();
+  let { label, values, selected, onchange, inline = false }: Props = $props();
 
   /** The search box appears above this many values. */
   const SEARCH_ABOVE = 8;
@@ -79,22 +81,7 @@
 
 <svelte:window onclick={onWindowClick} />
 
-<div class="facet" bind:this={wrap} onkeydown={onKey} onfocusout={onFocusOut} role="presentation">
-  <button
-    type="button"
-    class="trigger"
-    class:active={selected.length > 0}
-    bind:this={btn}
-    aria-controls={panelId}
-    aria-expanded={open}
-    onclick={() => (open ? close(false) : openPanel())}
-  >
-    <span>{label}</span>
-    {#if selected.length > 0}<span class="n" aria-label="{selected.length} selected">{selected.length}</span>{/if}
-    <span class="caret" aria-hidden="true">▾</span>
-  </button>
-  {#if open}
-    <div class="panel" id={panelId} role="group" aria-label="{label} values">
+{#snippet values_list()}
       {#if searchable}
         <input
           type="search"
@@ -126,6 +113,39 @@
           {/each}
         </ul>
       {/if}
+{/snippet}
+
+{#if inline}
+  <section class="facet-inline" aria-label="{label} values">
+    <div class="inline-h">
+      <h3>
+        {label}
+        {#if selected.length > 0}<span class="n" aria-label="{selected.length} selected">{selected.length}</span>{/if}
+      </h3>
+      {#if selected.length > 0}
+        <button type="button" class="btn-link inline-clear" onclick={() => onchange([])}>Clear</button>
+      {/if}
+    </div>
+    <div class="inline-body">{@render values_list()}</div>
+  </section>
+{:else}
+<div class="facet" bind:this={wrap} onkeydown={onKey} onfocusout={onFocusOut} role="presentation">
+  <button
+    type="button"
+    class="trigger"
+    class:active={selected.length > 0}
+    bind:this={btn}
+    aria-controls={panelId}
+    aria-expanded={open}
+    onclick={() => (open ? close(false) : openPanel())}
+  >
+    <span>{label}</span>
+    {#if selected.length > 0}<span class="n" aria-label="{selected.length} selected">{selected.length}</span>{/if}
+    <span class="caret" aria-hidden="true">▾</span>
+  </button>
+  {#if open}
+    <div class="panel" id={panelId} role="group" aria-label="{label} values">
+      {@render values_list()}
       <div class="foot">
         <button type="button" class="btn-link" disabled={selected.length === 0} onclick={() => onchange([])}>Clear</button>
         <button type="button" class="btn-link" onclick={() => close(true)}>Done</button>
@@ -133,6 +153,8 @@
     </div>
   {/if}
 </div>
+
+{/if}
 
 <style>
   .facet {
@@ -247,19 +269,38 @@
     opacity: 0.5;
     cursor: default;
   }
-  @media (max-width: 600px) {
-    /* The bar can scroll or wrap, so the panel opens as a fixed sheet instead of hanging off its trigger. */
-    .panel {
-      position: fixed;
-      left: var(--space-3);
-      right: var(--space-3);
-      top: auto;
-      bottom: var(--space-3);
-      width: auto;
-      max-width: none;
-    }
-    ul {
-      max-height: 40vh;
-    }
+  .facet-inline {
+    padding: var(--space-3) 0;
+    border-bottom: var(--border-w) solid var(--border);
+  }
+  .inline-h {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-1);
+  }
+  .inline-h h3 {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    font-size: var(--fs-base);
+    font-weight: 600;
+  }
+  .inline-clear {
+    margin-left: auto;
+    min-height: 40px;
+    font-weight: 400;
+  }
+  .inline-body ul {
+    max-height: 200px;
+  }
+  .inline-body label {
+    min-height: 40px;
+    padding: 0;
+  }
+  .inline-body .q {
+    width: 100%;
+    margin: var(--space-1) 0;
   }
 </style>

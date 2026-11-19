@@ -196,6 +196,11 @@
   .more-menu a:hover {
     background: var(--bg-subtle);
   }
+  @media (max-width: 899px) {
+    .chip {
+      min-height: 40px;
+    }
+  }
   @media (max-width: 600px) {
     .chips {
       flex-wrap: nowrap;

@@ -696,6 +696,12 @@
     height: 260px;
   }
 
+  @media (max-width: 899px) {
+    .seg,
+    .group .seg {
+      min-height: 40px;
+    }
+  }
   @media (max-width: 900px) {
     .tiles {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -718,6 +724,11 @@
       flex-direction: column;
       align-items: stretch;
       gap: var(--space-1);
+    }
+    /* The link's 40px tap overlay reaches 12px above it; keep that clear of the chip row. */
+    .focus :global(.open-campaign) {
+      align-self: flex-start;
+      margin-top: var(--space-3);
     }
     .bots {
       margin-left: 0;

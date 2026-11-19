@@ -133,6 +133,11 @@
     opacity: 0.5;
     cursor: default;
   }
+  @media (max-width: 899px) {
+    .seg {
+      min-height: 40px;
+    }
+  }
   @media (max-width: 560px) {
     .long {
       display: none;

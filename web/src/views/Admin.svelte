@@ -47,6 +47,9 @@
   import Panel from '../lib/Panel.svelte';
   import AdminFilters from '../lib/AdminFilters.svelte';
   import AdminAudit from '../lib/AdminAudit.svelte';
+  import DataTable from '../lib/DataTable.svelte';
+  import TwoLineCell from '../lib/TwoLineCell.svelte';
+  import type { Column } from '../lib/dataTable';
 
   // The section comes from the route (#0154): `#/admin/:section`, and bare
   // `#/admin` redirects to the default section.
@@ -132,6 +135,14 @@
   }
 
   // ── Users ─────────────────────────────────────────────────────────────────
+  // Users list: a table at desktop width, cards below 900px (#0173).
+  const columns: Column<AdminUser>[] = [
+    { key: 'email', label: 'Email', mobile: 'title' },
+    { key: 'status', label: 'Status', width: '7rem', mobile: 'metric' },
+    { key: 'last', label: 'Last login', width: '11rem', mobile: 'meta' },
+    { key: 'actions', label: 'Actions', width: '9rem', align: 'right', hideLabel: true, mobile: 'actions' },
+  ];
+
   let users = $state<AdminUser[]>([]);
   let usersLoading = $state(true);
   let usersError = $state<string | null>(null);
@@ -365,58 +376,32 @@
         {:else if users.length === 0}
           <p class="text-muted">No users found.</p>
         {:else}
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Email</th>
-                  <th>Admin</th>
-                  <th>Status</th>
-                  <th>Last login</th>
-                  <th class="actions-col">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each users as user (user.id)}
-                  <tr>
-                    <td>{user.email}</td>
-                    <td>{user.is_admin ? 'Admin' : '—'}</td>
-                    <td>
-                      <span
-                        class="badge"
-                        class:badge-success={user.active}
-                        class:badge-danger={!user.active}
-                      >
-                        {user.active ? 'Active' : 'Inactive'}
-                      </span>
-                    </td>
-                    <td>{user.last_login_at ? formatDateTime(user.last_login_at) : 'Never'}</td>
-                    <td class="actions-col">
-                      {#if canDeactivate(user, $currentUser?.id ?? -1)}
-                        <Button variant="danger" onclick={() => openDeactivate(user)}>Deactivate</Button>
-                      {:else if !user.active}
-                        <Button
-                          disabled={reactivatingId === user.id}
-                          onclick={() => handleReactivate(user)}
-                        >
-                          {reactivatingId === user.id ? 'Reactivating…' : 'Reactivate'}
-                        </Button>
-                      {:else}
-                        <span class="text-muted">—</span>
-                      {/if}
-                    </td>
-                  </tr>
-                  {#if userRowError[user.id]}
-                    <tr>
-                      <td colspan="5">
-                        <p class="text-error" role="alert">{userRowError[user.id]}</p>
-                      </td>
-                    </tr>
-                  {/if}
-                {/each}
-              </tbody>
-            </table>
-          </div>
+          <DataTable {columns} rows={users} rowKey={(u) => String(u.id)} caption="Users">
+            {#snippet cell(user, col)}
+              {#if col.key === 'email'}
+                <TwoLineCell title={user.email} meta={user.is_admin ? 'Admin' : ''} dim={!user.active} />
+                {#if userRowError[user.id]}
+                  <p class="text-error row-err" role="alert">{userRowError[user.id]}</p>
+                {/if}
+              {:else if col.key === 'status'}
+                <span class="badge" class:badge-success={user.active} class:badge-danger={!user.active}>
+                  {user.active ? 'Active' : 'Inactive'}
+                </span>
+              {:else if col.key === 'last'}
+                {user.last_login_at ? formatDateTime(user.last_login_at) : 'Never logged in'}
+              {:else if col.key === 'actions'}
+                {#if canDeactivate(user, $currentUser?.id ?? -1)}
+                  <Button variant="danger" onclick={() => openDeactivate(user)}>Deactivate</Button>
+                {:else if !user.active}
+                  <Button disabled={reactivatingId === user.id} onclick={() => handleReactivate(user)}>
+                    {reactivatingId === user.id ? 'Reactivating…' : 'Reactivate'}
+                  </Button>
+                {:else}
+                  <span class="text-muted">—</span>
+                {/if}
+              {/if}
+            {/snippet}
+          </DataTable>
         {/if}
       </Panel>
 
@@ -577,6 +562,15 @@
     margin: var(--space-1) 0 0;
     font-size: var(--fs-sm);
   }
+  @media (max-width: 899px) {
+    .toggle {
+      min-height: 40px;
+    }
+  }
+  .row-err {
+    margin: var(--space-1) 0 0;
+    white-space: normal;
+  }
   .toggle {
     flex-shrink: 0;
     min-width: 4rem;
@@ -598,9 +592,6 @@
   .toggle:disabled {
     opacity: 0.5;
     cursor: default;
-  }
-  .actions-col {
-    white-space: nowrap;
   }
   .modal-backdrop {
     position: fixed;

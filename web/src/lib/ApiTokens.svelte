@@ -474,6 +474,12 @@
   .docs-link a {
     color: var(--accent);
   }
+  @media (max-width: 899px) {
+    /* Padding on an inline link widens its tap area without moving the text. */
+    .docs-link a {
+      padding: 12px 2px;
+    }
+  }
   @media (max-width: 480px) {
     .secret-row {
       flex-direction: column;

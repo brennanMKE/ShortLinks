@@ -41,6 +41,8 @@
   import RowMenu from '../lib/RowMenu.svelte';
   import InlineBar from '../lib/InlineBar.svelte';
   import FacetFilter from '../lib/FacetFilter.svelte';
+  import FilterSheet from '../lib/FilterSheet.svelte';
+  import { createPhone } from '../lib/phone.svelte';
   import Button from '../lib/Button.svelte';
   import { pushToast } from '../lib/toasts';
   import { deactivatedMessage, reactivateErrorMessage } from '../lib/linkActions';
@@ -97,7 +99,11 @@
   let reportFacets = $state<{ source: FacetValue[]; medium: FacetValue[] }>({ source: [], medium: [] });
   let selected = $state<Set<string>>(new Set());
   let expanded = $state<Set<string>>(new Set());
+  const phone = createPhone();
   let filtersOpen = $state(false);
+  $effect(() => {
+    if (!phone.matches) filtersOpen = false;
+  });
 
   const totalPages = $derived(Math.max(1, Math.ceil(total / perPage)));
   const hasPrev = $derived(view.page > 1);
@@ -525,16 +531,19 @@
           enterkeyhint="search"
         />
       </label>
+      {#if phone.matches}
       <button
         type="button"
         class="filters-toggle"
-        aria-expanded={filtersOpen}
-        aria-controls="links-filters"
-        onclick={() => (filtersOpen = !filtersOpen)}>Filters{filterCount ? ` (${filterCount})` : ''}</button
+        class:active={filterCount > 0}
+        aria-haspopup="dialog"
+        onclick={() => (filtersOpen = true)}>Filters{filterCount ? ` (${filterCount})` : ''}</button
       >
+      {/if}
     </div>
 
-    <div class="filters" id="links-filters" class:open={filtersOpen}>
+    {#if !phone.matches}
+      <div class="filters">
       <label class="sel">
         <span>Campaign</span>
         <select value={view.campaign} onchange={(e) => go({ ...view, campaign: e.currentTarget.value })}>
@@ -551,7 +560,31 @@
           {#each STATUSES as s (s.key)}<option value={s.key}>{s.label}</option>{/each}
         </select>
       </label>
-    </div>
+      </div>
+    {:else if filtersOpen}
+      <FilterSheet count={filterCount} onclear={clearAll} onclose={() => (filtersOpen = false)}>
+        <div class="sheet-fields">
+      <label class="sel stack">
+        <span>Campaign</span>
+        <select value={view.campaign} onchange={(e) => go({ ...view, campaign: e.currentTarget.value })}>
+          <option value="">All</option>
+          <option value="none">No campaign</option>
+          {#each campaignOptions as c (c.slug)}<option value={c.slug}>{c.name}</option>{/each}
+        </select>
+      </label>
+        </div>
+        <FacetFilter inline label="Source" values={sourceFacet} selected={view.filters.source} onchange={(v) => setFilter('source', v)} />
+        <FacetFilter inline label="Medium" values={mediumFacet} selected={view.filters.medium} onchange={(v) => setFilter('medium', v)} />
+        <div class="sheet-fields">
+      <label class="sel stack">
+        <span>Status</span>
+        <select value={view.status} onchange={(e) => go({ ...view, status: e.currentTarget.value })}>
+          {#each STATUSES as s (s.key)}<option value={s.key}>{s.label}</option>{/each}
+        </select>
+      </label>
+        </div>
+      </FilterSheet>
+    {/if}
 
     <div class="row3">
       <div class="seg-group" role="group" aria-label="Group by">
@@ -703,7 +736,8 @@
     margin: 0;
   }
   .filters-toggle {
-    display: none;
+    display: inline-flex;
+    align-items: center;
     flex: 0 0 auto;
     min-height: 40px;
     padding: 0 var(--space-3);
@@ -872,17 +906,63 @@
     border-top: var(--border-w) solid var(--border);
     flex-wrap: wrap;
   }
-  /* Phone: the filters fold behind a Filters button instead of a wall of controls. */
-  @media (max-width: 600px) {
+  .filters-toggle.active {
+    border-color: var(--accent);
+    background: var(--accent-subtle);
+    font-weight: 600;
+  }
+  .sheet-fields {
+    padding: var(--space-2) 0;
+    border-bottom: var(--border-w) solid var(--border);
+  }
+  .sel.stack {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-1);
+    margin: var(--space-2) 0;
+    font-size: var(--fs-base);
+    font-weight: 600;
+    color: var(--text);
+  }
+  .sel.stack select {
+    width: 100%;
+    min-height: 44px;
+  }
+  /* Phone: the filter button is the only filter control on the toolbar; chips scroll on one line. */
+  @media (max-width: 899px) {
     .filters-toggle {
-      display: inline-flex;
-      align-items: center;
+      min-height: 44px;
     }
-    .filters {
-      display: none;
+    .search input {
+      min-height: 44px;
     }
-    .filters.open {
-      display: flex;
+    .seg {
+      min-height: 40px;
+    }
+    .sel select {
+      min-height: 40px;
+    }
+    .chips {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+    }
+    .chip {
+      flex: 0 0 auto;
+      min-height: 40px;
+      max-width: 80vw;
+    }
+    .chip button {
+      width: 40px;
+      height: 40px;
+      border-radius: 20px;
+    }
+    .clear {
+      flex: 0 0 auto;
+      margin-left: 0;
+      min-height: 40px;
     }
     .sort {
       margin-left: auto;

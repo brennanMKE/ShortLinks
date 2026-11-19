@@ -17,7 +17,7 @@
   let { title, meta = '', href, dim = false, tag = '', wrap = false, wrapAlways = false }: Props = $props();
 </script>
 
-<div class="two-line" class:dim class:wrap class:wrap-always={wrapAlways}>
+<div class="two-line" class:dim class:wrap class:wrap-always={wrapAlways} class:linked={!!href}>
   <span class="l1row">
     {#if href}
       <a class="line1" {href} {title}>{title}</a>
@@ -63,6 +63,21 @@
     line-height: 1.3;
   }
   a.line1:hover { color: var(--accent); text-decoration: underline; }
+  /* Phone: the whole two-line cell is the tap target for the title link (at least 40px),
+     without changing how it looks. The overlay's containing block is .two-line, so the
+     link's own overflow clipping does not cut it off. */
+  @media (max-width: 899px) {
+    .two-line.linked {
+      position: relative;
+      min-height: 40px;
+      justify-content: center;
+    }
+    a.line1::after {
+      content: '';
+      position: absolute;
+      inset: -4px 0;
+    }
+  }
   @media (max-width: 899px) {
     .wrap .line1 {
       white-space: normal;

@@ -210,6 +210,29 @@ body {
   }
 }
 
+/* Phone tap targets (#0173): form controls are at least 40px tall below 900px. */
+@media (max-width: 899px) {
+  html select {
+    height: 40px;
+    min-height: 40px;
+  }
+  html input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='hidden']) {
+    min-height: 40px;
+  }
+}
+
+/* Inline text links keep their look but get a 40px tall hit area on phones (#0173). */
+@media (max-width: 899px) {
+  .text-link {
+    position: relative;
+  }
+  .text-link::after {
+    content: '';
+    position: absolute;
+    inset: -12px -2px;
+  }
+}
+
 /* Two-column portal layout (optional) */
 .app-columns {
   display: grid;

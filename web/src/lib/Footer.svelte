@@ -30,6 +30,17 @@
     text-decoration: none;
   }
 
+  @media (max-width: 899px) {
+    .footer-link {
+      position: relative;
+    }
+    .footer-link::after {
+      content: '';
+      position: absolute;
+      inset: -14px -4px;
+    }
+  }
+
   .footer-link:hover {
     color: var(--text-muted);
     text-decoration: underline;

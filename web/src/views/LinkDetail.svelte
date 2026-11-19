@@ -742,7 +742,7 @@
   .head-actions { display: flex; gap: var(--space-2); align-items: center; }
   .menu-wrap { position: relative; }
   .more-btn {
-    min-height: 32px; min-width: 32px; background: var(--bg-panel); color: var(--text);
+    min-height: 40px; min-width: 40px; background: var(--bg-panel); color: var(--text);
     border: var(--border-w) solid var(--border-strong); border-radius: var(--radius);
     font-size: var(--fs-lg); line-height: 1; cursor: pointer;
   }
@@ -794,7 +794,7 @@
   .change-flat { color: var(--text-muted); }
   .range { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-3); }
   .range-btn {
-    min-height: 32px; padding: 0 var(--space-3); font: inherit; font-size: var(--fs-sm);
+    min-height: 40px; padding: 0 var(--space-3); font: inherit; font-size: var(--fs-sm);
     background: var(--bg-panel); color: var(--text); cursor: pointer;
     border: var(--border-w) solid var(--border-strong); border-radius: var(--radius);
   }
@@ -864,6 +864,23 @@
   .qr-link {
     color: var(--accent);
     text-decoration: underline;
+  }
+  /* Phone: keep the look, make each of these a 40px tall tap target. */
+  @media (max-width: 899px) {
+    .short-url,
+    .qr-link {
+      position: relative;
+    }
+    .short-url::after,
+    .qr-link::after {
+      content: '';
+      position: absolute;
+      inset: -10px -3px;
+    }
+    .url-box .dest-link {
+      padding: 12px 0;
+      margin: -12px 0;
+    }
   }
   .utm-grid {
     display: grid;

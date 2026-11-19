@@ -136,6 +136,17 @@
               {/if}
             {/each}
             <td class="num total-col" data-label="Total">{row.total.toLocaleString()}</td>
+            <td class="chips-only">
+              <div class="chip-line" role="group" aria-label="Clicks by {byLabel}">
+                {#each matrix.columns as col (col)}
+                  {@const cell = row.cells[col]}
+                  {#if cell}
+                    <a class="mchip" href={'#/links/' + encodeURIComponent(cellKey(cell))} style={shade(cell.clicks)}>{columnLabel(col)} <b>{cell.clicks.toLocaleString()}</b></a>
+                  {/if}
+                {/each}
+                <span class="mchip total">Total <b>{row.total.toLocaleString()}</b></span>
+              </div>
+            </td>
           </tr>
           {#each kids as kid (kid.key)}
             <tr class="child">
@@ -342,7 +353,10 @@
   }
 
   /* Phones: one card per content, a chip per channel. */
-  @media (max-width: 640px) {
+  .chips-only {
+    display: none;
+  }
+  @media (max-width: 899px) {
     .matrix,
     .matrix tbody,
     .matrix tfoot,
@@ -370,31 +384,72 @@
       min-width: 0;
       margin-bottom: var(--space-2);
     }
-    .matrix .cell,
-    .matrix .mrow td.total-col,
-    .matrix tfoot td {
-      display: inline-block;
-      margin: 0 var(--space-1) var(--space-1) 0;
-      padding: 2px var(--space-2);
-      border-radius: 12px;
-      text-align: left;
-      border: var(--border-w) solid var(--border);
+    /* One chip per channel on a single line that scrolls sideways; the table cells behind it stay for desktop. */
+    .matrix .mrow .cell,
+    .matrix .mrow td.total-col {
+      display: none;
     }
-    .matrix .cell::before,
-    .matrix .mrow td.total-col::before,
+    .matrix .mrow td.chips-only {
+      display: block;
+    }
+    .chip-line {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: var(--space-1);
+      overflow-x: auto;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+    }
+    .mchip {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-1);
+      min-height: 40px;
+      padding: 0 var(--space-3);
+      border: var(--border-w) solid var(--border);
+      border-radius: 20px;
+      color: var(--text);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .mchip.total {
+      background: var(--bg-subtle);
+      color: var(--text-muted);
+    }
+    .mchip b {
+      font-variant-numeric: tabular-nums;
+    }
+    .matrix tfoot tr {
+      display: flex;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: var(--space-1);
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .matrix tfoot th.title-col {
+      flex: 0 0 auto;
+      margin: 0 var(--space-2) 0 0;
+    }
+    .matrix tfoot td {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      min-height: 40px;
+      padding: 0 var(--space-3);
+      border: var(--border-w) solid var(--border);
+      border-radius: 20px;
+      white-space: nowrap;
+    }
     .matrix tfoot td::before {
       content: attr(data-label) ' ';
       color: var(--text-muted);
       font-weight: 400;
+      margin-right: 0.3em;
     }
-    .matrix .cell a {
-      display: inline;
-    }
-    .matrix .cell.empty {
-      display: none;
-    }
-    .matrix .mrow td.total-col {
-      background: var(--bg-subtle);
+    .chip {
+      min-height: 40px;
     }
     .child {
       padding: var(--space-2) 0 var(--space-2) var(--space-4);

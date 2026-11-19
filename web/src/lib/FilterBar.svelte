@@ -8,6 +8,8 @@
 -->
 <script lang="ts">
   import FacetFilter from './FacetFilter.svelte';
+  import FilterSheet from './FilterSheet.svelte';
+  import { createPhone } from './phone.svelte';
   import {
     FILTER_LABELS,
     UTM_KEYS,
@@ -36,6 +38,16 @@
   const BAR: UtmKey[] = ['source', 'medium', 'utm_campaign', 'content', 'placement'];
   const bar = $derived(BAR.filter((k) => k !== 'utm_campaign' || !hideUtmCampaign));
 
+  // Phone (#0173): the whole bar folds into one "Filters (N)" button and a bottom sheet.
+  const phone = createPhone();
+  let sheetOpen = $state(false);
+  // Crossing to desktop width closes the sheet so it does not reopen on the way back.
+  $effect(() => {
+    if (!phone.matches) sheetOpen = false;
+  });
+  const count = $derived(UTM_KEYS.reduce((n, k) => n + filters[k].length, 0));
+  const sheetKeys = $derived<UtmKey[]>([...bar, 'term']);
+
   let moreOpen = $state(false);
   const termShown = $derived(moreOpen || filters.term.length > 0);
 
@@ -45,6 +57,20 @@
   );
 </script>
 
+{#if phone.matches}
+  <div class="bar phone" role="group" aria-label="Filter by UTM parameters">
+    <button type="button" class="filters-btn" class:active={count > 0} aria-haspopup="dialog" onclick={() => (sheetOpen = true)}>
+      Filters{count > 0 ? ` (${count})` : ''}
+    </button>
+  </div>
+  {#if sheetOpen}
+    <FilterSheet {count} onclear={onclear} onclose={() => (sheetOpen = false)}>
+      {#each sheetKeys as k (k)}
+        <FacetFilter inline label={FILTER_LABELS[k]} values={facets[k]} selected={filters[k]} onchange={(v) => onchange(k, v)} />
+      {/each}
+    </FilterSheet>
+  {/if}
+{:else}
 <div class="bar" role="group" aria-label="Filter by UTM parameters">
   <span class="lead">Filter</span>
   {#each bar as k (k)}
@@ -66,6 +92,7 @@
     <button type="button" class="more" aria-expanded="false" onclick={() => (moreOpen = true)}>More</button>
   {/if}
 </div>
+{/if}
 
 {#if active}
   <div class="chips" role="list" aria-label="Active filters">
@@ -150,5 +177,46 @@
   }
   .clear {
     margin-left: auto;
+  }
+  .filters-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    padding: 0 var(--space-4);
+    border: var(--border-w) solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--bg-panel);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .filters-btn.active {
+    border-color: var(--accent);
+    background: var(--accent-subtle);
+    font-weight: 600;
+  }
+  @media (max-width: 899px) {
+    /* Active filters stay on one line and scroll sideways. */
+    .chips {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+    }
+    .chip {
+      flex: 0 0 auto;
+      min-height: 40px;
+      max-width: 80vw;
+    }
+    .chip button {
+      width: 40px;
+      height: 40px;
+      border-radius: 20px;
+    }
+    .clear {
+      flex: 0 0 auto;
+      margin-left: 0;
+      min-height: 40px;
+    }
   }
 </style>

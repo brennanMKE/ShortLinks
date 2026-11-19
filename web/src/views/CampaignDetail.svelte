@@ -914,7 +914,7 @@
               {:else if col.key === 'channel'}
                 {#if row.kind === 'group'}
                   {@const ch = groupChannels(row.group.links)}
-                  <span class="text-muted" title={ch}>{groupChannelsShort(row.group.links) || '—'}</span>
+                  <span class="text-muted grp-ch" title={ch}>{groupChannelsShort(row.group.links) || '—'}</span>
                 {:else}
                   {@const ch = channelText(row.link)}
                   <span class="text-muted bidi-ltr" title={ch}>{ch || '—'}</span>
@@ -1453,5 +1453,12 @@
     .mobile-sort-toggle { display: inline-flex; }
     .link-cell.child { padding-left: var(--space-4); }
     .clicks-cell { align-items: flex-end; }
+    /* Line the group's channel summary up under its title, past the twisty. */
+    .grp-ch { display: block; padding-left: calc(40px + var(--space-2)); }
+    .twisty { width: 40px; height: 40px; margin: -6px 0; }
+    .links-toolbar { flex-direction: column; align-items: stretch; gap: var(--space-2); }
+    .toolbar-actions { justify-content: flex-start; gap: var(--space-2) var(--space-3); }
+    .group-toggle { min-height: 40px; }
+    .group-toggle input { width: 20px; height: 20px; }
   }
 </style>

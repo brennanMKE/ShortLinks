@@ -195,6 +195,10 @@
   .text-btn:hover,
   .text-btn[aria-expanded='true'] { background: var(--bg-subtle); }
   .text-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+  @media (max-width: 899px) {
+    .icon-btn { width: 40px; height: 40px; }
+    .text-btn { min-height: 40px; }
+  }
   .copy { opacity: 0; transition: opacity 0.1s; }
   .copy.copied { color: var(--success); }
   /* Frequent action: appear on row hover / keyboard focus; always on touch. */

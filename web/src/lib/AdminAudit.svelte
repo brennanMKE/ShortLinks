@@ -326,6 +326,10 @@
   /* Phone cards: the one-line details column is hidden, so an expanded row
      shows its details under the action instead. */
   @media (max-width: 899px) {
+    .chev {
+      width: 40px;
+      height: 40px;
+    }
     .narrow-only {
       display: block;
     }
