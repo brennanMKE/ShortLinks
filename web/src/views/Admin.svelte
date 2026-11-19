@@ -47,6 +47,9 @@
   import Panel from '../lib/Panel.svelte';
   import AdminFilters from '../lib/AdminFilters.svelte';
   import AdminAudit from '../lib/AdminAudit.svelte';
+  import AdminHome from '../lib/AdminHome.svelte';
+  import { redirectUrlApplies } from '../lib/homeAdmin';
+  import type { HomeMode } from '../lib/home';
   import DataTable from '../lib/DataTable.svelte';
   import TwoLineCell from '../lib/TwoLineCell.svelte';
   import type { Column } from '../lib/dataTable';
@@ -87,6 +90,9 @@
   let homeRedirectDraft = $state('');
   let savingHomeRedirect = $state(false);
   let homeRedirectError = $state<string | null>(null);
+  // The home page mode being edited in the Home page panel (#0177).
+  let homeModeDraft = $state<HomeMode>('default');
+  const redirectApplies = $derived(redirectUrlApplies(homeModeDraft));
   const homeRedirectSaved = $derived(
     settings.find((s) => s.key === 'home_redirect_url')?.value ?? '',
   );
@@ -317,7 +323,8 @@
               <label class="setting-name" for="home-redirect-url">Primary URL</label>
               <p class="text-muted setting-desc">
                 Where a signed-out visitor to the home page is sent when registration is off. Leave
-                empty to show the sign-in screen instead.
+                empty to show the sign-in screen instead. Used only when the home page mode is
+                "Sign-in screen (or redirect)".
               </p>
               <div class="home-redirect-controls">
                 <input
@@ -326,11 +333,11 @@
                   inputmode="url"
                   placeholder="https://www.example.com/"
                   bind:value={homeRedirectDraft}
-                  disabled={savingHomeRedirect}
+                  disabled={savingHomeRedirect || !redirectApplies}
                 />
                 <Button
                   variant="primary"
-                  disabled={savingHomeRedirect || homeRedirectDraft.trim() === homeRedirectSaved}
+                  disabled={savingHomeRedirect || !redirectApplies || homeRedirectDraft.trim() === homeRedirectSaved}
                   onclick={() => saveHomeRedirect(homeRedirectDraft)}
                 >
                   {savingHomeRedirect ? 'Saving…' : 'Save'}
@@ -360,6 +367,14 @@
           {/if}
         {/if}
       </Panel>
+      {#if !settingsLoading && !settingsError}
+        <AdminHome
+          {settings}
+          bind:mode={homeModeDraft}
+          onAuthError={handleAuthError}
+          onSettings={(next) => (settings = next)}
+        />
+      {/if}
     {/if}
 
     {#if section === 'filters'}

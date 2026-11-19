@@ -1,5 +1,6 @@
 <!--
-  Home view (#0125). Shown to a signed-out visitor at the bare root when
+  Home view (#0125, #0177). In `about` and `activity` mode (#0174) this is the
+  content page (lib/PublicHome.svelte). In `default` mode: shown to a signed-out visitor at the bare root when
   registration is closed and the admin has set a primary URL: a short notice,
   then a redirect after HOME_REDIRECT_DELAY_MS. "Go now" skips the wait; the
   small Sign in link leads account holders to /login (and Home's onDestroy
@@ -10,13 +11,15 @@
   import { onMount, onDestroy } from 'svelte';
   import Link from '../lib/Link.svelte';
   import AuthBrand from '../lib/AuthBrand.svelte';
-  import { HOME_REDIRECT_DELAY_MS, redirectHost, type HomeInfo } from '../lib/home';
+  import { HOME_REDIRECT_DELAY_MS, isContentHome, redirectHost, type HomeInfo } from '../lib/home';
 
   let { info }: { info: HomeInfo } = $props();
 
   let timer: number | undefined;
 
   onMount(() => {
+    // The content page never redirects.
+    if (isContentHome(info)) return;
     timer = window.setTimeout(() => {
       window.location.replace(info.redirect_url);
     }, HOME_REDIRECT_DELAY_MS);
@@ -27,6 +30,12 @@
   });
 </script>
 
+{#if isContentHome(info)}
+  <!-- Loaded on demand so the chart code stays out of the entry chunk. -->
+  {#await import('../lib/PublicHome.svelte') then { default: PublicHome }}
+    <PublicHome {info} host={window.location.host} />
+  {/await}
+{:else}
 <main class="home-shell">
   <AuthBrand />
   <p class="text-muted tagline" role="status" aria-live="polite">
@@ -39,6 +48,7 @@
 
   <p class="text-muted signin"><Link to="/login">Sign in</Link></p>
 </main>
+{/if}
 
 <style>
   .home-shell {

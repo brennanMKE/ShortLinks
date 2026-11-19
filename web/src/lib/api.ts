@@ -3,7 +3,7 @@
 // binary serves the SPA itself), send the session cookie via
 // `credentials: 'include'`, and throw a typed ApiError on a non-2xx response.
 
-import type { HomeInfo } from './home';
+import type { HomeHero, HomeInfo } from './home';
 import { appendFilterValues } from './viewQuery';
 import type { TopContentData } from './campaignLinks';
 import type { LinkPerformance } from './linkReport';
@@ -127,6 +127,39 @@ export function getMe(): Promise<User> {
 /** GET /api/public/home — unauthenticated; the primary URL and registration state (#0125). */
 export function getPublicHome(): Promise<HomeInfo> {
   return apiGet<HomeInfo>('/api/public/home');
+}
+
+/**
+ * PUT /admin/home/hero — upload the home page hero image (#0176, admin only).
+ * multipart/form-data with `image` and `alt`; a 400 carries a message that
+ * says exactly what to change, which ApiError.message exposes.
+ */
+export async function uploadHero(file: File, alt: string): Promise<HomeHero> {
+  const form = new FormData();
+  form.append('alt', alt);
+  form.append('image', file);
+  const res = await fetch('/admin/home/hero', {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { Accept: 'application/json' },
+    body: form,
+  });
+  const text = await res.text();
+  let parsed: { error?: string; hero?: HomeHero } | undefined;
+  try {
+    parsed = text ? JSON.parse(text) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (!res.ok || !parsed?.hero) {
+    throw new ApiError(res.status, parsed?.error ?? `HTTP ${res.status}`, parsed);
+  }
+  return parsed.hero;
+}
+
+/** DELETE /admin/home/hero — remove the hero image (204; 404 when none is set). */
+export function deleteHero(): Promise<void> {
+  return apiDelete<void>('/admin/home/hero');
 }
 
 /** GET /api/links — the caller's links (paginated, most-recent-first). */
