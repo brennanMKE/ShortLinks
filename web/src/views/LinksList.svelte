@@ -11,12 +11,14 @@
   import { onMount } from 'svelte';
   import { currentUser, links } from '../lib/stores';
   import { listLinks, deactivateLink, ApiError } from '../lib/api';
-  import { navigate } from '../lib/hashRouter.svelte';
+  import { navigate, getRoute } from '../lib/hashRouter.svelte';
   import Link from '../lib/Link.svelte';
   import { shortUrl, linkStatus, destinationDomain, deniedReasonLabel } from '../lib/links';
   import { subscribeLinks, prependUniqueByKey } from '../lib/events';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
+  import { pastedUrl } from '../lib/newLink';
+  import { openNewLink } from '../lib/newLinkDialog';
 
   const PER_PAGE = 20;
 
@@ -92,6 +94,20 @@
     }
   }
 
+  // Pasting a URL while no input is focused opens New link prefilled (#0158).
+  function onPaste(e: ClipboardEvent) {
+    // LinksList also renders inside the Overview (#/); only the Links page takes pastes.
+    if (getRoute().path !== '/links') return;
+    const t = e.target as HTMLElement | null;
+    const tag = (t?.tagName ?? '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t?.isContentEditable) return;
+    if (document.querySelector('dialog[open]')) return;
+    const url = pastedUrl(e.clipboardData?.getData('text/plain'));
+    if (!url) return;
+    e.preventDefault();
+    openNewLink(url);
+  }
+
   function formatDate(iso: string): string {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return iso;
@@ -115,6 +131,8 @@
   });
 </script>
 
+<svelte:window onpaste={onPaste} />
+
 <div class="app-shell">
 {#if showTitle}<h1 class="page-title">Links</h1>{/if}
 <Panel title="Your links" noPadding={$links.length > 0 && !loading && !loadError}>
@@ -126,7 +144,7 @@
       </p>
       <Button variant="subtle" onclick={() => loadPage(page)}>Retry</Button>
     {:else if $links.length === 0}
-      <p class="text-muted">No links yet — create your first one above.</p>
+      <p class="text-muted">No links yet — use + New link to create your first one.</p>
     {:else}
       <div class="table-scroll">
         <table>

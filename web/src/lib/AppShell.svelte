@@ -14,7 +14,9 @@
   import type { Snippet } from 'svelte';
   import { currentUser, links } from './stores';
   import { logout } from './api';
-  import { navigate, replace } from './hashRouter.svelte';
+  import { replace } from './hashRouter.svelte';
+  import { openNewLink } from './newLinkDialog';
+  import NewLinkDialog from './NewLinkDialog.svelte';
   import Link from './Link.svelte';
   import { APP_NAME } from './branding';
   import { navTabs, avatarInitial, isNewLinkShortcut } from './shell';
@@ -52,7 +54,7 @@
     if (e.repeat || document.querySelector('dialog[open], [aria-modal="true"]')) return;
     if (isNewLinkShortcut(e)) {
       e.preventDefault();
-      navigate('/new');
+      openNewLink();
     }
   }
 
@@ -76,9 +78,21 @@
       {/each}
     </nav>
 
-    <Link to="/new" class="new-link-btn" title="New link (n)" aria-label="New link">
+    <!-- A real anchor to #/new (phones, middle-click); on desktop a plain
+         click opens the dialog instead (#0158). -->
+    <a
+      href="#/new"
+      class="new-link-btn"
+      title="New link (n)"
+      aria-label="New link"
+      onclick={(e) => {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
+        e.preventDefault();
+        openNewLink();
+      }}
+    >
       <span class="plus" aria-hidden="true">+</span><span class="new-label">New link</span>
-    </Link>
+    </a>
 
     <div class="avatar-wrap" bind:this={menuWrap}>
       <button
@@ -105,6 +119,8 @@
 <main class="shell-main">
   {@render children()}
 </main>
+
+<NewLinkDialog />
 
 <style>
   .shell-bar {
