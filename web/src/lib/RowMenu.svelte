@@ -9,8 +9,10 @@
     /** When set, a copy icon (visible on row hover/focus) copies this text. */
     copyText?: string;
     oncopy?: (text: string) => void;
+    /** Renders a labelled "Text ▾" button trigger instead of the ⋯ icon (toolbar menus). */
+    text?: string;
   }
-  let { items, label = 'Row actions', copyText, oncopy }: Props = $props();
+  let { items, label = 'Row actions', copyText, oncopy, text }: Props = $props();
 
   let open = $state(false);
   let triggerEl: HTMLButtonElement | undefined = $state();
@@ -124,7 +126,7 @@
   <button
     bind:this={triggerEl}
     type="button"
-    class="icon-btn trigger"
+    class={text ? 'text-btn trigger' : 'icon-btn trigger'}
     aria-label={label}
     aria-haspopup="menu"
     aria-expanded={open}
@@ -132,7 +134,12 @@
     onclick={() => (open ? close(false) : openMenu())}
     onkeydown={onTriggerKey}
   >
-    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="3" cy="8" r="1.4" fill="currentColor" /><circle cx="8" cy="8" r="1.4" fill="currentColor" /><circle cx="13" cy="8" r="1.4" fill="currentColor" /></svg>
+    {#if text}
+      {text}
+      <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3.5 6l4.5 4.5L12.5 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    {:else}
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle cx="3" cy="8" r="1.4" fill="currentColor" /><circle cx="8" cy="8" r="1.4" fill="currentColor" /><circle cx="13" cy="8" r="1.4" fill="currentColor" /></svg>
+    {/if}
   </button>
 
   {#if open}
@@ -172,6 +179,22 @@
   .icon-btn:hover,
   .icon-btn[aria-expanded='true'] { background: var(--bg-subtle); color: var(--text); }
   .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+  .text-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px var(--space-3);
+    border: var(--border-w) solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--bg-panel);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-base);
+    cursor: pointer;
+  }
+  .text-btn:hover,
+  .text-btn[aria-expanded='true'] { background: var(--bg-subtle); }
+  .text-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
   .copy { opacity: 0; transition: opacity 0.1s; }
   .copy.copied { color: var(--success); }
   /* Frequent action: appear on row hover / keyboard focus; always on touch. */

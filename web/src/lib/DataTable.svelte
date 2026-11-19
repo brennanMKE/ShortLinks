@@ -36,6 +36,10 @@
     rowClass?: (row: T) => string;
     /** Accessible name for a row's checkbox, e.g. (r) => r.title. */
     rowLabel?: (row: T) => string;
+    /** Rows that return false get no checkbox (e.g. group header rows). */
+    rowSelectable?: (row: T) => boolean;
+    /** Keys "select all" covers when some selectable rows are not rendered (e.g. collapsed groups). */
+    selectAllKeys?: string[];
   }
 
   let {
@@ -56,10 +60,12 @@
     empty,
     rowClass,
     rowLabel,
+    rowSelectable,
+    selectAllKeys,
   }: Props = $props();
 
   const shown = $derived(serverSort ? rows : sortRows(rows, columns, sort));
-  const keys = $derived(rows.map(rowKey));
+  const keys = $derived(selectAllKeys ?? (rowSelectable ? rows.filter(rowSelectable) : rows).map(rowKey));
   const all = $derived(allState(selected, keys));
   const fixedWidths = $derived(columns.map((c) => c.width).filter((w): w is string => !!w));
   const minWidth = $derived(`calc(16rem + ${[selectable ? '40px' : '0px', ...fixedWidths].join(' + ')})`);
@@ -164,7 +170,9 @@
             <tr class={rowClass?.(row) ?? ''} class:is-selected={selected.has(k)}>
               {#if selectable}
                 <td class="sel">
-                  <input type="checkbox" aria-label={rowLabel ? `Select ${rowLabel(row)}` : 'Select row'} checked={selected.has(k)} onchange={() => (selected = toggleKey(selected, k))} />
+                  {#if !rowSelectable || rowSelectable(row)}
+                    <input type="checkbox" aria-label={rowLabel ? `Select ${rowLabel(row)}` : 'Select row'} checked={selected.has(k)} onchange={() => (selected = toggleKey(selected, k))} />
+                  {/if}
                 </td>
               {/if}
               {#each columns as col (col.key)}
@@ -285,7 +293,7 @@
       grid-template-areas: 'sel title metric' 'sel meta actions';
     }
     .dt tbody td { display: block; padding: 0; height: auto; border: none; min-width: 0; }
-    .dt td.sel { grid-area: sel; padding-right: var(--space-3); }
+    .dt td.sel { grid-area: sel; padding-right: var(--space-3); min-width: 16px; box-sizing: content-box; }
     .dt td.m-title { grid-area: title; }
     .dt td.m-meta { grid-area: meta; font-size: var(--fs-sm); color: var(--text-muted); }
     .dt td.m-metric { grid-area: metric; text-align: right; min-width: 4.5rem; }

@@ -4,6 +4,7 @@
 // `credentials: 'include'`, and throw a typed ApiError on a non-2xx response.
 
 import type { HomeInfo } from './home';
+import type { TopContentData } from './campaignLinks';
 import type { LinkPerformance } from './linkReport';
 import type {
   User,
@@ -273,6 +274,19 @@ export function updateCampaign(slug: string, input: UpdateCampaignInput): Promis
  */
 export function getCampaign(slug: string): Promise<CampaignDetail> {
   return apiGet<CampaignDetail>(`/api/campaigns/${encodeURIComponent(slug)}`);
+}
+
+/**
+ * GET /api/reports/top-content scoped to one campaign over an explicit window
+ * (#0157). `sort=newest` keeps links with no clicks in their group, so every
+ * link of the campaign has a home. Not mounted in STORAGE=json dev mode (404).
+ */
+// tz=UTC on purpose: the campaign stats window (window_from/window_to) is
+// resolved in UTC, so the report must bucket days in UTC too or its first and
+// last day would drift from the stats the table's click numbers come from.
+export function getCampaignContentGroups(slug: string, from: string, to: string): Promise<{ data: TopContentData }> {
+  const q = new URLSearchParams({ campaign: slug, from, to, tz: 'UTC', compare: 'none', sort: 'newest', limit: '500' });
+  return apiGet<{ data: TopContentData }>(`/api/reports/top-content?${q.toString()}`);
 }
 
 /**

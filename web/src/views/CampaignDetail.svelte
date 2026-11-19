@@ -27,84 +27,24 @@
   Header: name, description, date range, and Edit/Archive controls. The edit
   form states that the slug never changes (#0098 downstream constraint 4).
 
-  Links table: short key, title, destination, source, medium, placement,
-  windowed clicks, share of total, created date — sortable by clicks
-  (stable, lib/campaigns.ts sortLinkRows), each row linking to the existing
-  link-detail view. "Copy all short URLs" copies every row's short URL.
+  Links table (#0157): five columns on #0155's DataTable — select, Link
+  (two-line: title, then `/u/key` · channel label · path), Channel
+  (`source · medium`), Clicks (InlineBar, share under it) and a ⋯ menu. A
+  Placement column appears only when some link has one. Rows are grouped by
+  content by default (toggle in the toolbar, kept in the hash as `?group=0`):
+  the groups come from the Go `top-content` report (#0140) filtered to this
+  campaign over the same window as the stats; a multi-link group is one row
+  that expands to its links, a lone link is a plain row. When the report is
+  unavailable (dev mode has no /api/reports) the toggle is hidden and the
+  table is the flat list. QR SVG/PNG, Remove, Open, Copy and Edit live in the
+  ⋯ menu; the bulk bar has Copy URLs, Remove and Export; "Export ▾" in the
+  toolbar merges Copy all, the QR zip and the CSV. Sortable by Link or
+  Clicks (stable, lib/campaignLinks.ts). Every link row goes to the existing
+  link-detail view.
 
-  QR column (#0106): a genuine 11th column (the table was already ten —
-  #0103 downstream constraint 5) rather than folding the download link into
-  the existing Actions cell, so "download this link's code" reads as its
-  own affordance next to Created, not as a third control crowding Remove.
-
-  BOTH SVG and PNG links, restored (second review-fix round): an earlier
-  round dropped PNG down to a single "QR" (SVG-only) link to fix a
-  zero-scroll regression, but that measurement was taken against a campaign
-  with short, thin content and did not hold — re-measured with realistic
-  content (placement names like "Rockwell Automation Lobby", titles/
-  destinations that actually reach the cells' max-width caps), the
-  single-link version still overflowed `.table-scroll` to 940 / 926 (14px)
-  at every desktop width, clipping part of Remove. Dropping PNG bought
-  nothing and cost a stated deliverable (issue: both formats "available from
-  the campaign detail links table"), so it is restored here alongside SVG.
-  With both links back in the cell (still at the 4px `.qr-th`/`.qr-cell`
-  padding below), the same adversarial dataset overflowed to 975 / 926
-  (49px) — reclaimed by tightening `.title-cell` (120px → 95px) and
-  `.dest-cell` (150px → 126px), the two free-text columns with real room
-  that already ellipsize, so nothing becomes newly hidden. 49px is the
-  measured minimum: one pixel less (96px/126px) landed at 927 / 926, one
-  pixel over. `.placement-cell`'s own max-width (90px) was left alone — its
-  `<th>` has no cap, and the header word "Placement" alone sets the column
-  to ~102px, making that max-width inert as a squeeze target; noted as a
-  follow-up rather than folded into that pass.
-
-  THIRD review round: that follow-up turned out to be load-bearing, not
-  optional. `table-layout: auto` means a `<td>`'s max-width only bounds a
-  column when nothing ELSE in the column demands more — `.table-scroll`
-  reading `926 == 926` was `max(926, min-content)`, which can be a hard
-  overflow OR a min-content sitting a fraction of a pixel under the
-  threshold with zero real headroom (confirmed by measuring
-  `.links-table` at `width: min-content` directly). It was the latter:
-  generated keys are 6 chars, but custom aliases are a documented 1–12
-  url-safe-char feature, and a realistic 44-row dataset using 12-char
-  aliases pushed min-content to 967.98px against the 926px container —
-  41.98px over. Fixed by capping `.placement-cell`'s `<th>` (the exact gap
-  identified above) and adding a matching `.key-cell` cap to the short-key
-  column, which had NO cap at all.
-
-  FOURTH review round: the third round's own first allocation of the
-  recovered budget was backwards — it spent width on `.title-cell`/
-  `.dest-cell` readability (one extra character each, changing nothing
-  legible) while leaving `.placement-cell` too narrow for its OWN header
-  ("Placement" ellipsized to "PLAC…") and `.key-cell` too narrow for even
-  the DEFAULT 6-character generated key, not just a custom alias. Corrected
-  by cutting `.dest-cell` hard instead — cheap because #0113 (filed
-  separately) established the column carries no information at any width
-  it can afford — and spending the freed budget on `.placement-cell` (wide
-  enough that its header no longer truncates) and `.key-cell` (wide enough
-  for a FULL 12-character alias, not just the 6-char floor). See the
-  `.title-cell`/`.dest-cell`/`.placement-cell`/`.key-cell` rule's own
-  comment below for the full before/after numbers, the final values, and
-  the fit checks (6-char default key, 12-char alias, and the Placement
-  header, all measured `clientWidth == scrollWidth`). Below the 900px
-  breakpoint the column stacks like every other cell (data-label="QR"),
-  unaffected by the desktop width math above; the in-cell SVG/PNG links
-  there are also sized to a real ≥40px tap target below that breakpoint now
-  (see `.qr-links` further down) — they were 24×17px and 25×17px, inherited
-  unchanged from the desktop inline-text styling, which is fine on desktop
-  but not on a phone.
-
-  Bulk QR download: a "Download all QR codes (zip)" link in the toolbar,
-  next to "Copy all short URLs" — same zip archive whether the campaign has
-  zero or many links (internal/handlers/campaigns.go's QRZip degrades to an
-  empty-but-valid archive rather than an error).
-
-  CSV export (#0107): a "Download CSV" link in the same toolbar, next to the
-  QR zip link — the per-link rollup (internal/handlers/campaigns_export.go's
-  Export) over the SAME default window this view already shows (no
-  from/to picker exists here, so nothing for the two requests to disagree
-  about). Also degrades cleanly for an empty campaign (header row, no data
-  rows, never an error).
+  Bulk QR download and CSV export (#0106, #0107): the same endpoints as
+  before, now reached from the Export ▾ menu. Both stay enabled for an empty
+  campaign (empty archive / header-only CSV, never an error).
 
   Assign/unassign against #0099's endpoints: the assign form accepts pasted
   keys or short URLs (lib/campaigns.ts parseKeysInput), chunks anything over
@@ -119,6 +59,7 @@
   import {
     getCampaign,
     getCampaignStats,
+    getCampaignContentGroups,
     updateCampaign,
     assignLinksToCampaign,
     unassignLinkFromCampaign,
@@ -131,7 +72,6 @@
     clicksPerDayAverage,
     buildLinkRows,
     unlistedClickCount,
-    sortLinkRows,
     chunkKeys,
     parseKeysInput,
     copyAllShortUrlsText,
@@ -144,10 +84,32 @@
     isEmptyCampaignChannelStats,
     hasNamedPlacement,
   } from '../lib/campaigns';
-  import { qrSvgUrl, qrPngUrl, shortUrlBase } from '../lib/links';
-  import { formatDate } from '../lib/linkDetail';
+  import { qrSvgUrl, qrPngUrl, shortUrl, shortUrlBase } from '../lib/links';
+  import {
+    buildViewGroups,
+    sortViewGroups,
+    flattenGroups,
+    flatRows,
+    channelText,
+    linkMeta,
+    groupChannels,
+    groupChannelsShort,
+    hasAnyPlacement,
+    reportWindow,
+    selectedLinksCsv,
+    type TableRow,
+    type TopContentGroup,
+    type SortKey,
+  } from '../lib/campaignLinks';
+  import { getRoute, navigate, replace } from '../lib/hashRouter.svelte';
+  import { columnMax, type Column, type SortState } from '../lib/dataTable';
+  import type { MenuItem } from '../lib/rowMenu';
   import type { CampaignDetail, LinkBucket, LinkSeries, PlacementBucket } from '../lib/types';
   import Button from '../lib/Button.svelte';
+  import DataTable from '../lib/DataTable.svelte';
+  import TwoLineCell from '../lib/TwoLineCell.svelte';
+  import RowMenu from '../lib/RowMenu.svelte';
+  import InlineBar from '../lib/InlineBar.svelte';
   import { pushToast } from '../lib/toasts';
   import { removedFromCampaignMessage } from '../lib/linkActions';
   import Panel from '../lib/Panel.svelte';
@@ -178,34 +140,126 @@
   const channelDimensions = $derived(campaignUtmDimensions(detail?.stats));
   const noChannelData = $derived(isEmptyCampaignChannelStats(detail?.stats));
 
-  // ── Links table ────────────────────────────────────────────────────────
+  // ── Links table (#0157) ────────────────────────────────────────────────
   const rows = $derived(buildLinkRows(detail?.links ?? [], byLink));
-  let sortDirection = $state<'desc' | 'asc'>('desc');
-  const sortedRows = $derived(sortLinkRows(rows, sortDirection));
   // Clicks in byLink attributed to a link no longer assigned to this
-  // campaign — excluded from both the numerator and denominator of "Share
-  // of listed links" above, so it is surfaced separately rather than
-  // silently making the visible shares look like they cover everything
-  // (#0103 fix 3).
+  // campaign — excluded from both the numerator and denominator of the
+  // shares, so it is surfaced separately rather than silently making the
+  // visible shares look like they cover everything (#0103 fix 3).
   const unlistedClicks = $derived(unlistedClickCount(detail?.links ?? [], byLink));
 
+  // Content groups from the Go top-content report; null = unavailable.
+  let contentGroups = $state<TopContentGroup[] | null>(null);
+  // The report hit its row cap, so grouping may be incomplete.
+  let groupsTruncated = $state(false);
+  const viewGroups = $derived(buildViewGroups(rows, contentGroups));
+  const totalClicks = $derived(rows.reduce((sum, r) => sum + r.clicksInWindow, 0));
+
+  // "Group by content" lives in the hash query (?group=0 turns it off).
+  const groupOn = $derived(getRoute().query.get('group') !== '0');
+  const canGroup = $derived(contentGroups !== null);
+  const grouped = $derived(groupOn && canGroup);
+  function setGroupOn(on: boolean) {
+    const q = new URLSearchParams(getRoute().query);
+    if (on) q.delete('group');
+    else q.set('group', '0');
+    const qs = q.toString();
+    replace(`/campaigns/${encodeURIComponent(slug)}${qs ? `?${qs}` : ''}`);
+  }
+
+  let sort = $state<SortState | null>({ key: 'clicks', dir: 'desc' });
+  const sortKey = $derived<SortKey>(sort?.key === 'link' ? 'link' : 'clicks');
+  const sortDir = $derived(sort?.dir ?? 'desc');
+  let expanded = $state<Set<string>>(new Set());
+  let selected = $state<Set<string>>(new Set());
+
+  const tableRows = $derived<TableRow[]>(
+    grouped
+      ? flattenGroups(sortViewGroups(viewGroups, sortKey, sortDir), expanded, totalClicks)
+      : flatRows(viewGroups, sortKey, sortDir, totalClicks),
+  );
+  const barMax = $derived(columnMax(tableRows, (r) => (r.kind === 'group' ? r.group.clicks : r.link.clicksInWindow)));
+  const showPlacement = $derived(hasAnyPlacement(rows));
+  const linksSummary = $derived(
+    `${rows.length} link${rows.length === 1 ? '' : 's'}` +
+      (grouped && viewGroups.some((g) => g.links.length > 1)
+        ? ` · ${viewGroups.length} content group${viewGroups.length === 1 ? '' : 's'}`
+        : ''),
+  );
+
+  const columns = $derived<Column<TableRow>[]>([
+    { key: 'link', label: 'Link', sortable: true, mobile: 'title' },
+    { key: 'channel', label: 'Channel', width: '9.5rem', mobile: 'meta' },
+    ...(showPlacement ? [{ key: 'placement', label: 'Placement', width: '8rem' } as Column<TableRow>] : []),
+    { key: 'clicks', label: 'Clicks', width: '7.5rem', align: 'right' as const, sortable: true, mobile: 'metric' as const },
+    { key: 'actions', label: 'Actions', width: '6.5rem', hideLabel: true, mobile: 'actions' as const },
+  ]);
+
   function toggleSort() {
-    sortDirection = sortDirection === 'desc' ? 'asc' : 'desc';
+    sort = { key: 'clicks', dir: sortKey === 'clicks' && sortDir === 'desc' ? 'asc' : 'desc' };
+  }
+  function toggleGroup(id: string) {
+    const next = new Set(expanded);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    expanded = next;
   }
 
   let copiedAll = $state(false);
-  async function copyAll() {
-    const text = copyAllShortUrlsText(sortedRows);
-    if (text === '') return;
+  async function writeClipboard(text: string): Promise<boolean> {
     try {
       await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Clipboard may be unavailable; ignore.
+      return false;
+    }
+  }
+  async function copyAll() {
+    const text = copyAllShortUrlsText(rows);
+    if (text === '') return;
+    if (await writeClipboard(text)) {
       copiedAll = true;
       setTimeout(() => {
         copiedAll = false;
       }, 1500);
-    } catch {
-      // Clipboard may be unavailable; ignore.
     }
+  }
+
+  const exportItems = $derived<MenuItem[]>([
+    { label: copiedAll ? 'Copied!' : 'Copy all short URLs', onselect: copyAll, disabled: rows.length === 0 },
+    { label: 'Download all QR codes (zip)', href: campaignQrZipUrl(slug) },
+    { label: 'Download CSV', href: campaignExportCsvUrl(slug) },
+  ]);
+
+  function linkMenu(row: Extract<TableRow, { kind: 'link' }>): MenuItem[] {
+    const l = row.link;
+    return [
+      { label: 'Edit link', onselect: () => navigate('/links/' + encodeURIComponent(l.key)) },
+      { label: 'Copy short URL', onselect: () => void writeClipboard(shortUrl(l.key)) },
+      { label: 'Open destination', href: l.destination_url },
+      { label: 'Download QR (SVG)', href: qrSvgUrl(l.key) },
+      { label: 'Download QR (PNG)', href: qrPngUrl(l.key) },
+      { label: 'Remove from campaign', danger: true, onselect: () => void removeLinks([l.key]) },
+    ];
+  }
+
+  function rowsForKeys(keys: string[]) {
+    return rows.filter((r) => keys.includes(r.key));
+  }
+  async function copySelected(keys: string[]) {
+    const text = copyAllShortUrlsText(rowsForKeys(keys));
+    if (text) await writeClipboard(text);
+  }
+  function exportSelected(keys: string[]) {
+    const blob = new Blob([selectedLinksCsv(rowsForKeys(keys))], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${slug}-selected-links.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   // ── Load ───────────────────────────────────────────────────────────────
@@ -249,6 +303,23 @@
       byLink = [];
       byPlacement = [];
       seriesByLink = [];
+    }
+
+    // Content groups: also non-fatal. Without them (dev mode has no
+    // /api/reports, or the call fails) the table is the flat link list.
+    const win = reportWindow(detail?.stats);
+    if (win) {
+      try {
+        const data = (await getCampaignContentGroups(slug, win.from, win.to)).data;
+        contentGroups = data.groups;
+        groupsTruncated = !!data.truncated;
+      } catch {
+        contentGroups = null;
+        groupsTruncated = false;
+      }
+    } else {
+      contentGroups = null;
+      groupsTruncated = false;
     }
 
     if (initial) loading = false;
@@ -404,45 +475,59 @@
     }
   }
 
-  // ── Unassign ─────────────────────────────────────────────────────────────
-  let unassigning = $state<Record<string, boolean>>({});
-
-  // #0165: Remove acts at once and offers Undo (re-assign) in a toast.
-  function handleUnassign(key: string) {
-    void performUnassign(key);
+  // ── Remove from campaign ─────────────────────────────────────────────────
+  // #0165: Remove acts at once (row menu or bulk bar) and offers one Undo
+  // toast that re-assigns every link removed by that action.
+  function removeLinks(keys: string[]) {
+    if (keys.length > 0) void performUnassign(keys);
   }
 
-  async function performUnassign(key: string) {
+  async function performUnassign(keys: string[]) {
     if (!detail) return;
     const campaignSlug = detail.slug;
-    unassigning = { ...unassigning, [key]: true };
     const campaignName = detail.name;
+    const removed: string[] = [];
+    let failed = false;
     try {
-      await unassignLinkFromCampaign(campaignSlug, key);
-      await load(campaignSlug);
-      pushToast({
-        message: removedFromCampaignMessage(campaignName),
-        actionLabel: 'Undo',
-        returnFocus: () => document.querySelector<HTMLElement>('h1.detail-title'),
-        onaction: async () => {
-          try {
-            await assignLinksToCampaign(campaignSlug, [key]);
-          } catch (err) {
-            if (err instanceof ApiError && err.status === 401) currentUser.set(null);
-            throw new Error('Could not put the link back. Please try again.');
-          }
-          if (detail?.slug === campaignSlug) await load(campaignSlug);
-        },
-      });
+      for (const key of keys) {
+        await unassignLinkFromCampaign(campaignSlug, key);
+        removed.push(key);
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
         return;
       }
-      pushToast({ message: 'Could not remove this link. Please try again.' });
-    } finally {
-      const { [key]: _removed, ...rest } = unassigning;
-      unassigning = rest;
+      failed = true;
+    }
+    selected = new Set();
+    await load(campaignSlug);
+    if (removed.length > 0) {
+      pushToast({
+        message:
+          removed.length === 1
+            ? removedFromCampaignMessage(campaignName)
+            : `${removed.length} links removed from ${campaignName}.`,
+        actionLabel: 'Undo',
+        returnFocus: () => document.querySelector<HTMLElement>('h1.detail-title'),
+        onaction: async () => {
+          try {
+            for (const chunk of chunkKeys(removed)) await assignLinksToCampaign(campaignSlug, chunk);
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 401) currentUser.set(null);
+            throw new Error(removed.length === 1 ? 'Could not put the link back. Please try again.' : 'Could not put the links back. Please try again.');
+          }
+          if (detail?.slug === campaignSlug) await load(campaignSlug);
+        },
+      });
+    }
+    if (failed) {
+      pushToast({
+        message:
+          removed.length > 0
+            ? `Could not remove every link; ${removed.length} of ${keys.length} were removed.`
+            : 'Could not remove this link. Please try again.',
+      });
     }
   }
 
@@ -686,171 +771,119 @@
       {/if}
     </Panel>
 
-    <!-- Links table -->
+    <!-- Links table (#0157) -->
     <Panel title="Links" noPadding>
       <div class="links-toolbar row spread">
-        <span class="text-muted">
-          {sortedRows.length} link{sortedRows.length === 1 ? '' : 's'}
+        <span class="text-muted links-count">
+          {linksSummary}
         </span>
         <div class="row toolbar-actions">
-          <!--
-            Visible sort control for the stacked-card layout (#0103 fix 1):
-            below the breakpoint the <thead> — and the sort button that lives
-            inside it — is sr-only-clipped, not display:none, so aria-sort
-            keeps working for assistive tech, but a SIGHTED mobile user had
-            no way to reach "sortable by clicks" (an explicit AC) at all.
-            This button is hidden above the breakpoint (CSS) and drives the
-            exact same `sortDirection` state as the header button — one
-            source of truth, two entry points.
-          -->
+          {#if canGroup}
+            <label class="group-toggle">
+              <input type="checkbox" checked={groupOn} onchange={(e) => setGroupOn(e.currentTarget.checked)} />
+              Group by content
+            </label>
+          {/if}
+          <!-- The phone card layout has no header row, so sorting needs its own control. -->
           <span class="mobile-sort-toggle">
             <Button
               variant="subtle"
               onclick={toggleSort}
-              aria-label={`Sort by clicks, currently ${sortDirection === 'desc' ? 'highest first' : 'lowest first'}`}
+              aria-label={`Sort by clicks, currently ${sortKey === 'clicks' && sortDir === 'asc' ? 'lowest first' : 'highest first'}`}
             >
-              Sort: Clicks {sortDirection === 'desc' ? '▼' : '▲'}
+              Sort: Clicks {sortKey === 'clicks' && sortDir === 'asc' ? '▲' : '▼'}
             </Button>
           </span>
-          <Button variant="subtle" onclick={copyAll} disabled={sortedRows.length === 0}>
-            {copiedAll ? 'Copied!' : 'Copy all short URLs'}
-          </Button>
-          <!--
-            Bulk QR download (#0106): a plain <a>, NOT a Button (Button.svelte
-            only ever renders a <button>, which cannot trigger a same-origin
-            file download the way a real anchor does) — pointing straight at
-            the zip endpoint, no fetch/blob JS needed since every API route
-            here is same-origin and cookie-authenticated (see
-            lib/campaigns.ts's campaignQrZipUrl doc comment).
-
-            Styled by the LOCAL .qr-zip-link rule below, not Button's
-            `.btn`/`.btn-subtle` classes (review fix): Svelte scopes a
-            component's <style> block to elements IT renders, hashing class
-            names accordingly — `.btn`/`.btn-subtle` only exist, post-hash,
-            on Button.svelte's own <button>. Putting those class names on an
-            <a> in THIS component matches nothing, so the anchor previously
-            rendered as an unstyled `#0000EE` underlined UA-default link (a
-            colour that appears nowhere else in the app) rather than looking
-            like the "Copy all short URLs" button beside it. .qr-zip-link
-            duplicates the relevant subset of Button's .btn + .btn-subtle
-            rules locally so this component owns styling for markup it
-            renders directly.
-
-            Left enabled even with zero links: the endpoint returns a valid,
-            empty archive rather than an error (see
-            internal/handlers/campaigns.go's QRZip), so there's nothing wrong
-            to guard against by disabling it.
-          -->
-          <a class="qr-zip-link" href={campaignQrZipUrl(detail.slug)} download>
-            Download all QR codes (zip)
-          </a>
-          <!--
-            Per-link CSV export (#0107): same pattern as the QR zip link
-            above — a plain <a>, not a Button, pointing straight at the
-            export endpoint (same-origin, cookie-authenticated, no
-            fetch/blob JS needed — see lib/campaigns.ts's
-            campaignExportCsvUrl doc comment). Lives in the TOOLBAR, not the
-            links table, deliberately: the table is already at its measured
-            min-content headroom against the zero-horizontal-scroll
-            invariant (see the geometry comment in <style> below), and a
-            download control costs no table width sitting here instead.
-
-            No ?from=/?to= query params: this view never lets the user pick
-            an explicit window (getCampaignStats(slug) above is called with
-            none either), so the export always resolves the SAME default
-            window the on-screen table is already showing — the reason the
-            AC's reconciliation holds with no extra wiring here.
-
-            Styled by the LOCAL .export-csv-link rule below, duplicating
-            .qr-zip-link's own duplicated subset of Button's .btn/
-            .btn-subtle rules (see that rule's comment for why a shared
-            class can't just be reused across components) — kept in sync BY
-            HAND with .qr-zip-link/Button.svelte.
-
-            Left enabled even with zero links: an empty campaign exports a
-            valid header-only CSV, not an error (internal/handlers/
-            campaigns_export.go's Export), the same "empty collection, not a
-            failure" contract the QR zip link already relies on.
-          -->
-          <a class="export-csv-link" href={campaignExportCsvUrl(detail.slug)} download>
-            Download CSV
-          </a>
+          <RowMenu text="Export" label="Export links" items={exportItems} />
         </div>
       </div>
 
-      {#if sortedRows.length === 0}
+      {#if grouped && groupsTruncated}
+        <p class="text-faint links-toolbar-error" role="status">
+          Grouping is partial: the report hit its row limit, so some links may not be grouped with their content.
+        </p>
+      {/if}
+
+      {#if rows.length === 0}
         <p class="text-muted empty-msg">No links assigned yet — add one below.</p>
       {:else}
-        <div class="table-scroll">
-          <table class="links-table">
-            <thead>
-              <tr>
-                <th scope="col" class="key-cell">Key</th>
-                <th scope="col" class="title-cell">Title</th>
-                <!-- "URL", not "Destination": .dest-cell is capped at 60px
-                     (see the geometry comment in <style>), and "Destination"
-                     ellipsizes to "DE…" at that width — a truncated column
-                     HEADER removes the label telling you what the column is,
-                     which reads as a bug rather than as a narrow column. "URL"
-                     measures 60px == 60px, so it renders whole at the existing
-                     cap with no geometry change. Same move as "Short key" →
-                     "Key" on .key-cell. The td keeps data-label="Destination",
-                     so the stacked mobile layout still shows the full word. -->
-                <th scope="col" class="dest-cell" title="Destination">URL</th>
-                <th scope="col" class="source-cell">Source</th>
-                <th scope="col" class="medium-cell">Medium</th>
-                <th scope="col" class="placement-cell" title="Placement">Placement</th>
-                <th scope="col" aria-sort={sortDirection === 'desc' ? 'descending' : 'ascending'}>
-                  <button type="button" class="sort-btn" onclick={toggleSort}>
-                    Clicks {sortDirection === 'desc' ? '▼' : '▲'}
-                  </button>
-                </th>
-                <th scope="col">Share of listed links</th>
-                <th scope="col">Created</th>
-                <th scope="col" class="qr-th">QR</th>
-                <th scope="col"><span class="sr-only">Actions</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each sortedRows as row (row.key)}
-                <tr>
-                  <td class="mono key-cell" data-label="Short key">
-                    <Link to={'/links/' + encodeURIComponent(row.key)} class="link-key-btn" title={row.key}>
-                      {row.key}
-                    </Link>
-                  </td>
-                  <td class="title-cell" data-label="Title" title={row.title}>{row.title || '—'}</td>
-                  <td class="dest-cell" data-label="Destination" title={row.destination_url}>{row.destination_url}</td>
-                  <td class="text-muted source-cell" data-label="Source" title={row.utm_source}><span class="bidi-ltr">{row.utm_source || '—'}</span></td>
-                  <td class="text-muted medium-cell" data-label="Medium" title={row.utm_medium}><span class="bidi-ltr">{row.utm_medium || '—'}</span></td>
-                  <td class="placement-cell" data-label="Placement" title={row.placement}>{row.placement || '—'}</td>
-                  <td class="num" data-label="Clicks">{row.clicksInWindow}</td>
-                  <td class="num" data-label="Share">{row.shareOfTotal}%</td>
-                  <td class="text-muted" data-label="Created">{formatDate(row.created_at)}</td>
-                  <td class="qr-cell" data-label="QR">
-                    <span class="qr-links">
-                      <a class="qr-link" href={qrSvgUrl(row.key)} download title="Download QR code (SVG)">
-                        SVG
-                      </a>
-                      <a class="qr-link" href={qrPngUrl(row.key)} download title="Download QR code (PNG)">
-                        PNG
-                      </a>
-                    </span>
-                  </td>
-                  <td class="actions-cell" data-label="Actions">
-                    <Button
-                      variant="danger"
-                      disabled={unassigning[row.key]}
-                      onclick={() => handleUnassign(row.key)}
-                    >
-                      {unassigning[row.key] ? '…' : 'Remove'}
-                    </Button>
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+        {#snippet linkCell(row: TableRow)}
+          {#if row.kind === 'group'}
+            <div class="group-cell">
+              <button
+                type="button"
+                class="twisty"
+                aria-expanded={row.expanded}
+                aria-label={`${row.expanded ? 'Collapse' : 'Expand'} ${row.group.title}`}
+                onclick={() => toggleGroup(row.group.id)}
+              >
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" class:open={row.expanded}><path d="M6 3.5l4.5 4.5L6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+              </button>
+              <TwoLineCell wrapAlways title={row.group.title} meta={`${row.group.links.length} links · ${row.group.path}`} />
+            </div>
+          {:else}
+            <div class="link-cell" class:child={row.child}>
+              <TwoLineCell
+                wrapAlways
+                title={row.title}
+                meta={linkMeta(row.link.key, row.child ? '' : row.link.label, row.child ? '' : row.path)}
+                href={'#/links/' + encodeURIComponent(row.link.key)}
+                dim={!row.link.active}
+                tag={row.link.active ? '' : 'Inactive'}
+              />
+            </div>
+          {/if}
+        {/snippet}
+        {#snippet cell(row: TableRow, col: Column<TableRow>)}
+          {#if col.key === 'link'}
+            {@render linkCell(row)}
+          {:else if col.key === 'channel'}
+            {#if row.kind === 'group'}
+              {@const ch = groupChannels(row.group.links)}
+              <span class="text-muted" title={ch}>{groupChannelsShort(row.group.links) || '—'}</span>
+            {:else}
+              {@const ch = channelText(row.link)}
+              <span class="text-muted bidi-ltr" title={ch}>{ch || '—'}</span>
+            {/if}
+          {:else if col.key === 'placement'}
+            {#if row.kind === 'link'}
+              <span class="text-muted" title={row.link.placement}>{row.link.placement || '—'}</span>
+            {/if}
+          {:else if col.key === 'clicks'}
+            {@const clicks = row.kind === 'group' ? row.group.clicks : row.link.clicksInWindow}
+            {@const share = row.kind === 'group' ? row.group.share : row.share}
+            <div class="clicks-cell">
+              <InlineBar value={clicks} max={barMax} />
+              <span class="share">{share}%</span>
+            </div>
+          {:else if col.key === 'actions'}
+            {#if row.kind === 'link'}
+              <RowMenu items={linkMenu(row)} label={`Actions for ${row.title}`} copyText={shortUrl(row.link.key)} />
+            {/if}
+          {/if}
+        {/snippet}
+        {#snippet bulk(keys: string[])}
+          <Button variant="subtle" onclick={() => copySelected(keys)}>Copy URLs</Button>
+          <Button variant="subtle" onclick={() => exportSelected(keys)}>Export</Button>
+          <Button variant="subtle" onclick={() => removeLinks(keys)}>Remove from campaign</Button>
+        {/snippet}
+        <DataTable
+          {columns}
+          rows={tableRows}
+          rowKey={(r) => r.id}
+          {cell}
+          caption="Links in this campaign"
+          bind:sort
+          serverSort
+          firstDir="asc"
+          selectable
+          bind:selected
+          {bulk}
+          rowSelectable={(r) => r.kind === 'link'}
+          selectAllKeys={rows.map((r) => r.key)}
+          rowLabel={(r) => (r.kind === 'link' ? r.title : r.group.title)}
+          rowClass={(r) => (r.kind === 'group' ? 'group-row' : '')}
+        />
         {#if unlistedClicks > 0}
           <p class="text-faint unlisted-note">
             {unlistedClicks} click{unlistedClicks === 1 ? '' : 's'} in this window came from links no longer
@@ -1004,74 +1037,63 @@
     font-weight: 600;
   }
 
-  /* ── Links table ────────────────────────────────────────────────────── */
+  /* ── Links table (#0157) ────────────────────────────────────────────── */
   .links-toolbar {
     padding: var(--space-3) var(--space-4);
     border-bottom: var(--border-w) solid var(--border);
   }
+  .links-toolbar-error {
+    padding: var(--space-2) var(--space-4) var(--space-3);
+    margin: 0;
+  }
   .toolbar-actions {
     flex-wrap: wrap;
-    justify-content: flex-end;
+    gap: var(--space-3);
+    align-items: center;
   }
-  /*
-   * Duplicates the relevant subset of Button.svelte's `.btn` + `.btn-subtle`
-   * rules (review fix — see the toolbar markup comment above for why this
-   * can't just reuse those class names). Kept in sync BY HAND with
-   * Button.svelte; if that component's subtle variant changes, this rule
-   * should change with it.
-   */
-  .qr-zip-link {
+  .group-toggle {
     display: inline-flex;
     align-items: center;
-    font-family: var(--font);
+    gap: var(--space-2);
     font-size: var(--fs-base);
-    line-height: 1;
-    padding: var(--space-2) var(--space-3);
-    border: var(--border-w) solid transparent;
-    border-radius: var(--radius);
-    background: transparent;
-    color: var(--accent);
-    text-decoration: none;
     cursor: pointer;
-    user-select: none;
   }
-  .qr-zip-link:hover {
-    background: var(--accent-subtle);
-  }
-  /*
-   * CSV export (#0107): identical rule to .qr-zip-link above, duplicated
-   * rather than shared for the same reason that rule gives — this is a
-   * SEPARATE <a> this component renders directly, so it needs its own
-   * class. Kept in sync BY HAND with .qr-zip-link/Button.svelte's subtle
-   * variant.
-   */
-  .export-csv-link {
+  .group-toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+  /* Hidden on desktop: the Link / Clicks headers sort. Shown on the phone card layout. */
+  .mobile-sort-toggle { display: none; }
+  .link-cell,
+  .group-cell { min-width: 0; }
+  .group-cell { display: flex; align-items: center; gap: var(--space-2); }
+  .group-cell :global(.two-line) { flex: 1; }
+  .link-cell.child { padding-left: var(--space-5); }
+  .twisty {
+    flex: none;
     display: inline-flex;
     align-items: center;
-    font-family: var(--font);
-    font-size: var(--fs-base);
-    line-height: 1;
-    padding: var(--space-2) var(--space-3);
-    border: var(--border-w) solid transparent;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: none;
     border-radius: var(--radius);
     background: transparent;
-    color: var(--accent);
-    text-decoration: none;
+    color: var(--text-muted);
     cursor: pointer;
-    user-select: none;
   }
-  .export-csv-link:hover {
-    background: var(--accent-subtle);
+  .twisty:hover { background: var(--bg-subtle); color: var(--text); }
+  .twisty:focus-visible { outline: 2px solid var(--accent); }
+  .twisty svg { transition: transform 0.1s; }
+  .twisty svg.open { transform: rotate(90deg); }
+  .clicks-cell { display: flex; flex-direction: column; align-items: stretch; gap: 1px; }
+  .share {
+    padding: 0 var(--space-2);
+    text-align: right;
+    font-size: var(--fs-sm);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
   }
-  /*
-   * Hidden above the stacked-card breakpoint — the header's own sort button
-   * (inside <thead>) is visible and sufficient on desktop. Shown below it in
-   * the @media (max-width: 900px) block further down, alongside the switch
-   * to the stacked-card layout (#0103 fix 1).
-   */
-  .mobile-sort-toggle {
-    display: none;
-  }
+  .bidi-ltr { direction: ltr; unicode-bidi: isolate; }
+  :global(tr.group-row) { background: var(--bg-subtle); }
   .empty-msg {
     padding: var(--space-4);
   }
@@ -1092,364 +1114,10 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .sort-btn {
-    background: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    font: inherit;
-    text-transform: inherit;
-    letter-spacing: inherit;
-    color: inherit;
-    cursor: pointer;
-  }
-  /* :global() (#0120 — was a <button onclick>, now a Link.svelte anchor);
-     see app.css's ".nav-tab" comment for why a scoped rule can't reach it. */
-  :global(.link-key-btn) {
-    background: none;
-    border: none;
-    padding: 0;
-    margin: 0;
-    font: inherit;
-    font-family: var(--font-mono);
-    color: var(--accent);
-    cursor: pointer;
-    text-decoration: underline;
-    /*
-     * display:block (not the default inline) + max-width:100% so a long
-     * custom-key alias (up to 12 chars, #0106 third round) ellipsizes
-     * WITHIN the already-capped .key-cell <td> instead of just being
-     * clipped with no "…" — a plain inline button's overflow is invisible
-     * to a hidden-overflow ancestor's text-overflow rule.
-     */
-    display: block;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  /*
-   * Column-priority decision (#0103 fix 6): the links table is the widest
-   * thing in the app (10 columns) and, unconstrained, ran to ~1100px —
-   * wider than even the desktop .table-scroll container (926px), so
-   * Created/Remove were cut off at EVERY width, not just narrow ones.
-   * Title/Destination/Placement are the three free-text columns with real
-   * room to give back, so they take the squeeze here; Clicks and Share are
-   * the numbers the page exists to show and are left unconstrained.
-   * Placement gets its own (tighter) class rather than reusing .dest-cell —
-   * the two were accidentally sharing one 200px budget, which was most of
-   * the desktop overflow on its own.
-   *
-   * #0106 THIRD review round — table-layout is `auto` (no explicit
-   * table-layout/colgroup), so a `<td>`'s max-width only bounds a column
-   * when nothing else in that column demands more. Two things this table
-   * was still getting wrong, found by measuring `.links-table` at
-   * `width: min-content` directly (the real per-column demand, independent
-   * of the 926px container) rather than trusting a scrollWidth == 926
-   * reading alone — 926 is `max(926, min-content)`, so a scrollWidth match
-   * can still mean zero real headroom:
-   *
-   *   1. .placement-cell's max-width applied to the <td> only. Its <th> —
-   *      plain text, no class — sized itself to "Placement"'s own
-   *      max-content (~101.56px), WIDER than the 90px td cap, so the column
-   *      rendered at the header's width regardless of what the cap said.
-   *      The cap was provably inert. Fixed by putting the SAME class on
-   *      both <th> and <td> for this column (and title/dest/key below) so
-   *      header and data share one real bound — the header word now
-   *      ellipsizes too when it doesn't fit, exactly like the data already
-   *      did (a `title="Placement"` IS added to this <th>, since unlike the
-   *      data cells' own `title` — which mirrors visible, already-known
-   *      text — a truncated "Placem…" has no other way to recover the full
-   *      label on hover; the accessible name read by assistive tech is the
-   *      text node either way, unaffected by the CSS clip).
-   *   2. Short key had NO cap at all. Generated keys are 6 chars, but
-   *      custom aliases are a documented 1–12 url-safe-char feature
-   *      (internal/handlers/links.go's validKey) — a 12-char alias grows
-   *      this column directly, and did so unconstrained. .key-cell caps it
-   *      the same way, with the row's `title` on the button (matching the
-   *      existing Title/Destination/Placement pattern) so a truncated key
-   *      is still recoverable on hover without leaving the table. Its <th>
-   *      shares the same class, so the header text was shortened from
-   *      "Short key" to "Key" instead of letting it ellipsize — "Short key"
-   *      truncates to an illegible "SHO…" at any cap tight enough to matter,
-   *      whereas "Placement"'s single-word truncation ("Placem…") stays
-   *      readable; the mobile stacked-card view keeps the full "Short key"
-   *      label via `data-label`, which is a separate attribute unaffected by
-   *      this rename.
-   *
-   * All four caps were tuned by measuring `.links-table` at
-   * `width: min-content` (the browser's real per-column demand, independent
-   * of the 926px container — 926 is `max(926, min-content)`, so a
-   * scrollWidth match alone can hide a min-content that is already AT the
-   * threshold) against a 44-row adversarial dataset built for THIS round:
-   * realistic long titles/destinations/placements at their caps, and a
-   * 12-CHARACTER custom-key alias on every row — the worst case
-   * `validKey` allows, not the 6-char generated default the previous round
-   * tested. Reproduced this round, in order:
-   *   - This file's second-round shipped state (95px/126px title/dest, a
-   *     90px .placement-cell cap on the <td> only, no key cap) against the
-   *     new dataset: min-content 967.98px, i.e. 41.98px PAST the 926px
-   *     container — confirms the coordinator's finding that the second
-   *     round's "926 == 926" reading had ~0 real headroom and did not
-   *     survive a longer key.
-   *   - Capping both <th>s (.placement-cell at 90px, .key-cell at 84px)
-   *     while leaving .title-cell/.dest-cell at their second-round 95px/
-   *     126px: min-content 929.72px — that's 3.72px PAST the 926px
-   *     container (confirmed by scrollWidth reading 930/926 at this stage),
-   *     i.e. STILL BROKEN, not "3.72px of margin" as an earlier version of
-   *     this comment mis-stated — a sign error that made a failing step
-   *     read as a barely-passing one. Left in this list because the
-   *     progression itself is real and reproducible; only the earlier
-   *     wording of this line was wrong.
-   *   - Tightening .placement-cell to 80px and .key-cell to 66px: 901.72px,
-   *     24.28px of REAL margin (926 − 901.72) — past the ~5px floor a
-   *     genuine fix needs.
-   *   - #0106 fourth review round: the round-three "final" allocation
-   *     (.title-cell 105px, .dest-cell 136px, .placement-cell 75px,
-   *     .key-cell 60px) spent its recovered budget on the wrong columns —
-   *     75px still forces "Placement"'s <th> to ellipsize to "PLAC…" (its
-   *     unconstrained max-content is ~101.56px, measured above), and 60px
-   *     truncates even the DEFAULT 6-character generated key (needs 43px of
-   *     content box + 24px of td padding = 67px minimum,
-   *     `.link-key-btn`'s clientWidth 36px < scrollWidth 43px at that cap)
-   *     — the common case, not the adversarial one. Meanwhile the 10px/10px
-   *     given to .title-cell/.dest-cell bought one more character each and
-   *     changed nothing readable. Reallocated: .title-cell back to 95px
-   *     (its second-round value); .dest-cell cut hard to 60px — cheap
-   *     because #0113 (filed separately) established the column conveys no
-   *     information at any width it can afford (`https://www.ex…` /
-   *     `https://www.so…`, indistinguishable either way) — freeing enough
-   *     to widen .placement-cell to 110px (past its 101.56px unconstrained
-   *     header width, so "Placement" renders whole, not just its data) and
-   *     .key-cell to 111px (fits a FULL 12-character alias — the `87px`
-   *     content box `.link-key-btn` needs at 12 chars, plus 24px padding —
-   *     not just the 6-char floor). Verified both directions: a 6-char
-   *     generated key (`.link-key-btn` clientWidth 43px == scrollWidth
-   *     43px, 3 links checked) and a 12-char alias (same equality, all 44
-   *     rows checked, 0 truncated) now render in full, and `th.placement-
-   *     cell`'s clientWidth (110px) == scrollWidth (110px) — "Placement"
-   *     no longer ellipsizes. Final measured min-content: 910.42px against
-   *     the 926px container — **15.58px of real headroom** — at all of
-   *     1024/1280/1440/1920px, with the same 44-row/12-char-key dataset,
-   *     Remove fully inside `.table-scroll` at every width.
-   *
-   *   - #0112: this round's own adversarial dataset (12 rows, every row a
-   *     12-char custom-key alias, long titles/destinations/placements at
-   *     their existing caps, PLUS long/realistic UTM source+medium values
-   *     this round specifically targets — `partner_newsletter_q3`,
-   *     `print_qr_poster`, `sponsored_content_native`,
-   *     `partner_co_marketing_newsletter`, `affiliate_network_referral`,
-   *     etc.) measured `.links-table` at `width: min-content`: **917.03px**
-   *     against the 926px container — **8.97px of real headroom** — at all
-   *     of 1024/1280/1440/1920px, `.table-scroll` reading `926 == 926` at
-   *     every one, with `.source-cell`/`.medium-cell` capped at 80px (see
-   *     that rule's own comment below for why 80px and for the truncation
-   *     direction chosen, and the `.bidi-ltr` rule below IT for a review-
-   *     round fix to a character-reordering bug the first version of this
-   *     cap introduced). Tighter than the 15.58px/24.28px margins earlier
-   *     rounds landed on, and past the ~5px floor a genuine fix needs FOR
-   *     THIS DATASET specifically — not an unconditional floor: `.num`
-   *     (Clicks/Share) is uncapped on `main` too, and a click count reaching
-   *     7 digits (`1234567`) pushes min-content to 927.45px against this
-   *     same 80px Source/Medium cap, i.e. headroom goes negative. That is a
-   *     pre-existing `.num`-width gap, not something this round's Source/
-   *     Medium caps introduced or could fix, and is out of scope here (see
-   *     the issue's own out-of-scope list); noted so a future round doesn't
-   *     re-derive it from scratch. 375px unaffected: `document.scrollWidth
-   *     == 375`, stacked cards still show every value in full.
-   */
-  .title-cell {
-    max-width: 95px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .dest-cell {
-    max-width: 60px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .placement-cell {
-    max-width: 110px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .key-cell {
-    max-width: 111px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /*
-   * #0112: Source and Medium were the two remaining text columns in this
-   * table with NO cap at all — every other free-text column (.title-cell,
-   * .dest-cell, .placement-cell, .key-cell above) got one across #0103/
-   * #0106, but these two were added later (#0099/#0100) and never joined
-   * that pass. An ordinary UTM value blows past what the table has to give:
-   * `utm_source=partner_newsletter_q3` alone (no other adversarial content)
-   * widened the Source column enough to push `.table-scroll` into
-   * horizontal overflow — the exact #0103/#0106 invariant this table is
-   * supposed to hold. Fixed the same way as every other capped column: the
-   * SAME class on both <th> and <td> (the `.placement-cell` lesson from
-   * #0106's third round — a `<td>` max-width alone is inert under
-   * `table-layout: auto` whenever the uncapped `<th>`'s own text is wider;
-   * "Source"/"Medium" are short enough that this cap never actually
-   * truncates the HEADER, but the class still has to be on both cells so
-   * nothing upstream can widen the column past it).
-   *
-   * TRUNCATION DIRECTION: leading ellipsis, not trailing. UTM values in this
-   * app are conventionally prefixed and disambiguated at the END —
-   * `partner_newsletter` vs `partner_newsletter_q3`, `print_qr_poster` vs
-   * `print_qr_poster_v2` — so trailing truncation collapses exactly the
-   * pairs a reader most needs to tell apart down to an identical
-   * "partner_newsle…" for both. Truncating from the front instead
-   * (`direction: rtl` + `text-align: left` on the cell, a standard CSS-only
-   * front-ellipsis: the element's paragraph direction flips so the
-   * browser's own text-overflow clips from the visual left and places the
-   * "…" there) keeps the differentiating suffix on screen without any JS
-   * string-slicing, for exactly the shape of value the issue itself names.
-   *
-   * REVIEW FIX — `direction: rtl` on the cell does not just move the
-   * ellipsis, it runs the UNICODE BIDI ALGORITHM over the cell's actual
-   * content, and that algorithm reorders characters, not just the ellipsis
-   * position, whenever the content isn't a single uninterrupted run of
-   * strong-LTR characters. Caught by measuring rendered character order
-   * with `Range.getClientRects()` (sorted by screen x), not by eyeballing:
-   * a leading digit run, a leading/trailing neutral character (`-`, `.`,
-   * `!`), or mixed script all reorder — `2026_q3_2027` rendered
-   * `q3_2027_2026` (a value the string never contained), `promo_2026!`
-   * rendered `!promo_2026` (the `!` relocated to the far left, then clipped
-   * away by the ellipsis instead of the digits it was meant to punctuate).
-   * 0 of the first round's 24 plain-snake_case cells reordered, which is
-   * exactly why this shipped once already looking correct — UTM values are
-   * not guaranteed to be plain snake_case (a leading campaign-year prefix
-   * like `2026_spring_launch` is an entirely ordinary one). Fixed by
-   * wrapping the <td>'s value in `<span class="bidi-ltr">` (`direction:
-   * ltr; unicode-bidi: isolate`, see that rule below): the isolate makes
-   * the span's contents an opaque, independently-LTR-ordered unit as far as
-   * the surrounding rtl paragraph's bidi algorithm is concerned, so the
-   * PARENT cell's rtl-ness still controls where text-overflow clips from
-   * (the front) while the SPAN's own content always renders in the order it
-   * was written, regardless of digits/punctuation/script. Only the two
-   * <td>s need this — the <th>s' content is always the literal word
-   * "Source"/"Medium", never data, so there is nothing for the bidi
-   * algorithm to reorder there.
-   *
-   * NOT A COMPLETE GUARANTEE, stated plainly rather than glossed over: this
-   * round's own adversarial dataset also produced two pairs that render
-   * IDENTICALLY at 80px despite being genuinely different values —
-   * `partner_newsletter` and `partner_co_marketing_newsletter` both render
-   * "…sletter" (they share the literal 11-character suffix "_newsletter",
-   * so no amount of trailing text short of ~12+ characters — far more than
-   * an 80px cell holds — reaches back far enough to show where they
-   * diverge); `print_flyer_poster` and `print_qr_poster` both render
-   * "…poster" the same way. A head+tail "middle ellipsis" was considered to
-   * close this, but the same two pairs need ~9 leading AND ~7+ trailing
-   * characters simultaneously to disambiguate (`partner_` is an
-   * 8-character shared prefix; `_poster`/`_newsletter` are 7/11-character
-   * shared suffixes) — roughly 130–150px, which this table does not have
-   * to give without pulling another column back below a floor #0106 spent
-   * four review rounds establishing. This is the same class of limitation
-   * `.title-cell`/`.dest-cell`/`.placement-cell`/`.key-cell` above already
-   * accept for adversarial SHARED-PREFIX pairs (trailing ellipsis has no
-   * defense against those either) — front truncation trades that failure
-   * mode for a rarer shared-prefix-AND-suffix one, while fixing the
-   * common, issue-cited case (tail-differentiated values) outright.
-   *
-   * Recovery for the residual case is the same two-part story the rest of
-   * this table relies on: `title` on the <td> (kept below, secondary — not
-   * sufficient alone per the issue's own AC, but still a real desktop
-   * affordance), and — genuinely touch-reachable, unlike hover — tapping
-   * the row's own key opens LinkDetail, then tapping Edit there opens the
-   * UTM builder (`#edit-utm-source`/`#edit-utm-medium`), which shows the
-   * full, unclipped value (measured: 666px == 666px, no truncation).
-   * REVIEW FIX: this is three taps (key, then Edit), not one — LinkDetail's
-   * own READ view shows Destination/Placement/Campaign/Clicks/Created/
-   * Expires and a click-derived UTM breakdown, but not the raw
-   * utm_source/utm_medium fields themselves; an earlier version of this
-   * comment overstated that as a one-tap "read view" recovery. The AC
-   * ("recoverable some way that works on touch") still holds — it does not
-   * require the recovery to be one tap — but the affordance is the edit
-   * form specifically, not the page in general. The accessible name read by
-   * assistive tech is the cell's own text node either way (inside the
-   * `bidi-ltr` span, unaffected by the CSS clip, the direction flip, or the
-   * isolate — same reasoning as .placement-cell's <th> above) — a screen
-   * reader never sees only "…sletter" regardless of which of the two rows
-   * above it is announcing.
-   *
-   * The mobile stacked-card layout (<900px) shows the value in full
-   * regardless (`.links-table td`'s `max-width: none` below already lifts
-   * every column's cap there), so the front-ellipsis — and the residual
-   * collision risk above — is a desktop/tablet-width-only concern;
-   * `direction: ltr` is restored for these two cells in that breakpoint
-   * purely so the row's flex layout (`.links-table td { display: flex;
-   * ... }`) doesn't itself mirror right-to-left from the lingering
-   * `direction: rtl` once nothing is being truncated.
-   *
-   * Cap value and measured headroom: see the min-content accounting at the
-   * end of the .title-cell comment above for the running total this column
-   * budget was tuned against.
-   */
-  .source-cell,
-  .medium-cell {
-    max-width: 80px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    direction: rtl;
-    text-align: left;
-  }
-  /*
-   * Review fix — see the "REVIEW FIX" paragraph in the comment above this
-   * rule's cell for the bug this closes: `direction: rtl` on the cell
-   * reorders the VALUE's own characters (digits, punctuation, mixed
-   * script), not just the ellipsis, whenever the value isn't pure
-   * strong-LTR text. `unicode-bidi: isolate` makes this span's content an
-   * independently-ordered unit the surrounding rtl paragraph cannot
-   * reorder; `direction: ltr` is redundant with the isolate for the actual
-   * character order but kept explicit so the span's own start/end (were
-   * anything inside it ever right-aligned) doesn't inherit the cell's rtl.
-   * Applies only inside .source-cell/.medium-cell's <td>s (see the markup)
-   * — the <th>s have no dynamic content to reorder.
-   */
-  .source-cell .bidi-ltr,
-  .medium-cell .bidi-ltr {
-    direction: ltr;
-    unicode-bidi: isolate;
-  }
   .num {
     text-align: right;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-  }
-  .actions-cell {
-    text-align: right;
-    white-space: nowrap;
-  }
-  /*
-   * QR column (#0106): SVG and PNG download links (see the header comment
-   * for the round(s) this table's zero-scroll invariant was re-measured and
-   * fixed against realistic content). Padding here is var(--space-1) (4px
-   * each side) rather than the table's base var(--space-3) (12px each
-   * side, from app.css's generic `tbody td`/`thead th` rules) — switching
-   * back to the base padding costs 16px (2 sides × 8px), pure arithmetic
-   * independent of any other column's width, which is real money against a
-   * budget this tight; see .title-cell's comment below for the full
-   * min-content accounting and the final measured headroom this leaves.
-   */
-  .qr-th,
-  .qr-cell {
-    padding-left: var(--space-1);
-    padding-right: var(--space-1);
-  }
-  .qr-cell {
-    white-space: nowrap;
-  }
-  .qr-link {
-    color: var(--accent);
-    text-decoration: underline;
-    font-size: var(--fs-sm);
   }
   .unlisted-note {
     padding: 0 var(--space-4) var(--space-3);
@@ -1470,167 +1138,14 @@
     .date-row {
       grid-template-columns: 1fr;
     }
-    /*
-     * Mirrors Button.svelte's own ≤480px rule (`.btn { padding: var(--space-3)
-     * var(--space-3); min-height: 40px; }`) — missed in the initial hand-sync
-     * (review fix). Measured before this fix: 31px tall at 420px viewport vs
-     * the Button beside it (Copy all short URLs) at 40px — a visibly
-     * mismatched, sub-40px tap target on exactly the input where mobile tap
-     * targets matter. .qr-zip-link duplicates .btn/.btn-subtle rather than
-     * reusing those class names (see the toolbar markup comment above for
-     * why), so this mobile rule has to be hand-copied too; if Button.svelte's
-     * mobile rule changes, this one should change with it.
-     */
-    .qr-zip-link {
-      padding: var(--space-3) var(--space-3);
-      min-height: 40px;
-    }
-    /* Mirrors .qr-zip-link's own ≤480px rule immediately above — same 40px
-       tap-target reasoning, hand-copied for the same "duplicates, does not
-       share, a class" reason (#0107). */
-    .export-csv-link {
-      padding: var(--space-3) var(--space-3);
-      min-height: 40px;
-    }
     .summary-grid {
       grid-template-columns: repeat(2, 1fr);
     }
   }
 
-  /*
-   * Stacked-card breakpoint for the links table (#0103 fix 2): originally
-   * 480px, but a real-browser measurement at 481px found
-   * documentElement.scrollWidth 855 against clientWidth 481 (and
-   * .table-scroll 924 against 447) — the ten-column table still forced
-   * horizontal panning across a wide 481px–~1000px band even though desktop
-   * (above that band) and the old sub-480px stacked layout were both clean.
-   * Raised to 900px so nothing between "phone" and "narrow laptop" pans.
-   * This is a SEPARATE @media block from the 480px one above — fields/
-   * date-row/summary-grid don't overflow and stay stacking at the original
-   * 480px; only the table layout moves.
-   *
-   * Because more of the viewport range now uses the stacked layout, the
-   * visible .mobile-sort-toggle in .links-toolbar (see above) matters more,
-   * not less — it is the ONLY sighted way to reach "sortable by clicks"
-   * anywhere in this wider band, since the <thead> (and the sort button
-   * living inside it) is still sr-only-clipped here, not display:none.
-   */
-  @media (max-width: 900px) {
-    .mobile-sort-toggle {
-      display: inline-flex;
-    }
-
-    /*
-     * Ten columns can't fit any priority scheme below this breakpoint
-     * without either hiding data the AC requires (Clicks/Share/Remove all
-     * reachable) or forcing a horizontal scroll with no affordance under
-     * macOS overlay scrollbars (the reviewer's original complaint). Instead
-     * of picking which columns to drop, the table becomes a stacked card
-     * per link: every field stays present, in the SAME priority order as
-     * the desktop columns (short key/title/destination first, clicks/
-     * share/created next, actions last), just read top-to-bottom instead
-     * of left-to-right. This guarantees Clicks, Share, and Remove are
-     * always reachable with page (vertical) scrolling only — never
-     * horizontal.
-     */
-    .table-scroll {
-      overflow-x: visible;
-    }
-    .links-table thead {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip: rect(0, 0, 0, 0);
-      white-space: nowrap;
-    }
-    .links-table,
-    .links-table tbody,
-    .links-table tr {
-      display: block;
-      width: 100%;
-    }
-    .links-table tbody tr {
-      border: var(--border-w) solid var(--border);
-      border-radius: var(--radius);
-      margin: var(--space-3);
-      padding: var(--space-1) 0;
-    }
-    .links-table tbody tr:last-child {
-      margin-bottom: var(--space-3);
-    }
-    .links-table td {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: var(--space-3);
-      padding: var(--space-2) var(--space-3);
-      border-bottom: none;
-      max-width: none;
-      overflow-wrap: anywhere;
-      white-space: normal;
-      text-align: right;
-    }
-    /*
-     * #0112: .source-cell/.medium-cell's desktop `direction: rtl` (see that
-     * rule's comment above) is a front-truncation trick that only makes
-     * sense while the cell is actually clipped to a fixed max-width. Below
-     * this breakpoint `.links-table td` above already lifts `max-width` to
-     * `none` and wraps normally, so nothing truncates — but `direction` is
-     * a DIFFERENT property, untouched by that rule, and would otherwise keep
-     * flowing as rtl here too. Left alone, that flips which side of this
-     * flex row (`display: flex` a few lines up) counts as the main-axis
-     * start, mirroring the data-label/value pair right-to-left for exactly
-     * these two cells while every other stacked card reads left-to-right.
-     * Reset back to ltr here, scoped to the same two cells.
-     */
-    .source-cell,
-    .medium-cell {
-      direction: ltr;
-    }
-    .links-table td::before {
-      content: attr(data-label);
-      flex: 0 0 auto;
-      font-weight: 600;
-      font-size: var(--fs-sm);
-      color: var(--text-muted);
-      text-align: left;
-    }
-    .links-table .actions-cell {
-      justify-content: flex-end;
-    }
-    .links-table .actions-cell::before {
-      content: none;
-    }
-    /*
-     * Mobile QR tap targets (review fix): at desktop widths .qr-link is a
-     * plain inline text link inside the tightest column budget in the app
-     * (see the QR column header comment) — deliberately small there. Below
-     * this breakpoint the stacked card gives each row the FULL viewport
-     * width, so the same tight sizing carries over for no reason and
-     * measured 24.3×17.4px / 25.5×17.4px, well under the 40px minimum this
-     * file already applies to .qr-zip-link's own ≤480px rule — the same
-     * defect class, just unfixed in this cell. .qr-links (the wrapper
-     * around the two <a> tags, added so this rule has something to lay out
-     * without disturbing the desktop inline-text styling above) becomes a
-     * flex row of two real tap targets, each sized like Button's own mobile
-     * rule.
-     */
-    .qr-links {
-      display: flex;
-      gap: var(--space-2);
-    }
-    .links-table .qr-cell .qr-link {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 40px;
-      min-width: 40px;
-      padding: var(--space-2) var(--space-3);
-      border: var(--border-w) solid var(--border-strong);
-      border-radius: var(--radius);
-      text-decoration: none;
-      font-size: var(--fs-base);
-    }
+  @media (max-width: 899px) {
+    .mobile-sort-toggle { display: inline-flex; }
+    .link-cell.child { padding-left: var(--space-4); }
+    .clicks-cell { align-items: flex-end; }
   }
 </style>

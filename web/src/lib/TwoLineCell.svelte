@@ -11,11 +11,13 @@
     tag?: string;
     /** Phone cards: let the title wrap to two lines instead of one. */
     wrap?: boolean;
+    /** Wrap to two lines at every width (then ellipsize), e.g. a table whose titles must stay readable. */
+    wrapAlways?: boolean;
   }
-  let { title, meta = '', href, dim = false, tag = '', wrap = false }: Props = $props();
+  let { title, meta = '', href, dim = false, tag = '', wrap = false, wrapAlways = false }: Props = $props();
 </script>
 
-<div class="two-line" class:dim class:wrap>
+<div class="two-line" class:dim class:wrap class:wrap-always={wrapAlways}>
   <span class="l1row">
     {#if href}
       <a class="line1" {href} {title}>{title}</a>
@@ -49,6 +51,16 @@
     font-weight: 600;
     color: var(--text);
     text-decoration: none;
+  }
+  /* Two-line clamp at every width: rows grow only when a title needs the room. */
+  .wrap-always .line1 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.3;
   }
   a.line1:hover { color: var(--accent); text-decoration: underline; }
   @media (max-width: 899px) {
