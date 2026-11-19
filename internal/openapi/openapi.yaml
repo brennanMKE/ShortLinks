@@ -1,0 +1,1892 @@
+openapi: 3.1.0
+info:
+  title: ShortLinks API
+  version: 0.6.0
+  summary: REST API for short links, campaigns and click reports.
+  description: |
+    The ShortLinks REST API manages short links and campaigns and reads click
+    reports. It is the same API the web app uses, and scripts and AI agents call
+    it with an API token.
+
+    **Scope.** This document covers the `/api` routes a token can use, and
+    nothing else. The browser-only routes (`/auth/*`, `/account/*`,
+    `/admin/*`, which handle passkeys, token management, users, settings, URL
+    filters and the audit log) are left out on purpose, as are the public
+    redirect `GET /u/{key}` and `GET /health`. An API token is refused on them
+    with `403 api_token_not_permitted`. The Model Context Protocol endpoint
+    `/mcp` is not REST; it is listed in the `/mcp` note below and described in
+    `docs/mcp.md`.
+
+    **Authentication.** Send `Authorization: Bearer slk_...` on every request.
+    Create a token under Account, then API tokens in the web app. The web app
+    itself uses a session cookie, which these routes also accept. Only
+    `GET /api/public/home` and `GET /api/openapi.yaml` need no credentials.
+
+    **Read-only tokens.** A token created as read-only may call `GET` routes.
+    `POST`, `PATCH` and `DELETE` answer `403 api_token_read_only`.
+
+    **Errors.** Every error is JSON with an `error` code or message. Validation
+    errors on list and report parameters also carry `field` and `message`.
+    Idempotency errors carry `message`. Rate limits answer `429` with
+    `Retry-After`: 600 requests per minute per token, with bursts up to 60.
+
+    **Retries.** `POST /api/links`, `POST /api/campaigns` and
+    `POST /api/campaigns/{slug}/links/batch` accept an `Idempotency-Key` header
+    that makes a retry safe.
+
+    **Reports.** All reports are served by one path, `GET /api/reports/{name}`,
+    with `name` as an enum. They share one parameter model (window, filters,
+    `limit`) and one response envelope, and a report adds a few parameters of
+    its own. See the `Reports` tag.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: "{base_url}"
+    description: The deployment's BASE_URL.
+    variables:
+      base_url:
+        default: https://example.com
+        description: The public base URL of your ShortLinks deployment.
+tags:
+  - name: Account
+    description: The caller and public site information.
+  - name: Links
+    description: Short links.
+  - name: Campaigns
+    description: Campaigns and the links in them.
+  - name: Reports
+    description: |
+      Click reports. `GET /api/reports` lists them with their parameters, and
+      `GET /api/reports/{name}` runs one.
+
+      | Report | Answers | Own parameters |
+      |---|---|---|
+      | `overview` | Totals, trend, campaigns and UTM facets | none |
+      | `top-content` | Content ranked by clicks, grouped by destination | `sort` |
+      | `top-links` | Individual links ranked by clicks | `sort` |
+      | `breakdown` | Clicks grouped by one dimension | `dimension` (required) |
+      | `timeseries` | Clicks per day or week, optionally split | `granularity`, `split_by`, `series_limit` |
+      | `movers` | Biggest gains and losses against the previous window | `unit`, `min_clicks` |
+      | `idle-links` | Active links with no clicks in the window | `min_age_days` |
+      | `campaign-comparison` | Every campaign side by side | none |
+      | `campaign-performance` | One campaign in one call | `slug` (required), `columns` |
+      | `link-performance` | One link in one call | `key` (required) |
+  - name: Events
+    description: Live updates.
+  - name: Documentation
+    description: This specification.
+  - name: MCP
+    description: |
+      `/mcp` is a Model Context Protocol endpoint (Streamable HTTP, JSON-RPC),
+      not a REST API, so it has no path in this document. Agents connect to
+      `POST /mcp` with the same bearer token. See `docs/mcp.md`.
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+paths:
+  /api/me:
+    get:
+      tags: [Account]
+      operationId: getMe
+      summary: The authenticated user
+      description: Confirms which user and, for a token, which token is calling.
+      responses:
+        "200":
+          description: The caller.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/public/home:
+    get:
+      tags: [Account]
+      operationId: getPublicHome
+      summary: Signed-out home page information
+      description: |
+        Needs no credentials. Exposes only whether registrations are open and
+        the optional redirect for the site root.
+      security: []
+      responses:
+        "200":
+          description: Public home information.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicHome" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /api/openapi.yaml:
+    get:
+      tags: [Documentation]
+      operationId: getOpenAPISpec
+      summary: This OpenAPI document
+      description: Needs no credentials. It holds no secrets.
+      security: []
+      responses:
+        "200":
+          description: The OpenAPI 3.1 document, as YAML.
+          content:
+            application/yaml:
+              schema: { type: string }
+        "304":
+          description: The `If-None-Match` header matched the `ETag`. No body.
+  /api/events:
+    get:
+      tags: [Events]
+      operationId: streamEvents
+      summary: Server-sent event stream
+      description: |
+        Holds the connection open and pushes events for the caller's own links.
+        The first frame is the comment `: connected`. The only event today is
+        `link.created`, whose data is the JSON of the new link (see `Link`).
+      responses:
+        "200":
+          description: An event stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /api/links:
+    get:
+      tags: [Links]
+      operationId: listLinks
+      summary: List, search and sort links
+      description: |
+        Paged, newest first, limited to the caller's own links. With none of the
+        filter parameters the response is the plain `LinkList` with all-time
+        `click_count`. Passing any of `q`, `campaign`, `source`, `medium`,
+        `status`, `content_key`, `sort` or `window`, even with an empty
+        value, returns the `EnrichedLinkList`, whose items add `content_key`,
+        `label`, `campaign_slug` and, with `window`, `clicks_window`.
+      parameters:
+        - { $ref: "#/components/parameters/Page" }
+        - { $ref: "#/components/parameters/PerPage" }
+        - name: q
+          in: query
+          description: Case-insensitive substring of title, key or destination URL. `%`, `_` and `\` match literally.
+          schema: { type: string }
+        - name: campaign
+          in: query
+          description: A campaign slug, or `none` for links in no campaign.
+          schema: { type: string }
+        - name: source
+          in: query
+          description: "`utm_source` values, comma-separated. `~none` matches empty."
+          schema: { type: string }
+        - name: medium
+          in: query
+          description: "`utm_medium` values, comma-separated. `~none` matches empty."
+          schema: { type: string }
+        - name: status
+          in: query
+          description: |
+            Absent means `all`. Present but empty means `active`. Each link is in
+            exactly one state: `expired` (`expires_at` has passed), else
+            `inactive` (deactivated or denied by a URL filter), else `active`.
+          schema: { type: string, enum: [active, inactive, expired, all] }
+        - name: content_key
+          in: query
+          description: |
+            Links whose destination has this content key (scheme, `utm_*`,
+            fragment and trailing slash ignored, host lower-cased), for example
+            `www.example.com/guides/x`.
+          schema: { type: string }
+        - name: sort
+          in: query
+          description: |
+            `created` newest first (default), `-created` oldest first, `clicks`
+            all-time most first, `clicks_window` (requires `window`), `title`
+            A to Z with untitled last.
+          schema: { type: string, enum: [created, -created, clicks, clicks_window, title] }
+        - name: window
+          in: query
+          description: Adds `clicks_window`, the non-bot clicks over that many days, today included.
+          schema: { type: string, enum: [7d, 30d, 90d] }
+        - name: tz
+          in: query
+          description: IANA time zone for `window` days. On its own it does not switch to the enriched response. Defaults to the server's `DEFAULT_TIMEZONE`.
+          schema: { type: string, examples: [America/Los_Angeles] }
+      responses:
+        "200":
+          description: A page of links.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/LinkList"
+                  - $ref: "#/components/schemas/EnrichedLinkList"
+        "400":
+          description: "`invalid_sort`, `invalid_status`, `invalid_window` or `invalid_tz`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FieldError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      tags: [Links]
+      operationId: createLink
+      summary: Create a short link
+      description: |
+        Runs the URL filter first (`422 url_denied`), then resolves the key (a
+        custom alias, or a generated six-character key) and deduplicates
+        generated keys per destination. Creating a link for a destination the
+        caller already shortened returns the existing link with
+        `"duplicate": true`, reactivating it if it was inactive. Custom aliases
+        are never deduplicated and answer `409` when taken.
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateLinkRequest" }
+      responses:
+        "201":
+          description: The link, new or existing.
+          headers:
+            Idempotent-Replayed: { $ref: "#/components/headers/IdempotentReplayed" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Link" }
+        "400":
+          description: Invalid body, destination URL, key or `Idempotency-Key`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "409":
+          description: |
+            The custom key is taken (`{"error":"key already taken"}`), or the
+            same `Idempotency-Key` is still being processed
+            (`idempotency_key_in_progress`, with `Retry-After`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
+        "422":
+          description: |
+            The destination was refused by a URL filter (`url_denied`, with
+            `reason` and `label`), or the `Idempotency-Key` was reused with a
+            different request (`idempotency_key_reused`).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DeniedError"
+                  - $ref: "#/components/schemas/IdempotencyError"
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/links/{key}:
+    parameters:
+      - { $ref: "#/components/parameters/LinkKey" }
+    get:
+      tags: [Links]
+      operationId: getLink
+      summary: One link with its click statistics
+      description: A key that does not exist or belongs to someone else answers `404`.
+      responses:
+        "200":
+          description: The link, with UTM breakdowns and a daily click series.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LinkDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/LinkNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    patch:
+      tags: [Links]
+      operationId: updateLink
+      summary: Edit, deactivate or reactivate a link
+      description: |
+        Send any of the editable fields. `expires_at: null` clears the expiry.
+        Field edits apply first, then `active`.
+
+        - `active: false` is the same as `DELETE`.
+        - `active: true` re-runs the URL filter against the effective
+          destination before anything is written. A match answers `422
+          destination_denied` and saves nothing. Links denied at creation are
+          never reactivated. Reactivating an active link is a no-op.
+        - Reactivation does not change `expires_at`.
+        - If the destination changed during the check, the answer is
+          `409 {"error":"conflict"}`. Retry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PatchLinkRequest" }
+      responses:
+        "200":
+          description: The updated link.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Link" }
+        "400":
+          description: Invalid body or field.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "404": { $ref: "#/components/responses/LinkNotFound" }
+        "409":
+          description: The destination changed during reactivation (`conflict`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Reactivation refused by a URL filter (`destination_denied`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeniedError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      tags: [Links]
+      operationId: deactivateLink
+      summary: Deactivate a link
+      description: |
+        Same effect as `PATCH` with `{"active": false}`. The link is kept, and
+        its redirect answers 404.
+      responses:
+        "200":
+          description: Deactivated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "404": { $ref: "#/components/responses/LinkNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/links/{key}/qr.svg:
+    parameters:
+      - { $ref: "#/components/parameters/LinkKey" }
+    get:
+      tags: [Links]
+      operationId: getLinkQRSVG
+      summary: QR code as SVG
+      description: A vector file for printing, sent as an attachment.
+      responses:
+        "200":
+          description: The QR code.
+          content:
+            image/svg+xml:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/LinkNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/links/{key}/qr.png:
+    parameters:
+      - { $ref: "#/components/parameters/LinkKey" }
+    get:
+      tags: [Links]
+      operationId: getLinkQRPNG
+      summary: QR code as PNG
+      responses:
+        "200":
+          description: The QR code.
+          content:
+            image/png:
+              schema: { type: string, contentEncoding: base64 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/LinkNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/campaigns:
+    get:
+      tags: [Campaigns]
+      operationId: listCampaigns
+      summary: List campaigns with activity
+      description: |
+        Each item adds link and click counts, the clicks in the last 30 days
+        (today included, in `tz`), a 30-element daily sparkline and the derived
+        status.
+      parameters:
+        - name: sort
+          in: query
+          description: "`created` (default), `activity` (`clicks_30d` descending) or `name`."
+          schema: { type: string, enum: [created, activity, name] }
+        - name: tz
+          in: query
+          description: IANA time zone for the 30-day window. Defaults to the server's `DEFAULT_TIMEZONE`.
+          schema: { type: string, examples: [America/Los_Angeles] }
+      responses:
+        "200":
+          description: The caller's campaigns.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignList" }
+        "400":
+          description: "`invalid_sort` or `invalid_tz`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FieldError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      tags: [Campaigns]
+      operationId: createCampaign
+      summary: Create a campaign
+      description: The slug is derived from the name and never changes afterwards.
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateCampaignRequest" }
+      responses:
+        "201":
+          description: The new campaign.
+          headers:
+            Idempotent-Replayed: { $ref: "#/components/headers/IdempotentReplayed" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Campaign" }
+        "400":
+          description: Invalid body, name, dates or `Idempotency-Key`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "409":
+          description: The same `Idempotency-Key` is still being processed (`idempotency_key_in_progress`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IdempotencyError" }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
+        "422":
+          description: The `Idempotency-Key` was reused with a different request (`idempotency_key_reused`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IdempotencyError" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/campaigns/{slug}:
+    parameters:
+      - { $ref: "#/components/parameters/CampaignSlug" }
+    get:
+      tags: [Campaigns]
+      operationId: getCampaign
+      summary: One campaign with its links and summary
+      description: Includes click statistics and a daily series for the campaign's default window.
+      responses:
+        "200":
+          description: The campaign.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignDetail" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    patch:
+      tags: [Campaigns]
+      operationId: updateCampaign
+      summary: Edit or archive a campaign
+      description: Send any of the editable fields. The slug cannot change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PatchCampaignRequest" }
+      responses:
+        "200":
+          description: The updated campaign.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Campaign" }
+        "400":
+          description: Invalid body, name or dates.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    delete:
+      tags: [Campaigns]
+      operationId: deleteCampaign
+      summary: Delete a campaign
+      description: Its links are kept and become unassigned.
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/campaigns/{slug}/stats:
+    parameters:
+      - { $ref: "#/components/parameters/CampaignSlug" }
+    get:
+      tags: [Campaigns]
+      operationId: getCampaignStats
+      summary: Windowed campaign statistics
+      description: |
+        Totals, channel breakdowns, a daily series and per-link and per-placement
+        breakdowns for a window. The window defaults to the campaign's own dates
+        when both are set, otherwise the last 30 days. For richer analysis use
+        the `campaign-performance` report.
+      parameters:
+        - name: from
+          in: query
+          description: First day, `YYYY-MM-DD`, read as UTC.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          description: Last day, `YYYY-MM-DD`, read as UTC. Must not be before `from`.
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: The statistics.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignStats" }
+        "400":
+          description: Unparseable or inverted dates.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/campaigns/{slug}/links:
+    parameters:
+      - { $ref: "#/components/parameters/CampaignSlug" }
+    get:
+      tags: [Campaigns]
+      operationId: listCampaignLinks
+      summary: Links in a campaign
+      responses:
+        "200":
+          description: The campaign's links.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignLinks" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    post:
+      tags: [Campaigns]
+      operationId: assignLinksToCampaign
+      summary: Add existing links to a campaign
+      description: Up to 50 keys. Every key must be one of the caller's links.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AssignLinksRequest" }
+      responses:
+        "200":
+          description: The campaign's links after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CampaignLinks" }
+        "400":
+          description: No keys, too many keys or an invalid body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "404":
+          description: The campaign or a link was not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/campaigns/{slug}/links/batch:
+    parameters:
+      - { $ref: "#/components/parameters/CampaignSlug" }
+    post:
+      tags: [Campaigns]
+      operationId: batchCreateCampaignLinks
+      summary: Create many links in a campaign
+      description: |
+        Up to 50 rows. Either every row is created or none are. Blank rows are
+        skipped and counted in `skipped_blank_rows`. Rows with the same source,
+        medium, content and placement are rejected. Batch create does not
+        deduplicate: send an `Idempotency-Key` to make a retry safe.
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BatchCreateRequest" }
+      responses:
+        "201":
+          description: The created links.
+          headers:
+            Idempotent-Replayed: { $ref: "#/components/headers/IdempotentReplayed" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BatchCreateResponse" }
+        "400":
+          description: Invalid body, row or `Idempotency-Key`, or more than 50 rows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "409":
+          description: |
+            A key is taken (`key already taken`), or the same `Idempotency-Key`
+            is still being processed (`idempotency_key_in_progress`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/RequestTooLarge" }
+        "422":
+          description: |
+            A row's destination was refused by a URL filter (`url_denied`, with
+            the zero-based `row`), or the `Idempotency-Key` was reused with a
+            different request (`idempotency_key_reused`).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DeniedError"
+                  - $ref: "#/components/schemas/IdempotencyError"
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/campaigns/{slug}/links/{key}:
+    parameters:
+      - { $ref: "#/components/parameters/CampaignSlug" }
+      - { $ref: "#/components/parameters/LinkKey" }
+    delete:
+      tags: [Campaigns]
+      operationId: unassignLinkFromCampaign
+      summary: Remove a link from a campaign
+      description: The link is kept.
+      responses:
+        "200":
+          description: Unassigned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ReadOnly" }
+        "404":
+          description: The campaign or link was not found, or the link is not in this campaign.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/campaigns/{slug}/qr.zip:
+    parameters:
+      - { $ref: "#/components/parameters/CampaignSlug" }
+    get:
+      tags: [Campaigns]
+      operationId: getCampaignQRZip
+      summary: Every QR code in a campaign
+      description: A zip archive of PNG QR codes, one per link.
+      responses:
+        "200":
+          description: The archive.
+          content:
+            application/zip:
+              schema: { type: string, contentEncoding: base64 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/campaigns/{slug}/export.csv:
+    parameters:
+      - { $ref: "#/components/parameters/CampaignSlug" }
+    get:
+      tags: [Campaigns]
+      operationId: exportCampaignCSV
+      summary: CSV export of a campaign's links and clicks
+      parameters:
+        - name: from
+          in: query
+          description: First day, `YYYY-MM-DD`, read as UTC. Defaults as for `/stats`.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          description: Last day, `YYYY-MM-DD`, read as UTC. Must not be before `from`.
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: The CSV, sent as an attachment.
+          content:
+            text/csv:
+              schema: { type: string }
+        "400":
+          description: Unparseable or inverted dates.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/reports:
+    get:
+      tags: [Reports]
+      operationId: listReports
+      summary: The report catalogue
+      description: |
+        Lists every report with its own parameters, plus the common parameters
+        that every report accepts. Not available on the in-memory dev server.
+      responses:
+        "200":
+          description: The catalogue.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportCatalogue" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/reports/{name}:
+    get:
+      tags: [Reports]
+      operationId: runReport
+      summary: Run a report
+      description: |
+        One path serves every report, with `name` as an enum, because they share
+        the window, filter and `limit` parameters and one response envelope.
+        The parameters listed here are the common ones followed by each
+        report's own. A report ignores parameters that are not its own. The
+        `data` member differs per report; see the `*Data` schemas.
+
+        Windows are inclusive calendar days in `tz`, and today is a partial day.
+        For `campaign-performance` the window defaults to the campaign's own
+        dates, and over those dates a previous window appears only with an
+        explicit `compare=previous`.
+
+        `from` and `to` override `range`. `compare=previous` adds the same-length
+        window immediately before (ignored for `range=all`). The campaign and
+        UTM filters narrow the counted clicks. Bot clicks are excluded unless
+        `include_bots=true`. Reports read only the caller's own links.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The report to run.
+          schema:
+            type: string
+            enum:
+              - overview
+              - top-content
+              - top-links
+              - breakdown
+              - timeseries
+              - movers
+              - idle-links
+              - campaign-comparison
+              - campaign-performance
+              - link-performance
+        - name: range
+          in: query
+          description: Window ending today.
+          schema: { type: string, enum: [7d, 30d, 90d, 365d, all], default: 30d }
+        - name: from
+          in: query
+          description: First day of a custom window, `YYYY-MM-DD` in `tz`. Overrides `range`.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          description: Last day of a custom window. Defaults to today and requires `from`.
+          schema: { type: string, format: date }
+        - name: tz
+          in: query
+          description: IANA time zone used to bucket days. Defaults to the `DEFAULT_TIMEZONE` setting, else UTC.
+          schema: { type: string, examples: [America/Los_Angeles] }
+        - name: compare
+          in: query
+          description: "`previous` adds the same-length window before this one."
+          schema: { type: string, enum: [previous, none], default: previous }
+        - name: campaign
+          in: query
+          description: A campaign slug, or `none` for clicks with no campaign. Default is all.
+          schema: { type: string }
+        - name: source
+          in: query
+          description: "`utm_source` values, comma-separated. `~none` matches empty."
+          schema: { type: string }
+        - name: medium
+          in: query
+          description: "`utm_medium` values, comma-separated. `~none` matches empty."
+          schema: { type: string }
+        - name: utm_campaign
+          in: query
+          description: "`utm_campaign` values, comma-separated. `~none` matches empty."
+          schema: { type: string }
+        - name: content
+          in: query
+          description: "`utm_content` values, comma-separated. `~none` matches empty."
+          schema: { type: string }
+        - name: term
+          in: query
+          description: "`utm_term` values, comma-separated. `~none` matches empty."
+          schema: { type: string }
+        - name: placement
+          in: query
+          description: Link placement values, comma-separated and case-insensitive. `~none` matches empty.
+          schema: { type: string }
+        - name: include_bots
+          in: query
+          description: Count clicks classified as bots.
+          schema: { type: boolean, default: false }
+        - name: limit
+          in: query
+          description: Most rows for ranked lists. The default depends on the report (`default_limit` in the catalogue).
+          schema: { type: integer, minimum: 1, maximum: 500 }
+        - name: sort
+          in: query
+          description: "`top-content` and `top-links`. `clicks`, `change` (growth over the previous window) or `newest` (by creation date, including items with no clicks)."
+          schema: { type: string, enum: [clicks, change, newest], default: clicks }
+        - name: dimension
+          in: query
+          description: |
+            `breakdown`, required. What to group clicks by. `referer` is the
+            referrer hostname, `(direct)` when empty. `campaign` values are
+            slugs. `link` values are link keys. `content_group` groups links to
+            the same destination.
+          schema: { $ref: "#/components/schemas/Dimension" }
+        - name: granularity
+          in: query
+          description: "`timeseries`. Bucket size. Weeks start on Monday in `tz`."
+          schema: { type: string, enum: [day, week], default: day }
+        - name: split_by
+          in: query
+          description: "`timeseries`. One series per value of this dimension. Default is one series named `all`."
+          schema: { $ref: "#/components/schemas/Dimension" }
+        - name: series_limit
+          in: query
+          description: "`timeseries` with `split_by`. Most series to return (1 to 50). The rest are summed into an `other` series."
+          schema: { type: integer, minimum: 1, maximum: 50, default: 5 }
+        - name: unit
+          in: query
+          description: "`movers`. `content` groups links to the same destination, `link` compares individual links."
+          schema: { type: string, enum: [content, link], default: content }
+        - name: min_clicks
+          in: query
+          description: "`movers`. Ignore items whose larger period has fewer clicks than this."
+          schema: { type: integer, minimum: 0, maximum: 1000000, default: 5 }
+        - name: min_age_days
+          in: query
+          description: "`idle-links`. Only links created at least this many calendar days ago in `tz` (0 to 3650)."
+          schema: { type: integer, minimum: 0, maximum: 3650, default: 7 }
+        - name: slug
+          in: query
+          description: "`campaign-performance`, required. Campaign slug. Unknown or not yours: `404 campaign_not_found`."
+          schema: { type: string }
+        - name: columns
+          in: query
+          description: "`campaign-performance`. What the matrix columns are. More than six values keep the top five and an `other` column."
+          schema: { type: string, enum: [source, medium, placement], default: source }
+        - name: key
+          in: query
+          description: "`link-performance`, required. Link key. Unknown or not yours: `404 link_not_found`."
+          schema: { type: string }
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportEnvelope" }
+        "400":
+          description: |
+            A bad or missing parameter, with the offending `field`. Codes are
+            `invalid_tz`, `invalid_range`, `invalid_date`, `invalid_compare`,
+            `invalid_include_bots`, `invalid_limit`, and `invalid_<param>` or
+            `missing_<param>` for a report's own parameters.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FieldError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404":
+          description: "`report_not_found`, `campaign_not_found` or `link_not_found`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: slk_ API token
+      description: |
+        An API token from Account, then API tokens. Tokens start with `slk_`.
+        The server reads only the `Authorization` header, never a query string.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: shortlinks_session
+      description: The browser session the web app uses. Scripts should use a token.
+  parameters:
+    Page:
+      name: page
+      in: query
+      description: 1-based page number. An invalid value falls back to 1.
+      schema: { type: integer, minimum: 1, default: 1 }
+    PerPage:
+      name: per_page
+      in: query
+      description: Items per page, at most 100. An invalid value falls back to the default.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    LinkKey:
+      name: key
+      in: path
+      required: true
+      description: The link's key, 1 to 12 characters from `a-z A-Z 0-9 - _`.
+      schema: { type: string, minLength: 1, maxLength: 12 }
+    CampaignSlug:
+      name: slug
+      in: path
+      required: true
+      description: The campaign's slug.
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Makes the request safe to retry. 1 to 255 printable ASCII characters
+        (otherwise `400 invalid_idempotency_key`); use a fresh random value per
+        logical operation. Repeating the request with the same key, method, path
+        and body returns the stored response with `Idempotent-Replayed: true`.
+        The same key with a different request answers `422
+        idempotency_key_reused`, and while the first request is still running
+        `409 idempotency_key_in_progress`. `2xx` and `4xx` responses are stored
+        and `5xx` are not. Keys last 24 hours and are private to the account.
+        Ignored by the in-memory dev server.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+  headers:
+    IdempotentReplayed:
+      description: "`true` when this is the stored response to an earlier request with the same `Idempotency-Key`."
+      schema: { type: string, const: "true" }
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema: { type: integer }
+  responses:
+    Unauthenticated:
+      description: |
+        No credentials, or the token is wrong, expired or revoked, or the account
+        was deactivated.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: unauthenticated }
+    ReadOnly:
+      description: The token is read-only and the request is not a `GET`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: api_token_read_only }
+    RateLimited:
+      description: |
+        More than 600 requests a minute for this token, or too many failed
+        attempts from this IP. Wait for `Retry-After` seconds.
+      headers:
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: rate_limit_exceeded }
+    RequestTooLarge:
+      description: The request body is too large (`request_too_large`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/IdempotencyError" }
+    LinkNotFound:
+      description: The link does not exist or belongs to someone else.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: link not found }
+    CampaignNotFound:
+      description: The campaign does not exist or belongs to someone else.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: campaign not found }
+    InternalError:
+      description: An unexpected server error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: internal server error }
+  schemas:
+    Error:
+      type: object
+      description: |
+        The common error body. `error` is a stable code (for example
+        `api_token_read_only`) or, on older routes, a short message (for example
+        `link not found`). Branch on the HTTP status and the codes documented
+        here.
+      required: [error]
+      properties:
+        error: { type: string }
+    FieldError:
+      description: A rejected list or report parameter.
+      type: object
+      required: [error, field, message]
+      properties:
+        error: { type: string, examples: [invalid_sort] }
+        field: { type: string, examples: [sort] }
+        message: { type: string }
+    IdempotencyError:
+      description: An idempotency or request-size error.
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid_idempotency_key
+            - idempotency_key_reused
+            - idempotency_key_in_progress
+            - request_too_large
+            - invalid_request
+            - internal_error
+        message: { type: string }
+    DeniedError:
+      description: A URL filter refused the destination.
+      type: object
+      required: [error, reason, label]
+      properties:
+        error: { type: string, enum: [url_denied, destination_denied] }
+        reason:
+          type: integer
+          description: 1 malware, 2 phishing, 3 spam, 4 adult content, 5 policy violation, 6 other.
+        label: { type: string, examples: [Phishing] }
+        row:
+          type: integer
+          description: Batch create only. Zero-based index of the offending row.
+    Message:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+    Me:
+      type: object
+      required: [id, email, is_admin, base_url]
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string }
+        is_admin:
+          type: boolean
+          description: Always `false` for a token, even one created by an admin.
+        base_url:
+          type: string
+          description: The deployment's public base URL. Short URLs are `{base_url}/u/{key}`.
+        api_token:
+          type: object
+          description: Present only when the request used an API token.
+          required: [id, name, read_only]
+          properties:
+            id: { type: integer, format: int64 }
+            name: { type: string }
+            read_only: { type: boolean }
+    PublicHome:
+      type: object
+      required: [redirect_url, registrations_enabled]
+      properties:
+        redirect_url: { type: string, description: Where the site root redirects, or empty. }
+        registrations_enabled: { type: boolean }
+    Link:
+      type: object
+      required:
+        - id
+        - key
+        - destination_url
+        - title
+        - active
+        - denied_reason
+        - created_at
+        - expires_at
+        - click_count
+        - campaign_id
+        - utm_source
+        - utm_medium
+        - utm_campaign
+        - utm_term
+        - utm_content
+        - placement
+      properties:
+        id: { type: integer, format: int64 }
+        key: { type: string, description: "The short URL is `{base_url}/u/{key}`." }
+        destination_url: { type: string, format: uri }
+        title: { type: string }
+        active: { type: boolean }
+        denied_reason:
+          type: integer
+          description: 0 when permitted, else the URL filter reason code.
+        created_at: { type: string, format: date-time }
+        expires_at: { type: [string, "null"], format: date-time }
+        click_count: { type: integer, format: int64, description: All-time clicks. }
+        duplicate:
+          type: boolean
+          description: Create only. `true` when an existing link for the destination was returned.
+        campaign_id: { type: [integer, "null"], format: int64 }
+        utm_source: { type: string }
+        utm_medium: { type: string }
+        utm_campaign: { type: string }
+        utm_term: { type: string }
+        utm_content: { type: string }
+        placement: { type: string, description: A free-text label for where the link is used, for example `lobby poster`. }
+    LinkList:
+      type: object
+      required: [links, page, per_page, total]
+      properties:
+        links:
+          type: array
+          items: { $ref: "#/components/schemas/Link" }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer, format: int64 }
+    EnrichedLink:
+      allOf:
+        - $ref: "#/components/schemas/Link"
+        - type: object
+          required: [content_key, label, campaign_slug]
+          properties:
+            content_key: { type: string }
+            label: { type: string }
+            campaign_slug: { type: [string, "null"] }
+            clicks_window:
+              type: integer
+              format: int64
+              description: Present with `window`.
+    EnrichedLinkList:
+      type: object
+      required: [links, page, per_page, total]
+      properties:
+        links:
+          type: array
+          items: { $ref: "#/components/schemas/EnrichedLink" }
+        page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer, format: int64, description: Every link matching the filters. }
+        window:
+          type: object
+          description: Present with `window`.
+          required: [window, from, to, tz]
+          properties:
+            window: { type: string }
+            from: { type: string }
+            to: { type: string }
+            tz: { type: string }
+    CountBucket:
+      type: object
+      required: [value, count]
+      properties:
+        value: { type: string }
+        count: { type: integer, format: int64 }
+    DayBucket:
+      type: object
+      required: [date, count]
+      properties:
+        date: { type: string, format: date }
+        count: { type: integer, format: int64 }
+    Timeseries:
+      type: object
+      required: [days]
+      properties:
+        days:
+          type: array
+          items: { $ref: "#/components/schemas/DayBucket" }
+    LinkDetail:
+      allOf:
+        - $ref: "#/components/schemas/Link"
+        - type: object
+          properties:
+            utm_stats:
+              type: object
+              required: [click_count, excluded_bot_count, by_source, by_medium, by_campaign]
+              properties:
+                click_count: { type: integer, format: int64 }
+                excluded_bot_count: { type: integer, format: int64 }
+                by_source: { type: array, items: { $ref: "#/components/schemas/CountBucket" } }
+                by_medium: { type: array, items: { $ref: "#/components/schemas/CountBucket" } }
+                by_campaign: { type: array, items: { $ref: "#/components/schemas/CountBucket" } }
+            timeseries: { $ref: "#/components/schemas/Timeseries" }
+            campaign_name: { type: string, description: Present when the link is in a campaign. }
+            campaign_slug: { type: string, description: Present when the link is in a campaign. }
+    CreateLinkRequest:
+      type: object
+      additionalProperties: false
+      required: [destination_url]
+      properties:
+        destination_url: { type: string, format: uri, description: An absolute http or https URL. }
+        title: { type: string }
+        key:
+          type: string
+          pattern: "^[a-zA-Z0-9_-]{1,12}$"
+          description: A custom alias. `custom_key` and `alias` are synonyms. The first non-empty one wins.
+        custom_key: { type: string, description: Synonym of `key`. }
+        alias: { type: string, description: Synonym of `key`. }
+        expires_at: { type: [string, "null"], format: date-time }
+        campaign_id: { type: [integer, "null"], format: int64, description: Takes precedence over `campaign_slug`. }
+        campaign_slug: { type: string, description: One of the caller's campaigns. }
+        utm_source: { type: string }
+        utm_medium: { type: string }
+        utm_campaign: { type: string }
+        utm_term: { type: string }
+        utm_content: { type: string }
+        placement: { type: string }
+    PatchLinkRequest:
+      type: object
+      additionalProperties: false
+      description: Every field is optional. Absent fields are unchanged.
+      properties:
+        title: { type: string }
+        destination_url: { type: string, format: uri }
+        expires_at: { type: [string, "null"], format: date-time, description: "`null` clears the expiry." }
+        utm_source: { type: string }
+        utm_medium: { type: string }
+        utm_campaign: { type: string }
+        utm_term: { type: string }
+        utm_content: { type: string }
+        placement: { type: string }
+        active:
+          type: boolean
+          description: "`false` deactivates, `true` reactivates after a URL filter check."
+    Campaign:
+      type: object
+      required:
+        - id
+        - name
+        - slug
+        - description
+        - starts_at
+        - ends_at
+        - archived
+        - default_utm_source
+        - default_utm_medium
+        - default_utm_campaign
+        - default_utm_term
+        - default_utm_content
+        - created_at
+        - updated_at
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        slug: { type: string, description: Derived from the name. Never changes. }
+        description: { type: string }
+        starts_at: { type: [string, "null"], format: date-time }
+        ends_at: { type: [string, "null"], format: date-time }
+        archived: { type: boolean }
+        default_utm_source: { type: string }
+        default_utm_medium: { type: string }
+        default_utm_campaign: { type: string, description: Defaults to the slug at creation. }
+        default_utm_term: { type: string }
+        default_utm_content: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CampaignListItem:
+      allOf:
+        - $ref: "#/components/schemas/Campaign"
+        - type: object
+          required: [link_count, total_clicks, clicks_30d, sparkline, status]
+          properties:
+            link_count: { type: integer, format: int64 }
+            total_clicks: { type: integer, format: int64, description: All-time clicks. }
+            clicks_30d: { type: integer, format: int64, description: Non-bot clicks in the last 30 days, today included. }
+            sparkline:
+              type: array
+              description: Exactly 30 daily click counts, oldest first and today last.
+              minItems: 30
+              maxItems: 30
+              items: { type: integer, format: int64 }
+            status:
+              type: string
+              enum: [live, scheduled, ended, archived]
+              description: Derived from the campaign's dates and archive flag. Archived wins, then scheduled (starts after today), ended (ended before today), else live.
+    CampaignList:
+      type: object
+      required: [campaigns]
+      properties:
+        campaigns:
+          type: array
+          items: { $ref: "#/components/schemas/CampaignListItem" }
+    CampaignStatsBlock:
+      type: object
+      required:
+        - click_count
+        - excluded_bot_count
+        - by_source
+        - by_medium
+        - by_content
+        - by_referer
+        - window_from
+        - window_to
+      properties:
+        click_count: { type: integer, format: int64 }
+        excluded_bot_count: { type: integer, format: int64 }
+        by_source: { type: array, items: { $ref: "#/components/schemas/CountBucket" } }
+        by_medium: { type: array, items: { $ref: "#/components/schemas/CountBucket" } }
+        by_content: { type: array, items: { $ref: "#/components/schemas/CountBucket" } }
+        by_referer: { type: array, items: { $ref: "#/components/schemas/CountBucket" } }
+        window_from: { type: string, format: date }
+        window_to: { type: string, format: date }
+    CampaignDetail:
+      allOf:
+        - $ref: "#/components/schemas/Campaign"
+        - type: object
+          required: [link_count, total_clicks, links]
+          properties:
+            link_count: { type: integer, format: int64 }
+            total_clicks: { type: integer, format: int64 }
+            links: { type: array, items: { $ref: "#/components/schemas/Link" } }
+            stats: { $ref: "#/components/schemas/CampaignStatsBlock" }
+            timeseries: { $ref: "#/components/schemas/Timeseries" }
+    CampaignStats:
+      allOf:
+        - $ref: "#/components/schemas/CampaignStatsBlock"
+        - type: object
+          required: [timeseries, by_link, series_by_link, by_placement]
+          properties:
+            timeseries: { $ref: "#/components/schemas/Timeseries" }
+            by_link:
+              type: array
+              items:
+                type: object
+                required: [link_id, key, title, count]
+                properties:
+                  link_id: { type: [integer, "null"], format: int64 }
+                  key: { type: string }
+                  title: { type: string }
+                  count: { type: integer, format: int64 }
+            series_by_link:
+              type: array
+              items:
+                type: object
+                required: [link_id, key, title, is_other, days]
+                properties:
+                  link_id: { type: [integer, "null"], format: int64 }
+                  key: { type: string }
+                  title: { type: string }
+                  is_other: { type: boolean }
+                  days: { type: array, items: { $ref: "#/components/schemas/DayBucket" } }
+            by_placement:
+              type: array
+              items:
+                type: object
+                required: [placement, is_none, link_count, count]
+                properties:
+                  placement: { type: string }
+                  is_none: { type: boolean }
+                  link_count: { type: integer, format: int64 }
+                  count: { type: integer, format: int64 }
+    CampaignLinks:
+      type: object
+      required: [links]
+      properties:
+        links: { type: array, items: { $ref: "#/components/schemas/Link" } }
+    CreateCampaignRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1 }
+        description: { type: string }
+        starts_at: { type: [string, "null"], format: date-time }
+        ends_at: { type: [string, "null"], format: date-time, description: Must not be before `starts_at`. }
+        default_utm_source: { type: string }
+        default_utm_medium: { type: string }
+        default_utm_campaign: { type: string }
+        default_utm_term: { type: string }
+        default_utm_content: { type: string }
+    PatchCampaignRequest:
+      type: object
+      additionalProperties: false
+      description: Every field is optional. Absent fields are unchanged.
+      properties:
+        name: { type: string, minLength: 1 }
+        description: { type: string }
+        starts_at: { type: [string, "null"], format: date-time }
+        ends_at: { type: [string, "null"], format: date-time }
+        archived: { type: boolean }
+        default_utm_source: { type: string }
+        default_utm_medium: { type: string }
+        default_utm_campaign: { type: string }
+        default_utm_term: { type: string }
+        default_utm_content: { type: string }
+    AssignLinksRequest:
+      type: object
+      additionalProperties: false
+      description: Name keys with `keys`, `key`, or both. At least one is required.
+      properties:
+        keys: { type: array, maxItems: 50, items: { type: string } }
+        key: { type: string }
+    BatchCreateRow:
+      type: object
+      additionalProperties: false
+      required: [destination_url]
+      properties:
+        destination_url: { type: string, format: uri }
+        title: { type: string }
+        utm_source: { type: string }
+        utm_medium: { type: string }
+        utm_campaign: { type: string }
+        utm_term: { type: string }
+        utm_content: { type: string }
+        placement: { type: string }
+    BatchCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          maxItems: 50
+          items: { $ref: "#/components/schemas/BatchCreateRow" }
+    BatchCreateResponse:
+      type: object
+      required: [links, skipped_blank_rows]
+      properties:
+        links: { type: array, items: { $ref: "#/components/schemas/Link" } }
+        skipped_blank_rows: { type: integer }
+    Dimension:
+      type: string
+      description: What to group clicks by.
+      enum:
+        - source
+        - medium
+        - utm_campaign
+        - content
+        - term
+        - referer
+        - placement
+        - campaign
+        - link
+        - content_group
+    ParamSpec:
+      type: object
+      required: [name, type, description]
+      properties:
+        name: { type: string }
+        type: { type: string, description: "`enum`, `date`, `string`, `list`, `bool` or `int`." }
+        description: { type: string }
+        default: { type: string }
+        required: { type: boolean }
+        values: { type: array, items: { type: string } }
+    ReportInfo:
+      type: object
+      required: [name, description, path, params]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        path: { type: string, examples: [/api/reports/overview] }
+        params: { type: array, items: { $ref: "#/components/schemas/ParamSpec" } }
+        default_limit: { type: integer, description: The default for `limit`. Absent when the report has none. }
+    ReportCatalogue:
+      type: object
+      required: [reports, common_params]
+      properties:
+        reports: { type: array, items: { $ref: "#/components/schemas/ReportInfo" } }
+        common_params: { type: array, items: { $ref: "#/components/schemas/ParamSpec" } }
+    ReportEnvelope:
+      type: object
+      description: The wrapper every report shares.
+      required: [report, window, previous_window, filters, generated_at, highlights, data]
+      properties:
+        report: { type: string }
+        window:
+          type: object
+          required: [from, to, tz, partial_last_day]
+          properties:
+            from: { type: string, format: date }
+            to: { type: string, format: date }
+            tz: { type: string }
+            partial_last_day: { type: boolean }
+        previous_window:
+          type: [object, "null"]
+          description: "`null` with `compare=none` or `range=all`."
+          required: [from, to]
+          properties:
+            from: { type: string, format: date }
+            to: { type: string, format: date }
+        filters:
+          type: object
+          description: The filters that were applied.
+          properties:
+            campaign: { type: string }
+            source: { type: array, items: { type: string } }
+            medium: { type: array, items: { type: string } }
+            utm_campaign: { type: array, items: { type: string } }
+            content: { type: array, items: { type: string } }
+            term: { type: array, items: { type: string } }
+            placement: { type: array, items: { type: string } }
+            include_bots: { type: boolean }
+        generated_at: { type: string, format: date-time }
+        highlights:
+          type: array
+          description: Plain-language takeaways, suitable for quoting.
+          items: { type: string }
+        data:
+          description: The report's own payload. The schema depends on `report`.
+          anyOf:
+            - $ref: "#/components/schemas/OverviewData"
+            - $ref: "#/components/schemas/TopContentData"
+            - $ref: "#/components/schemas/TopLinksData"
+            - $ref: "#/components/schemas/BreakdownData"
+            - $ref: "#/components/schemas/TimeseriesData"
+            - $ref: "#/components/schemas/MoversData"
+            - $ref: "#/components/schemas/IdleLinksData"
+            - $ref: "#/components/schemas/CampaignComparisonData"
+            - $ref: "#/components/schemas/CampaignPerformanceData"
+            - $ref: "#/components/schemas/LinkPerformanceData"
+    DayClicks:
+      type: object
+      required: [date, clicks]
+      properties:
+        date: { type: string, format: date }
+        clicks: { type: integer, format: int64 }
+    FacetValue:
+      type: object
+      required: [value, clicks]
+      properties:
+        value: { type: string }
+        clicks: { type: integer, format: int64 }
+    OverviewData:
+      description: "`overview`."
+      type: object
+      properties:
+        totals:
+          type: object
+          properties:
+            clicks: { type: integer, format: int64 }
+            visitor_days: { type: integer, format: int64 }
+            excluded_bots: { type: integer, format: int64 }
+            links_clicked: { type: integer, format: int64 }
+            links_total: { type: integer, format: int64 }
+        previous:
+          type: [object, "null"]
+          properties:
+            clicks: { type: integer, format: int64 }
+            visitor_days: { type: [integer, "null"], format: int64 }
+        timeseries: { type: array, items: { $ref: "#/components/schemas/DayClicks" } }
+        previous_timeseries: { type: array, items: { $ref: "#/components/schemas/DayClicks" } }
+        best_day:
+          oneOf:
+            - $ref: "#/components/schemas/DayClicks"
+            - type: "null"
+        campaigns:
+          type: array
+          items:
+            type: object
+            properties:
+              slug: { type: [string, "null"] }
+              name: { type: string }
+              clicks: { type: integer, format: int64 }
+        facets:
+          type: object
+          properties:
+            source: { type: array, items: { $ref: "#/components/schemas/FacetValue" } }
+            medium: { type: array, items: { $ref: "#/components/schemas/FacetValue" } }
+            utm_campaign: { type: array, items: { $ref: "#/components/schemas/FacetValue" } }
+            content: { type: array, items: { $ref: "#/components/schemas/FacetValue" } }
+            term: { type: array, items: { $ref: "#/components/schemas/FacetValue" } }
+            placement: { type: array, items: { $ref: "#/components/schemas/FacetValue" } }
+    TopContentData:
+      description: "`top-content`."
+      type: object
+      properties:
+        groups:
+          type: array
+          items:
+            type: object
+            properties:
+              content_key: { type: string }
+              title: { type: string }
+              path: { type: string }
+              clicks: { type: integer, format: int64 }
+              previous_clicks: { type: [integer, "null"], format: int64 }
+              change_pct: { type: [number, "null"] }
+              by_source: { type: array, items: { $ref: "#/components/schemas/FacetValue" } }
+              links:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    key: { type: string }
+                    label: { type: string }
+                    utm_source: { type: string }
+                    utm_medium: { type: string }
+                    campaign_slug: { type: [string, "null"] }
+                    clicks: { type: integer, format: int64 }
+        total_groups: { type: integer }
+        truncated: { type: boolean }
+    TopLinksData:
+      description: "`top-links`."
+      type: object
+      properties:
+        links:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              short_url: { type: string, format: uri }
+              title: { type: string }
+              label: { type: string }
+              content_key: { type: string }
+              content_title: { type: string }
+              destination: { type: string }
+              campaign_slug: { type: [string, "null"] }
+              utm_source: { type: string }
+              utm_medium: { type: string }
+              utm_campaign: { type: string }
+              utm_content: { type: string }
+              utm_term: { type: string }
+              placement: { type: string }
+              active: { type: boolean }
+              created_at: { type: string, format: date-time }
+              clicks: { type: integer, format: int64 }
+              previous_clicks: { type: [integer, "null"], format: int64 }
+              change_pct: { type: [number, "null"] }
+        total_links: { type: integer }
+        truncated: { type: boolean }
+    BreakdownRow:
+      type: object
+      properties:
+        value: { type: string }
+        label: { type: string }
+        clicks: { type: integer, format: int64 }
+        share: { type: number, description: Fraction of the total, 0 to 1. }
+        previous_clicks: { type: [integer, "null"], format: int64 }
+    BreakdownData:
+      description: "`breakdown`."
+      type: object
+      properties:
+        dimension: { type: string }
+        total: { type: integer, format: int64 }
+        previous_total: { type: [integer, "null"], format: int64 }
+        rows: { type: array, items: { $ref: "#/components/schemas/BreakdownRow" } }
+        other:
+          type: [object, "null"]
+          description: Clicks beyond `limit`, summed.
+          properties:
+            clicks: { type: integer, format: int64 }
+            values: { type: integer }
+        truncated: { type: boolean }
+    TimeseriesData:
+      description: "`timeseries`."
+      type: object
+      properties:
+        granularity: { type: string, enum: [day, week] }
+        split_by: { type: string }
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              label: { type: string }
+              other: { type: boolean }
+              clicks: { type: integer, format: int64 }
+              points: { type: array, items: { $ref: "#/components/schemas/DayClicks" } }
+        previous: { type: array, items: { $ref: "#/components/schemas/DayClicks" } }
+        truncated: { type: boolean }
+    MoverRow:
+      type: object
+      properties:
+        title: { type: string }
+        content_key: { type: string }
+        key: { type: string, description: With `unit=link`. }
+        short_url: { type: string, format: uri, description: With `unit=link`. }
+        clicks: { type: integer, format: int64 }
+        previous_clicks: { type: integer, format: int64 }
+        change: { type: integer, format: int64 }
+        change_pct: { type: [number, "null"] }
+    MoversData:
+      description: "`movers`."
+      type: object
+      properties:
+        unit: { type: string, enum: [content, link] }
+        min_clicks: { type: integer }
+        compared: { type: boolean, description: "`false` when there is no previous window." }
+        rising: { type: array, items: { $ref: "#/components/schemas/MoverRow" } }
+        falling: { type: array, items: { $ref: "#/components/schemas/MoverRow" } }
+        new: { type: array, items: { $ref: "#/components/schemas/MoverRow" } }
+        gone_quiet: { type: array, items: { $ref: "#/components/schemas/MoverRow" } }
+        truncated: { type: boolean }
+    IdleLinksData:
+      description: "`idle-links`."
+      type: object
+      properties:
+        min_age_days: { type: integer }
+        total_idle: { type: integer }
+        links:
+          type: array
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              short_url: { type: string, format: uri }
+              title: { type: string }
+              label: { type: string }
+              destination: { type: string }
+              content_key: { type: string }
+              campaign_slug: { type: [string, "null"] }
+              utm_source: { type: string }
+              utm_medium: { type: string }
+              placement: { type: string }
+              created_at: { type: string, format: date-time }
+              age_days: { type: integer }
+              last_clicked_at: { type: [string, "null"], format: date-time }
+    CampaignComparisonData:
+      description: "`campaign-comparison`."
+      type: object
+      properties:
+        campaigns:
+          type: array
+          items:
+            type: object
+            properties:
+              slug: { type: string }
+              name: { type: string }
+              status: { type: string, enum: [live, scheduled, ended, archived] }
+              starts_on: { type: [string, "null"], format: date }
+              ends_on: { type: [string, "null"], format: date }
+              links: { type: integer }
+              links_clicked: { type: integer, format: int64 }
+              clicks: { type: integer, format: int64 }
+              previous_clicks: { type: [integer, "null"], format: int64 }
+              change_pct: { type: [number, "null"] }
+              clicks_per_active_day: { type: [number, "null"] }
+              top_content:
+                type: [object, "null"]
+                properties:
+                  title: { type: string }
+                  clicks: { type: integer, format: int64 }
+              top_source:
+                oneOf:
+                  - $ref: "#/components/schemas/FacetValue"
+                  - type: "null"
+        total_campaigns: { type: integer }
+        truncated: { type: boolean }
+    CampaignPerformanceData:
+      description: "`campaign-performance`."
+      type: object
+      properties:
+        campaign:
+          type: object
+          properties:
+            slug: { type: string }
+            name: { type: string }
+            status: { type: string, enum: [live, scheduled, ended, archived] }
+            starts_on: { type: [string, "null"], format: date }
+            ends_on: { type: [string, "null"], format: date }
+        totals:
+          type: object
+          properties:
+            clicks: { type: integer, format: int64 }
+            previous_clicks: { type: [integer, "null"], format: int64 }
+            per_active_day: { type: [number, "null"] }
+            links: { type: integer, format: int64 }
+            links_clicked: { type: integer, format: int64 }
+        matrix:
+          type: object
+          description: Content by channel.
+          properties:
+            by: { type: string, enum: [source, medium, placement] }
+            columns: { type: array, items: { type: string } }
+            rows:
+              type: array
+              items:
+                type: object
+                properties:
+                  content_key: { type: string }
+                  title: { type: string }
+                  total: { type: integer, format: int64 }
+                  cells:
+                    type: object
+                    description: Keyed by column.
+                    additionalProperties:
+                      type: object
+                      properties:
+                        clicks: { type: integer, format: int64 }
+                        key: { type: string }
+                        keys: { type: array, items: { type: string } }
+            column_totals:
+              type: object
+              additionalProperties: { type: integer, format: int64 }
+            total_rows: { type: integer }
+        timeseries: { type: array, items: { $ref: "#/components/schemas/DayClicks" } }
+        previous_timeseries: { type: array, items: { $ref: "#/components/schemas/DayClicks" } }
+        placements:
+          type: array
+          items:
+            type: object
+            properties:
+              placement: { type: string }
+              is_none: { type: boolean }
+              clicks: { type: integer, format: int64 }
+        removed_links_clicks:
+          type: integer
+          format: int64
+          description: Clicks from links since removed from the campaign.
+        truncated: { type: boolean }
+    LinkPerformanceData:
+      description: "`link-performance`."
+      type: object
+      properties:
+        link:
+          type: object
+          properties:
+            key: { type: string }
+            short_url: { type: string, format: uri }
+            title: { type: string }
+            label: { type: string }
+            content_key: { type: string }
+            destination_url: { type: string }
+            campaign_slug: { type: [string, "null"] }
+            active: { type: boolean }
+        totals:
+          type: object
+          properties:
+            clicks: { type: integer, format: int64 }
+            previous_clicks: { type: [integer, "null"], format: int64 }
+            all_time: { type: integer, format: int64 }
+            last_clicked_at: { type: [string, "null"], format: date-time }
+        timeseries: { type: array, items: { $ref: "#/components/schemas/DayClicks" } }
+        previous_timeseries: { type: array, items: { $ref: "#/components/schemas/DayClicks" } }
+        by_source: { type: array, items: { $ref: "#/components/schemas/BreakdownRow" } }
+        by_medium: { type: array, items: { $ref: "#/components/schemas/BreakdownRow" } }
+        by_content: { type: array, items: { $ref: "#/components/schemas/BreakdownRow" } }
+        by_referer: { type: array, items: { $ref: "#/components/schemas/BreakdownRow" } }
+        siblings:
+          type: array
+          description: The caller's other links to the same content, in any campaign.
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              label: { type: string }
+              campaign_slug: { type: [string, "null"] }
+              active: { type: boolean }
+              clicks: { type: integer, format: int64 }
+        truncated: { type: boolean }

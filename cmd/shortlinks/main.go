@@ -27,6 +27,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/mcpserver"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
+	"github.com/brennanMKE/ShortLinks/internal/openapi"
 	"github.com/brennanMKE/ShortLinks/internal/reports"
 	"github.com/brennanMKE/ShortLinks/web"
 )
@@ -547,6 +548,11 @@ func buildMux(
 	// requireAPI): the SPA needs it before anyone signs in. It exposes only
 	// {redirect_url, registrations_enabled}, never other settings.
 	mux.Handle("GET /api/public/home", homeH)
+
+	// OpenAPI 3.1 description of the REST API (#0148) — also UNAUTHENTICATED:
+	// it describes the API and holds no secrets. A drift test compares it with
+	// the routes registered here.
+	mux.Handle("GET /api/openapi.yaml", openapi.Handler())
 
 	// SSE stream (#0026) — behind RequireSession; pushes link.created events to
 	// the authenticated user's connected dashboard clients.

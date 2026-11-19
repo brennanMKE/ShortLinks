@@ -60,6 +60,22 @@ export SHORTLINKS_URL=https://go.sstools.co
 export SHORTLINKS_TOKEN=slk_…
 ```
 
+### The OpenAPI spec
+
+Every `/api` route, with its request and response shapes, error codes and the
+report parameters, is described in an OpenAPI 3.1 document. Fetch it with no
+token, for example to generate a client or to give an agent the whole surface
+at once:
+
+```sh
+curl -s "$SHORTLINKS_URL/api/openapi.yaml"
+```
+
+The source is [`internal/openapi/openapi.yaml`](../internal/openapi/openapi.yaml),
+embedded in the binary. A test fails when a route and the spec disagree. The
+spec covers the routes a token can use; the browser-only `/auth`, `/account`
+and `/admin` routes are not in it, and `/mcp` is documented in [mcp.md](mcp.md).
+
 ### Check the token
 
 ```sh

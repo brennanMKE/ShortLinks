@@ -28,6 +28,7 @@ with the architecture overview, then dive into the subsystem you need.
 - [Passkeys / WebAuthn](passkeys.md) — the registration, login, and recovery ceremonies
 - [Using API tokens](using-api-tokens.md) — how-to for scripts and agents: create a token, call the API, examples, errors, rotation
 - [API tokens: design](api-tokens.md) — schema, middleware, rate limits, security and audit design
+- [OpenAPI spec](../internal/openapi/openapi.yaml) — the hand-written OpenAPI 3.1 description of every `/api` route; also served at `GET /api/openapi.yaml` (no auth)
 - [MCP server](mcp.md) — the embedded `/mcp` endpoint for AI agents: connecting, the tool list, read-only tokens, rate limiting, audit, adding tools
 
 ## Frontend
