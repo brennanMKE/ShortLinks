@@ -155,3 +155,49 @@ environment variables. `home_mode` (`default`, `about`, `activity`), `home_title
 and `home_about` choose what signed-out visitors see at `/`; `home_redirect_url`
 applies only in `default` mode. Modes, validation and the public
 `GET /api/public/home` body are described in [auth.md](auth.md#public-home-page-modes-and-get-apipublichome).
+
+## Home page hero image (#0176)
+
+An admin can upload one hero image for the public home page. It is stored in
+Postgres (`site_assets`, name `hero`), so it needs no writable disk and the
+normal database backups cover it.
+
+**Routes**
+
+| Route | Who | What |
+|---|---|---|
+| `PUT /admin/home/hero` | admin, browser cookie session (API tokens get 403) | `multipart/form-data` with `image` and `alt`; replaces any existing image and returns `{"hero": {url, alt, width, height}}` |
+| `DELETE /admin/home/hero` | same | removes the image (204; 404 if none) |
+| `GET /public/hero` | anyone | the stored image; 404 when none is set |
+
+`GET /api/public/home` returns `hero` as `{"url": "/public/hero?v=<sha256 prefix>", "alt", "width", "height"}`, or `null`.
+
+**Upload rules.** Every failure is a 400 whose message says what to change.
+
+- PNG, JPEG or WebP only, identified from the file's bytes. The filename and the
+  declared content type are ignored. SVG, GIF and everything else is refused.
+- At most 2 MB (also checked again after re-encoding).
+- 1200x400 to 4000x2000 pixels, with a width:height ratio from 2:1 to 4:1. The
+  dimensions are read from the header before any pixels are decoded.
+- `alt` text is required: at most 200 characters, one line.
+- The image is decoded and re-encoded, so EXIF, GPS and other metadata never
+  reach visitors: JPEG at quality 85, or PNG when the image has transparency.
+  WebP and opaque PNG inputs become JPEG. EXIF orientation is not applied, so
+  export the image the right way up.
+
+**Serving.** `ETag` is the sha256 of the stored bytes, `X-Content-Type-Options:
+nosniff`, and a `Content-Security-Policy` of `default-src 'none'; sandbox`. A
+request whose `?v=` matches the current image is cached for a year (`immutable`);
+any other request revalidates daily (`max-age=86400`), and `If-None-Match` gets a
+304. A new upload changes the hash, so the URL in `/api/public/home` busts caches.
+`middleware.Compress` skips `/public/hero` because the bytes are already compressed.
+
+Audit entries `home.hero.updated` and `home.hero.removed` record size,
+dimensions and hash, never the bytes.
+
+**Brief for the image author (Codex)**
+
+- Wide banner, **2400x800** (3:1), JPEG or PNG, under 2 MB.
+- Keep the subject in the middle third; the page crops the sides on phones to a 4:3 centre.
+- No text in the image, so it stays readable at any width and the title can change without regenerating it.
+- It must work on both the light and dark page backgrounds.

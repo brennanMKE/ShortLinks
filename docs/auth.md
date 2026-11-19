@@ -204,6 +204,7 @@ which middleware each route group carries.
 | `POST /auth/recover/finish` | Complete recovery, issue session |
 | `GET /` (catch-all) | Svelte SPA static assets |
 | `GET /api/public/home` | Signed-out home info (#0125, #0174): `redirect_url`, `registrations_enabled`, `mode`, `title`, `about`, `hero`, and `activity` in activity mode (#0175), nothing else; `Cache-Control: no-store` |
+| `GET /public/hero` | The home page hero image (#0176); 404 when none is set |
 
 **Authenticated (RequireSession)**
 
@@ -226,6 +227,8 @@ which middleware each route group carries.
 |---|---|
 | `GET /admin/settings` | List runtime settings |
 | `PATCH /admin/settings` | Update a setting |
+| `PUT /admin/home/hero` | Upload the home page hero image (#0176; multipart `image` + `alt`) |
+| `DELETE /admin/home/hero` | Remove the hero image |
 | `GET /admin/users` | List all users |
 | `GET /admin/users/{id}` | User detail |
 | `POST /admin/users/{id}/deactivate` | Deactivate a user |

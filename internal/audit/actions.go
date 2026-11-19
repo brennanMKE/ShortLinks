@@ -49,6 +49,11 @@ const (
 	// Settings.
 	ActionSettingsUpdated = "settings.updated"
 
+	// Public home page hero image (#0176). Metadata carries size, dimensions
+	// and hash, never the image bytes.
+	ActionHomeHeroUpdated = "home.hero.updated"
+	ActionHomeHeroRemoved = "home.hero.removed"
+
 	// Campaign lifecycle (#0098).
 	ActionCampaignCreated = "campaign.created"
 	ActionCampaignUpdated = "campaign.updated"
@@ -73,4 +78,5 @@ const (
 	TargetURLFilter  = "url_filter"
 	TargetCampaign   = "campaign"
 	TargetAPIToken   = "api_token"
+	TargetSiteAsset  = "site_asset"
 )

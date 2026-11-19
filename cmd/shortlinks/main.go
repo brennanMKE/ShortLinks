@@ -29,6 +29,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
 	"github.com/brennanMKE/ShortLinks/internal/openapi"
 	"github.com/brennanMKE/ShortLinks/internal/reports"
+	"github.com/brennanMKE/ShortLinks/internal/siteassets"
 	"github.com/brennanMKE/ShortLinks/web"
 )
 
@@ -236,7 +237,7 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 	// read straight off the RequireSession-attached context, so the Svelte SPA
 	// can gate the admin view. Stateless — no data-layer dependency.
 	meH := handlers.NewMeHandler(cfg.BaseURL)
-	homeH := handlers.NewHomeHandler(store).WithActivity(handlers.PublicActivityFunc(pool, cfg.DefaultTimezone, cfg.BaseURL))
+	homeH := handlers.NewHomeHandler(store).WithActivity(handlers.PublicActivityFunc(pool, cfg.DefaultTimezone, cfg.BaseURL)).WithHero(siteassets.NewStore(pool), auditLogger)
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.
@@ -315,7 +316,7 @@ func serveDevMode(cfg *config.Config) error {
 	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds, ds, cfg.BaseURL).WithDefaultTimezone(cfg.DefaultTimezone)
 
 	meH := handlers.NewMeHandler(cfg.BaseURL)
-	homeH := handlers.NewHomeHandler(ds)
+	homeH := handlers.NewHomeHandler(ds).WithHero(siteassets.NewMemStore(), nil)
 
 	// Session middleware backed by the dev store.
 	requireSession := middleware.RequireSession(ds)
@@ -567,6 +568,16 @@ func buildMux(
 	dist := web.DistFS()
 	build := handlers.BuildID(dist, buildID)
 	mux.Handle("GET /api/version", handlers.NewVersionHandler(build))
+
+	// Home page hero image (#0176). GET /public/hero is public and served
+	// outside the SPA catch-all (the compression middleware skips it: the bytes
+	// are already compressed). Upload and delete are admin cookie sessions only
+	// (requireAdmin refuses API tokens with 403).
+	if heroH := homeH.Hero(); heroH != nil {
+		mux.HandleFunc("GET /public/hero", heroH.Serve)
+		mux.Handle("PUT /admin/home/hero", requireAdmin(http.HandlerFunc(heroH.Put)))
+		mux.Handle("DELETE /admin/home/hero", requireAdmin(http.HandlerFunc(heroH.Delete)))
+	}
 
 	// OpenAPI 3.1 description of the REST API (#0148) — also UNAUTHENTICATED:
 	// it describes the API and holds no secrets. A drift test compares it with

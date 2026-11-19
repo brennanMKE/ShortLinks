@@ -23,6 +23,7 @@ export default defineConfig({
       '/account': api,
       '/admin': api,
       '/u': api,
+      '/public': api,
     },
   },
 });

@@ -1,0 +1,33 @@
+$ curl -X PUT /admin/home/hero -F image=@hero.png;type=image/jpeg -F alt=...
+HTTP/1.1 200 OK
+Content-Type: application/json
+Set-Cookie: shortlinks_session=tMKGRWNxn_Mn4cvEwyKWXJdAe0xR5A7R04cmL6f3Hkc; Path=/; Expires=Fri, 20 Nov 2026 23:26:30 GMT; HttpOnly; Secure; SameSite=Strict
+Vary: Accept-Encoding
+Date: Thu, 19 Nov 2026 23:26:30 GMT
+Content-Length: 103
+
+{"hero":{"url":"/public/hero?v=c3743284f454675e","alt":"A gradient banner","width":1200,"height":400}}
+
+$ GET /api/public/home
+{"redirect_url":"","registrations_enabled":true,"mode":"default","title":"","about":"","hero":{"url":"/public/hero?v=c3743284f454675e","alt":"A gradient banner","width":1200,"height":400}}
+$ HEAD /public/hero
+HTTP/1.1 200 OK
+Accept-Ranges: bytes
+Cache-Control: public, max-age=86400
+Content-Length: 21625
+Content-Security-Policy: default-src 'none'; sandbox
+Content-Type: image/jpeg
+Etag: "c3743284f454675ec65dd13440861574301e474b5c2f13a114f7584b0f94f41e"
+Set-Cookie: shortlinks_session=NRAMmH7a__CEKNGStuIob0tc7hFYW73OesTvleHjNBM; Path=/; Expires=Fri, 20 Nov 2026 23:26:30 GMT; HttpOnly; Secure; SameSite=Strict
+X-Content-Type-Options: nosniff
+Date: Thu, 19 Nov 2026 23:26:30 GMT
+
+$ HEAD /public/hero with If-None-Match
+HTTP/1.1 304 Not Modified
+Cache-Control: public, max-age=86400
+Content-Security-Policy: default-src 'none'; sandbox
+$ PUT svg declared as png
+{"error":"Image must be a PNG, JPEG or WebP file"}
+$ DELETE /admin/home/hero, then GET /public/hero
+HTTP/1.1 204 No Content
+HTTP/1.1 404 Not Found

@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 	"github.com/brennanMKE/ShortLinks/internal/reports"
+	"github.com/brennanMKE/ShortLinks/internal/siteassets"
 )
 
 // homeSettingsReader is what the public home-info handler needs from the data
@@ -33,6 +35,7 @@ const homeActivityTopLinks = 3
 // other setting.
 type HomeHandler struct {
 	store    homeSettingsReader
+	hero     *HeroHandler
 	activity ActivityFunc
 	now      func() time.Time
 
@@ -63,9 +66,25 @@ func PublicActivityFunc(q reports.Querier, tz, baseURL string) ActivityFunc {
 	}
 }
 
+// WithHero attaches the hero image store (#0176) so the response can describe
+// the image. Without it hero stays null. It also builds the HeroHandler that
+// serves /public/hero and the admin upload routes; see Hero.
+func (h *HomeHandler) WithHero(store heroStore, auditor *audit.Logger) *HomeHandler {
+	h.hero = NewHeroHandler(store, auditor)
+	return h
+}
+
+// Hero returns the hero handler set by WithHero, or nil.
+func (h *HomeHandler) Hero() *HeroHandler {
+	if h == nil {
+		return nil
+	}
+	return h.hero
+}
+
 // homeResponse is the public body. The key set is pinned by a test so nothing
-// else from settings can leak. Hero is filled by #0176 and Activity by #0175
-// (present only in activity mode); until then hero is null and activity absent.
+// else from settings can leak. Hero is filled from the hero store (#0176) and Activity by #0175
+// (present only in activity mode); hero is null when unset and activity is absent until #0175.
 type homeResponse struct {
 	RedirectURL          string    `json:"redirect_url"`
 	RegistrationsEnabled bool      `json:"registrations_enabled"`
@@ -178,6 +197,17 @@ func (h *HomeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			resp.Activity = a
+		}
+	}
+	if h.hero != nil {
+		a, err := h.hero.store.HeroMeta(r.Context())
+		switch {
+		case err == nil:
+			resp.Hero = heroInfoFor(a)
+		case errors.Is(err, siteassets.ErrNotFound):
+		default:
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")

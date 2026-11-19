@@ -393,6 +393,22 @@ migrations on an existing database does not overwrite an admin's setting.
 
 ---
 
+### `site_assets` — `000023_create_site_assets.up.sql`
+
+Admin-uploaded images for the public home page (#0176). The only row is `name = 'hero'`; the rules for what is accepted are in [configuration.md](configuration.md#home-page-hero-image-0176).
+
+| Column | Type | Notes |
+|---|---|---|
+| `name` | TEXT PK | `hero` |
+| `content_type` | TEXT | `image/jpeg` or `image/png`, set from the re-encoded bytes |
+| `bytes` | BYTEA | the re-encoded image, at most 2 MB |
+| `width`, `height` | INTEGER | pixels |
+| `sha256` | TEXT | lowercase hex of `bytes`; the ETag and the `?v=` cache buster |
+| `alt` | TEXT | alt text, at most 200 characters |
+| `updated_at` | TIMESTAMPTZ | |
+
+---
+
 ### `audit_log` — `000007_create_audit_log.up.sql`
 
 Append-only record of every significant action in the system. Rows are never
@@ -499,4 +515,5 @@ users ──< links ──< clicks
   └──< url_filter_rules (created_by)
 
 settings   (no FK; key-value store)
+site_assets (no FK; one row per named image)
 ```
