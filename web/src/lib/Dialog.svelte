@@ -11,8 +11,10 @@
     title: string;
     onclose: () => void;
     children: Snippet;
+    /** A wider dialog for forms with several columns (#0164's batch create). */
+    wide?: boolean;
   }
-  let { title, onclose, children }: Props = $props();
+  let { title, onclose, children, wide = false }: Props = $props();
 
   let el: HTMLDialogElement | undefined = $state();
   const uid = Math.random().toString(36).slice(2, 8);
@@ -33,6 +35,7 @@
 <dialog
   bind:this={el}
   class="dlg"
+  class:wide
   aria-labelledby="dlg-{uid}"
   oncancel={(e) => {
     e.preventDefault();
@@ -56,6 +59,9 @@
     border-radius: var(--radius);
     background: var(--bg-panel);
     color: var(--text);
+  }
+  .dlg.wide {
+    width: min(760px, calc(100vw - 2 * var(--space-4)));
   }
   .dlg::backdrop {
     background: rgba(0, 0, 0, 0.4);

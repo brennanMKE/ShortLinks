@@ -69,6 +69,12 @@
     comparisonFrom?: string;
     /** Draw each series' last point hollow with a dotted final segment ("today so far"). */
     partialLast?: boolean;
+    /**
+     * Link keys to emphasise (#0164: the content row being pointed at). In
+     * combined mode their summed line is drawn over the total; in per-link
+     * mode the other lines dim. Links folded into "Other" cannot be drawn.
+     */
+    highlightKeys?: string[];
   }
 
   let {
@@ -80,6 +86,7 @@
     comparison = null,
     comparisonFrom,
     partialLast = false,
+    highlightKeys = [],
   }: Props = $props();
 
   /** At most this many series get direct end-of-line labels instead of a legend. */
@@ -122,6 +129,15 @@
   // — safe to read the x-axis and the accessible table's rows from whichever
   // series happens to be first.
   const axisPoints = $derived(activeSeries[0]?.points ?? []);
+
+  // The pointed-at content's own line: its drawable links' series summed day by day.
+  const hlSeries = $derived(linkSeries.filter((s) => !s.isOther && highlightKeys.includes(s.key)));
+  const hlPoints = $derived(
+    hlSeries.length === 0
+      ? []
+      : hlSeries[0].points.map((p, i) => ({ value: hlSeries.reduce((n, s) => n + (s.points[i]?.value ?? 0), 0), date: p.date })),
+  );
+  const hasHl = $derived(highlightKeys.length > 0 && hlSeries.length > 0);
 
   const cmpPoints = $derived(
     mode === 'combined' && comparison ? alignComparison(comparison, windowFrom, combinedPoints.length, comparisonFrom) : [],
@@ -370,6 +386,8 @@
       <polyline
         class="chart-line"
         class:other-line={s.isOther}
+        class:dimmed={hasHl && mode === 'per-link' && !highlightKeys.includes(s.key)}
+        class:emphasised={hasHl && mode === 'per-link' && highlightKeys.includes(s.key)}
         style="stroke: {s.colorVar}"
         points={poly}
         aria-hidden="true"
@@ -405,6 +423,10 @@
       {/if}
     {/each}
 
+    {#if hasHl && mode === 'combined'}
+      <polyline class="chart-line highlight-line" data-testid="highlight-line" points={line(hlPoints, hlPoints.length)} aria-hidden="true" />
+    {/if}
+
     {#each endLabels as el (el.key)}
       <line class="end-tick" x1={geo.padLeft + geo.innerW + 3} x2={geo.padLeft + geo.innerW + 11} y1={el.y} y2={el.y} style="stroke: {el.color}" aria-hidden="true" />
       <text class="end-label" class:end-other={el.isOther} x={geo.padLeft + geo.innerW + 15} y={el.y} dominant-baseline="middle" aria-hidden="true">{el.text}</text>
@@ -439,6 +461,10 @@
         </li>
       {/each}
     </ul>
+  {/if}
+
+  {#if hasHl && mode === 'combined' && linkSeries.some((s) => s.isOther)}
+    <p class="text-faint chart-note" data-testid="highlight-note">The highlighted line leaves out links folded into “Other”.</p>
   {/if}
 
   {#if isZeroWindow}
@@ -555,6 +581,18 @@
      signals (not color alone) that it is a fold, not a named link. */
   .other-line {
     stroke-dasharray: 4 3;
+  }
+  .chart-line.dimmed {
+    opacity: 0.2;
+  }
+  .chart-line.emphasised {
+    stroke-width: 3.5;
+  }
+  /* The pointed-at content (#0164): a heavier line in the second series colour,
+     which is distinct from the accent total line it sits on. */
+  .highlight-line {
+    stroke: var(--series-2);
+    stroke-width: 3.5;
   }
   .chart-area {
     fill: var(--accent-subtle);

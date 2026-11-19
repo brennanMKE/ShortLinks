@@ -7,6 +7,7 @@ import type { HomeInfo } from './home';
 import { appendFilterValues } from './viewQuery';
 import type { TopContentData } from './campaignLinks';
 import type { LinkPerformance } from './linkReport';
+import type { CampaignComparisonData, CampaignPerformanceData, ReportEnvelope } from './reports';
 import type {
   User,
   Link,
@@ -325,6 +326,37 @@ export function getCampaign(slug: string): Promise<CampaignDetail> {
 export function getCampaignContentGroups(slug: string, from: string, to: string): Promise<{ data: TopContentData }> {
   const q = new URLSearchParams({ campaign: slug, from, to, tz: 'UTC', compare: 'none', sort: 'newest', limit: '500' });
   return apiGet<{ data: TopContentData }>(`/api/reports/top-content?${q.toString()}`);
+}
+
+/**
+ * GET /api/reports/campaign-performance (#0143): the content x channel matrix
+ * for one campaign. `from`/`to` are INCLUSIVE days. tz=UTC on purpose, like
+ * getCampaignContentGroups: the matrix sits beside the campaign stats' chart
+ * and Links table, whose window is resolved in UTC, so its day boundaries must
+ * match theirs or the totals would disagree at the edges.
+ */
+export function getCampaignPerformance(
+  slug: string,
+  from: string,
+  to: string,
+  columns: string,
+): Promise<ReportEnvelope<CampaignPerformanceData>> {
+  const q = new URLSearchParams({ slug, columns, from, to, tz: 'UTC', compare: 'none', limit: '100' });
+  return apiGet<ReportEnvelope<CampaignPerformanceData>>(`/api/reports/campaign-performance?${q.toString()}`);
+}
+
+/**
+ * GET /api/reports/campaign-comparison filtered to one campaign, with the
+ * previous period (the same number of days before `from`) for the tiles'
+ * change figure. UTC for the same reason as getCampaignPerformance.
+ */
+export function getCampaignComparison(
+  slug: string,
+  from: string,
+  to: string,
+): Promise<ReportEnvelope<CampaignComparisonData>> {
+  const q = new URLSearchParams({ campaign: slug, from, to, tz: 'UTC', compare: 'previous' });
+  return apiGet<ReportEnvelope<CampaignComparisonData>>(`/api/reports/campaign-comparison?${q.toString()}`);
 }
 
 /**

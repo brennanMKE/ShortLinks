@@ -11,7 +11,8 @@
 // Because a decoded query cannot tell a separator comma from a value comma,
 // parse() reads the RAW query (RouteState.rawQuery), not URLSearchParams.
 
-export type RangeKey = '7d' | '30d' | '90d' | 'custom';
+/** 'campaign' (the campaign's own dates) is only a valid range for a base whose range is 'campaign' (#0164). */
+export type RangeKey = '7d' | '30d' | '90d' | 'custom' | 'campaign';
 export type GroupBy = 'content' | 'link' | 'source';
 
 /** Filterable UTM-style dimensions, in display order. Names are the query keys and the reports' parameter names. */
@@ -94,10 +95,14 @@ function parseList(raw: string): string[] {
   return out;
 }
 
-/** Reads the view state from a raw hash query. Unknown or malformed values fall back to defaults. */
-export function parse(query: string): ViewState {
+/**
+ * Reads the view state from a raw hash query. Unknown or malformed values fall
+ * back to `base`, the view's defaults (DEFAULT_STATE unless a view has its
+ * own, e.g. the campaign page's range of 'campaign').
+ */
+export function parse(query: string, base: ViewState = DEFAULT_STATE): ViewState {
   const q = rawPairs(query);
-  const s: ViewState = { ...DEFAULT_STATE, filters: emptyFilters() };
+  const s: ViewState = { ...base, filters: emptyFilters() };
   const val = (k: string) => decode(q.get(k) ?? '');
 
   const from = val('from');
@@ -109,11 +114,14 @@ export function parse(query: string): ViewState {
   } else {
     const r = val('range');
     if (r === '7d' || r === '30d' || r === '90d') s.range = r;
+    else if (r === 'campaign' && base.range === 'campaign') s.range = r;
   }
   s.campaign = val('campaign');
   for (const k of UTM_KEYS) s.filters[k] = parseList(q.get(k) ?? '');
   const g = val('group');
+  // '0' is #0157's older "grouping off" for the campaign Links table.
   if (g === 'link' || g === 'source') s.group = g;
+  else if (g === '0') s.group = 'link';
   s.sort = val('sort');
   s.tab = val('tab');
   s.q = val('q');
@@ -130,7 +138,7 @@ export function hasFilters(f: UtmFilters): boolean {
 }
 
 /** Serialises state to a query string (no leading '?'); defaults are omitted. */
-export function serialize(s: ViewState): string {
+export function serialize(s: ViewState, base: ViewState = DEFAULT_STATE): string {
   const parts: string[] = [];
   const add = (k: string, v: string) => parts.push(k + '=' + v);
   if (s.range === 'custom') {
@@ -138,14 +146,14 @@ export function serialize(s: ViewState): string {
       add('from', s.from);
       if (s.to) add('to', s.to);
     }
-  } else if (s.range !== DEFAULT_STATE.range) {
+  } else if (s.range !== base.range) {
     add('range', s.range);
   }
   if (s.campaign) add('campaign', encodeURIComponent(s.campaign));
   for (const k of UTM_KEYS) {
     if (s.filters[k].length > 0) add(k, s.filters[k].map(encodeURIComponent).join(','));
   }
-  if (s.group !== DEFAULT_STATE.group) add('group', s.group);
+  if (s.group !== base.group) add('group', s.group);
   if (s.sort) add('sort', encodeURIComponent(s.sort));
   if (s.tab) add('tab', encodeURIComponent(s.tab));
   if (s.q) add('q', encodeURIComponent(s.q));
@@ -155,8 +163,8 @@ export function serialize(s: ViewState): string {
 }
 
 /** The hash path for a state at `base`: '/' or '/?range=7d&...'. */
-export function viewPath(s: ViewState, base = '/'): string {
-  const qs = serialize(s);
+export function viewPath(s: ViewState, base = '/', defaults: ViewState = DEFAULT_STATE): string {
+  const qs = serialize(s, defaults);
   return qs ? base + '?' + qs : base;
 }
 
@@ -200,7 +208,7 @@ export function reportQuery(s: ViewState, tz: string, extra: Record<string, stri
     q.set('from', s.from);
     if (s.to) q.set('to', s.to);
   } else {
-    q.set('range', s.range === 'custom' ? '30d' : s.range);
+    q.set('range', s.range === 'custom' || s.range === 'campaign' ? '30d' : s.range);
   }
   if (s.campaign) q.set('campaign', s.campaign);
   for (const k of UTM_KEYS) {

@@ -115,6 +115,60 @@ export interface BreakdownData {
   other: { clicks: number; values: number } | null;
 }
 
+// ── campaign-performance and campaign-comparison (#0143, #0164) ──────────
+
+export interface MatrixCell {
+  clicks: number;
+  /** Set when exactly one link has clicks in the cell. */
+  key?: string;
+  /** Set when several do, most clicks first. */
+  keys?: string[];
+}
+
+export interface MatrixRow {
+  content_key: string;
+  title: string;
+  /** A pairing nobody clicked is absent, not zero. */
+  cells: Record<string, MatrixCell>;
+  total: number;
+}
+
+export interface CampaignPerformanceData {
+  campaign: { slug: string; name: string; status: string; starts_on: string | null; ends_on: string | null };
+  totals: {
+    clicks: number;
+    previous_clicks: number | null;
+    per_active_day: number | null;
+    links: number;
+    links_clicked: number;
+  };
+  matrix: {
+    by: string;
+    columns: string[];
+    rows: MatrixRow[];
+    column_totals: Record<string, number>;
+    total_rows: number;
+  };
+  removed_links_clicks: number;
+  truncated?: boolean;
+}
+
+export interface CampaignComparisonRow {
+  slug: string;
+  name: string;
+  status: string;
+  clicks: number;
+  previous_clicks: number | null;
+  change_pct: number | null;
+  clicks_per_active_day: number | null;
+  top_content: { title: string; clicks: number } | null;
+  top_source: SourceCount | null;
+}
+
+export interface CampaignComparisonData {
+  campaigns: CampaignComparisonRow[];
+}
+
 /** GET /api/reports/{name}?{query}. Cookie session; throws ApiError on non-2xx. */
 export function getReport<T>(name: string, query: string): Promise<ReportEnvelope<T>> {
   return apiGet<ReportEnvelope<T>>(`/api/reports/${name}?${query}`);

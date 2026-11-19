@@ -195,3 +195,19 @@ describe('pruneFilters', () => {
     expect(pruneFilters(f, {}, 50).dropped).toEqual([]);
   });
 });
+
+describe('per-view defaults (#0164)', () => {
+  const campaignBase = state({ range: 'campaign' });
+  it('range=campaign is only valid for a base whose range is campaign', () => {
+    expect(parse('range=campaign', campaignBase).range).toBe('campaign');
+    expect(parse('range=campaign').range).toBe('30d');
+  });
+  it('falls back to the base range and omits it when serializing', () => {
+    expect(parse('', campaignBase).range).toBe('campaign');
+    expect(serialize(campaignBase, campaignBase)).toBe('');
+    expect(serialize(state({ range: '30d' }), campaignBase)).toBe('range=30d');
+  });
+  it('reads the older group=0 as a flat list', () => {
+    expect(parse('group=0').group).toBe('link');
+  });
+});
