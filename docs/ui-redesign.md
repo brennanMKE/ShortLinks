@@ -202,7 +202,7 @@ Note on the design reference: `design/ShortLinks.png` is only the app icon (whit
 - Defaults are omitted, so the bare `#/` is the default view.
 - Chip and dropdown changes use `navigate()` so Back undoes a filter; typing in a search box uses `replace()`.
 - Unknown or stale values (a campaign slug that no longer exists) are ignored with a dismissible notice rather than an error page.
-- One pure module, `lib/overviewQuery.ts` (`parse(query) → state`, `serialize(state) → string`), unit-tested alongside `routing.test.ts`, shared by Overview, Links and Campaign detail.
+- One pure module, `lib/viewQuery.ts` (`parse(query) → state`, `serialize(state) → string`), unit-tested alongside `routing.test.ts`, shared by Overview, Links and Campaign detail.
 
 **Top content list.**
 - A content group = all of the user's links that point at the same page. Key: the destination URL with `utm_*` parameters, fragment and trailing slash removed and the host lower-cased. That is deterministic and does not depend on how titles were typed.
@@ -576,7 +576,7 @@ Items 1–3 fix both screenshots. Item 2 alone answers "which content gets atten
 | 11 | Time zone + include today (backend B) | M |
 | 12 | `GET /api/stats/overview` (backend A) | L |
 | 13 | Overview page: stat tiles, 30-day chart with prior-period line, campaign chips, top content | L |
-| 14 | UTM filter bar + `lib/overviewQuery.ts` hash state | M |
+| 14 | UTM filter bar + `lib/viewQuery.ts` hash state | M |
 | 15 | Campaign detail tabs + content × source matrix + range control | M |
 | 16 | Link reactivation (backend D) + undo toasts | S |
 | 17 | Campaign list: 30-day clicks, sparkline, state tags, create-in-dialog (backend E) | M |

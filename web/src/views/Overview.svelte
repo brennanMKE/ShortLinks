@@ -6,9 +6,11 @@
   (#0139, #0140); nothing is added up in the browser except the display of
   what the server returned.
 
-  State lives in the hash query (range, from/to, campaign, group — see
-  lib/overviewQuery.ts, which #0163 widens with the UTM filters). Every
-  control is a hash link, so Back undoes a change and the view can be pasted.
+  State lives in the hash query (range, from/to, campaign, the UTM filters,
+  group — see lib/viewQuery.ts, #0163). Every control navigates, so Back
+  undoes a change and a filtered view can be bookmarked or pasted. The filters
+  are applied by the reports themselves, so the tiles, chart, chips and list
+  all describe the same filtered clicks.
   A brand-new account (no links at all) sees "Create your first link" instead
   of an empty chart. See docs/ui-redesign.md section 3.2.
 -->
@@ -28,13 +30,19 @@
     type TopLinksData,
   } from '../lib/reports';
   import {
-    overviewPath,
-    parseOverviewQuery,
+    clearFilters,
+    parse,
+    pruneFilters,
     reportQuery,
+    viewPath,
+    withFilter,
+    UTM_KEYS,
+    type FacetValue,
     type GroupBy,
-    type OverviewState,
     type RangeKey,
-  } from '../lib/overviewQuery';
+    type UtmKey,
+    type ViewState,
+  } from '../lib/viewQuery';
   import {
     campaignChips,
     changeOf,
@@ -50,6 +58,7 @@
   import ClicksChart from '../lib/ClicksChart.svelte';
   import StatTile from '../lib/StatTile.svelte';
   import CampaignChips from '../lib/CampaignChips.svelte';
+  import FilterBar from '../lib/FilterBar.svelte';
   import TopContent from '../lib/TopContent.svelte';
   import Link from '../lib/Link.svelte';
 
@@ -57,8 +66,8 @@
 
   // The URL is the state.
   const route = $derived(getRoute());
-  const view = $derived<OverviewState>(parseOverviewQuery(route.query));
-  const viewKey = $derived(overviewPath(view));
+  const view = $derived<ViewState>(parse(route.rawQuery));
+  const overviewPath = (s: ViewState) => viewPath(s, '/');
 
   // Each report is stored with the fetch key it answers, so a stale answer is
   // recognisable and the previous one can stay on screen (dimmed) until the
@@ -77,7 +86,7 @@
   let notice = $state<string | null>(null);
   let reloadCount = $state(0);
 
-  const scope = $derived<OverviewState>({ ...view, group: 'content' });
+  const scope = $derived<ViewState>({ ...view, group: 'content' });
   const fetchKey = $derived(overviewPath(scope) + '|' + reloadCount);
 
   // A response for a scope the user has already left must not overwrite a newer one.
@@ -108,7 +117,7 @@
     const mine = ++seqA;
     loadError = null;
     Promise.all([
-      getReport<OverviewData>('overview', reportQuery(s, tz)),
+      getReport<OverviewData>('overview', reportQuery(s, tz, { limit: String(FACET_LIMIT) })),
       // Always fetched: the "Top content" tile and the source colours read it.
       getReport<TopContentData>('top-content', reportQuery(s, tz, { limit: '50' })),
     ])
@@ -152,6 +161,19 @@
   const loading = $derived(overviewKey !== fetchKey);
 
   const hasLinks = $derived((data?.totals.links_total ?? 0) > 0);
+  // Facet lists are requested at this size; a list that reaches it may be incomplete.
+  const FACET_LIMIT = 200;
+  const facets = $derived<Record<UtmKey, FacetValue[]>>({
+    source: data?.facets?.source ?? [],
+    medium: data?.facets?.medium ?? [],
+    utm_campaign: data?.facets?.utm_campaign ?? [],
+    content: data?.facets?.content ?? [],
+    placement: data?.facets?.placement ?? [],
+    term: data?.facets?.term ?? [],
+  });
+  const campaignSlugs = $derived((data?.campaigns ?? []).flatMap((c) => (c.slug ? [c.slug] : [])));
+  const filtered = $derived(UTM_KEYS.some((k) => view.filters[k].length > 0));
+
   const chips = $derived(campaignChips(data?.campaigns ?? [], view.campaign));
   const selectedChip = $derived(chips.find((c) => c.value === view.campaign) ?? null);
 
@@ -223,6 +245,30 @@
       .catch(() => {});
   });
 
+  // A pasted or shared URL may carry filter values that do not exist (a
+  // deleted placement, a typo). Checked once, on arrival, against the
+  // account's whole history (an unfiltered range=all overview), so a value that
+  // is merely quiet in the current window is never dropped, and changing the
+  // range or campaign later never touches a selection. Unknown values are
+  // removed with a dismissible notice.
+  onMount(() => {
+    const start = view;
+    if (!UTM_KEYS.some((k) => start.filters[k].length > 0)) return;
+    const q = new URLSearchParams({ tz, range: 'all', limit: '500' });
+    getReport<OverviewData>('overview', q.toString())
+      .then((r) => {
+        const { filters, dropped } = pruneFilters(start.filters, r.data.facets, 500);
+        if (dropped.length === 0) return;
+        notice = `Ignored ${dropped.length === 1 ? 'a filter value that does' : 'filter values that do'} not exist: ${dropped.join(', ')}.`;
+        // Remove only the unknown values from whatever the URL says now.
+        const cur = view;
+        const keep = { ...cur.filters };
+        for (const k of UTM_KEYS) keep[k] = cur.filters[k].filter((v) => filters[k].includes(v) || !start.filters[k].includes(v));
+        replace(overviewPath({ ...cur, filters: keep }));
+      })
+      .catch(() => {});
+  });
+
   // A link created anywhere (the New link dialog, another tab) refetches.
   onMount(() => subscribeLinks(() => reloadCount++));
 
@@ -240,6 +286,9 @@
   const hrefRange = (key: Exclude<RangeKey, 'custom'>) => overviewPath({ ...view, range: key, from: '', to: '' });
   const hrefCampaign = (value: string) => overviewPath({ ...view, campaign: value });
   const hrefGroup = (g: GroupBy) => overviewPath({ ...view, group: g });
+  // Dropdown and chip changes push history, so Back undoes them.
+  const setFilter = (key: UtmKey, values: string[]) => navigate(overviewPath(withFilter(view, key, values)));
+  const clearAll = () => navigate(overviewPath(clearFilters(view)));
   // "View all links" carries the campaign focus where the Links page can use it (#0163).
   const allLinksHref = '/links';
 
@@ -384,6 +433,10 @@
         </p>
       </section>
 
+      <section class="card filters" aria-label="Filters">
+        <FilterBar {facets} filters={view.filters} {campaignSlugs} onchange={setFilter} onclear={clearAll} />
+      </section>
+
       <section class="card" aria-label="Top content">
         <div class="top-head">
           <h2>Top content <span class="text-muted scope">{scopeLabel}</span></h2>
@@ -396,7 +449,11 @@
         </div>
         {#if data.totals.clicks === 0}
           <p class="empty text-muted">
-            No clicks {view.campaign ? 'for this campaign ' : ''}in this range. Share a link or widen the range.
+            {#if filtered}
+              No clicks match these filters in this range. Remove a filter or widen the range.
+            {:else}
+              No clicks {view.campaign ? 'for this campaign ' : ''}in this range. Share a link or widen the range.
+            {/if}
           </p>
         {:else}
           <TopContent
@@ -530,6 +587,10 @@
   .focus :global(.open-campaign) {
     flex: 0 0 auto;
     white-space: nowrap;
+  }
+  .filters {
+    padding-top: 0;
+    padding-bottom: var(--space-3);
   }
   .foot {
     display: flex;

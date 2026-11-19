@@ -24,6 +24,22 @@ export interface OverviewCampaign {
   clicks: number;
 }
 
+export interface FacetCount {
+  /** The value, or '~none' for clicks without one. */
+  value: string;
+  clicks: number;
+}
+
+/** Values per UTM dimension, each counted with every other filter applied. */
+export interface OverviewFacets {
+  source: FacetCount[];
+  medium: FacetCount[];
+  utm_campaign: FacetCount[];
+  content: FacetCount[];
+  placement: FacetCount[];
+  term: FacetCount[];
+}
+
 export interface OverviewData {
   totals: {
     clicks: number;
@@ -37,6 +53,7 @@ export interface OverviewData {
   previous_timeseries: ReportDay[];
   best_day: ReportDay | null;
   campaigns: OverviewCampaign[];
+  facets: OverviewFacets;
 }
 
 export interface SourceCount {

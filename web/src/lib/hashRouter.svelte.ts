@@ -18,6 +18,8 @@ export interface RouteState {
   path: string;
   params: Record<string, string>;
   query: URLSearchParams;
+  /** The query as written in the hash, still percent-encoded (see viewQuery.ts). */
+  rawQuery: string;
   component: unknown;
 }
 
@@ -25,12 +27,13 @@ let routes: RouteDef<unknown>[] = [];
 let hashChangeWired = false;
 
 function compute(): RouteState {
-  const { path, query } = parseHash(window.location.hash);
+  const { path, query, rawQuery } = parseHash(window.location.hash);
   const match = matchRoute(path, routes);
   return {
     path,
     params: match?.params ?? {},
     query,
+    rawQuery,
     component: match?.component ?? null,
   };
 }
@@ -39,6 +42,7 @@ let route = $state<RouteState>({
   path: '/',
   params: {},
   query: new URLSearchParams(),
+  rawQuery: '',
   component: null,
 });
 

@@ -8,6 +8,8 @@
 export interface ParsedHash {
   path: string;
   query: URLSearchParams;
+  /** The query exactly as written (still percent-encoded), for lib/viewQuery.ts, which needs to tell an encoded comma from a separator. */
+  rawQuery: string;
 }
 
 /**
@@ -31,7 +33,7 @@ export function parseHash(hash: string): ParsedHash {
   if (path === '') path = '/';
   if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
 
-  return { path, query: new URLSearchParams(queryString) };
+  return { path, query: new URLSearchParams(queryString), rawQuery: queryString };
 }
 
 export interface RouteDef<T> {
