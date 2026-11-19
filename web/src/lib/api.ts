@@ -60,11 +60,12 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
+  extraHeaders?: Record<string, string>,
 ): Promise<T> {
   const init: RequestInit = {
     method,
     credentials: 'include',
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...extraHeaders },
   };
   if (body !== undefined) {
     init.headers = { ...init.headers, 'Content-Type': 'application/json' };
@@ -99,8 +100,8 @@ export function apiGet<T>(path: string): Promise<T> {
 }
 
 /** POST a JSON body and parse the JSON response. */
-export function apiPost<T>(path: string, body?: unknown): Promise<T> {
-  return request<T>('POST', path, body);
+export function apiPost<T>(path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
+  return request<T>('POST', path, body, headers);
 }
 
 /** PATCH a JSON body and parse the JSON response. */
@@ -435,10 +436,12 @@ export interface BatchCreateLinkRowInput {
 export function batchCreateLinksForCampaign(
   slug: string,
   rows: BatchCreateLinkRowInput[],
+  idempotencyKey?: string,
 ): Promise<{ links: Link[]; skipped_blank_rows: number }> {
   return apiPost<{ links: Link[]; skipped_blank_rows: number }>(
     `/api/campaigns/${encodeURIComponent(slug)}/links/batch`,
     { rows },
+    idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
   );
 }
 

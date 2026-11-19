@@ -504,7 +504,7 @@ export function joinSentences(first: string, second: string): string {
 export const MAX_BATCH_CREATE_ROWS_PER_REQUEST = 50;
 
 /**
- * One row of the batch-create form: the five fields that vary row to row.
+ * One row of the batch-create form: the four fields that vary row to row.
  * utm_campaign/utm_term are handled separately (see the module doc comment
  * above) — they are not part of a row's own state.
  */
@@ -513,12 +513,11 @@ export interface BatchChannelRow {
   utm_medium: string;
   utm_content: string;
   placement: string;
-  title: string;
 }
 
 /** A fresh, entirely blank row — what "add row" appends. */
 export function emptyBatchChannelRow(): BatchChannelRow {
-  return { utm_source: '', utm_medium: '', utm_content: '', placement: '', title: '' };
+  return { utm_source: '', utm_medium: '', utm_content: '', placement: '' };
 }
 
 /**
@@ -563,8 +562,7 @@ export function isBlankBatchRow(row: BatchChannelRow): boolean {
     row.utm_source.trim() === '' &&
     row.utm_medium.trim() === '' &&
     row.utm_content.trim() === '' &&
-    row.placement.trim() === '' &&
-    row.title.trim() === ''
+    row.placement.trim() === ''
   );
 }
 
@@ -678,10 +676,13 @@ export function buildBatchCreateRows(
   rows: BatchChannelRow[],
   sharedUtmCampaign: string,
   sharedUtmTerm: string,
+  sharedTitle = '',
 ): BatchCreateLinkRowPayload[] {
   return nonBlankBatchRows(rows).map((r) => ({
     destination_url: composeBatchRowDestinationUrl(baseUrl, r, sharedUtmCampaign, sharedUtmTerm),
-    title: r.title.trim() || undefined,
+    // #0168: one shared content title for the batch; the per-row label goes
+    // to utm_content, so titles stop carrying channel suffixes.
+    title: sharedTitle.trim() || undefined,
     utm_source: r.utm_source.trim() || undefined,
     utm_medium: r.utm_medium.trim() || undefined,
     utm_campaign: sharedUtmCampaign.trim() || undefined,

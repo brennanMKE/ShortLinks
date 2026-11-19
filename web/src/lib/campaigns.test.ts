@@ -812,7 +812,6 @@ describe('emptyBatchChannelRow', () => {
       utm_medium: '',
       utm_content: '',
       placement: '',
-      title: '',
     });
   });
 
@@ -838,15 +837,13 @@ describe('initialBatchRows', () => {
       utm_medium: 'print',
       utm_content: 'hero-cta',
       placement: '',
-      title: '',
     });
   });
 
-  it('does not prefill placement or title — the campaign has no default for either', () => {
+  it('does not prefill placement — the campaign has no default for it', () => {
     const c = campaign({ default_utm_source: 'flyer', default_utm_medium: 'print', default_utm_content: 'hero-cta' });
     const rows = initialBatchRows(c);
     expect(rows[0].placement).toBe('');
-    expect(rows[0].title).toBe('');
   });
 
   it('row 1 is prefilled (non-blank) and a row 2 added afterward stays entirely blank', () => {
@@ -884,10 +881,10 @@ describe('isBlankBatchRow', () => {
   });
 
   it('is true for a row containing only whitespace', () => {
-    expect(isBlankBatchRow(batchRow({ utm_source: '   ', title: '\t' }))).toBe(true);
+    expect(isBlankBatchRow(batchRow({ utm_source: '   ', placement: '\t' }))).toBe(true);
   });
 
-  it.each(['utm_source', 'utm_medium', 'utm_content', 'placement', 'title'] as const)(
+  it.each(['utm_source', 'utm_medium', 'utm_content', 'placement'] as const)(
     'is false once %s is filled in',
     (field) => {
       expect(isBlankBatchRow(batchRow({ [field]: 'x' }))).toBe(false);

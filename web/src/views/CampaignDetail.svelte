@@ -1142,10 +1142,8 @@
           oncreated={() => {
             void load(detail!.slug).then(() => reportTick++);
           }}
+          onclose={() => (dialog = null)}
         />
-        <div class="dlg-actions">
-          <Button variant="default" onclick={() => (dialog = null)}>Close</Button>
-        </div>
       </Dialog>
     {:else if dialog === 'assign'}
       <Dialog title="Assign existing links" onclose={() => (dialog = null)}>
