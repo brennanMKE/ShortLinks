@@ -3,7 +3,7 @@
 // derivation, and date formatting here (rather than inline in the .svelte file)
 // makes them unit-testable without a DOM — see linkDetail.test.ts.
 
-import type { Link, ClickStats, UTMBucket } from './types';
+import type { Link, ClickStats, UTMBucket, TimeseriesResult } from './types';
 import { linkStatus, deniedReasonLabel } from './links';
 
 /**
@@ -107,4 +107,29 @@ export function formatDate(iso: string | null | undefined, fallback = 'Never'): 
     month: 'short',
     day: 'numeric',
   });
+}
+
+/** Clicks in the detail response's timeseries window (the API's 30-day default). */
+export function windowClicks(ts: TimeseriesResult | undefined | null): number {
+  return (ts?.days ?? []).reduce((sum, d) => sum + d.count, 0);
+}
+
+/**
+ * Header subtitle parts: the channel label (the link's placement) and
+ * `source / medium`. The campaign is rendered separately as a real link.
+ */
+export function headerMetaParts(
+  link: Pick<Link, 'placement' | 'utm_source' | 'utm_medium'>,
+): { channel: string; sourceMedium: string } {
+  const src = (link.utm_source || '').trim();
+  const med = (link.utm_medium || '').trim();
+  return {
+    channel: (link.placement || '').trim(),
+    sourceMedium: [src, med].filter(Boolean).join(' / '),
+  };
+}
+
+/** Destination without the scheme, for the line under the short URL (full URL stays in title/href). */
+export function destinationDisplay(url: string): string {
+  return url.replace(/^https?:\/\//i, '');
 }

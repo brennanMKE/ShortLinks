@@ -13,6 +13,9 @@ import {
   utmDimensions,
   statusLabel,
   formatDate,
+  windowClicks,
+  headerMetaParts,
+  destinationDisplay,
 } from './linkDetail';
 
 function bucket(value: string, count: number): UTMBucket {
@@ -170,5 +173,21 @@ describe('formatDate', () => {
 
   it('falls back to the raw string for an unparseable value', () => {
     expect(formatDate('not-a-date')).toBe('not-a-date');
+  });
+});
+
+describe('link detail header helpers (#0159)', () => {
+  it('sums the window clicks and tolerates missing data', () => {
+    expect(windowClicks({ days: [{ date: '2026-11-01', count: 3 }, { date: '2026-11-02', count: 4 }] })).toBe(7);
+    expect(windowClicks(undefined)).toBe(0);
+  });
+  it('builds channel and source / medium parts', () => {
+    expect(headerMetaParts({ placement: 'Mastodon', utm_source: 'mastodon', utm_medium: 'social' }))
+      .toEqual({ channel: 'Mastodon', sourceMedium: 'mastodon / social' });
+    expect(headerMetaParts({ placement: '', utm_source: '', utm_medium: 'social' }))
+      .toEqual({ channel: '', sourceMedium: 'social' });
+  });
+  it('strips the scheme from the destination', () => {
+    expect(destinationDisplay('https://a.example/x?y=1')).toBe('a.example/x?y=1');
   });
 });

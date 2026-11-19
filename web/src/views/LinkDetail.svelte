@@ -38,6 +38,9 @@
     utmDimensions,
     statusLabel,
     formatDate,
+    windowClicks,
+    headerMetaParts,
+    destinationDisplay,
   } from '../lib/linkDetail';
   import { emptyUtmParams, composeUtmUrl, isUtmEmpty, utmParamsFromLink } from '../lib/utm';
   import type { UtmParams } from '../lib/utm';
@@ -81,6 +84,18 @@
   const dimensions = $derived(detail ? utmDimensions(detail.utm_stats) : []);
   const noStats = $derived(detail ? isEmptyStats(detail.utm_stats) : true);
   const canDeactivate = $derived(status === 'active');
+  const windowTotal = $derived(detail ? windowClicks(detail.timeseries) : 0);
+  const metaParts = $derived(detail ? headerMetaParts(detail) : { channel: '', sourceMedium: '' });
+
+  // ⋯ menu (#0159): Deactivate lives here instead of as a red button.
+  let menuOpen = $state(false);
+  let menuWrap = $state<HTMLElement | null>(null);
+  function onDocClick(e: MouseEvent) {
+    if (menuOpen && menuWrap && !menuWrap.contains(e.target as Node)) menuOpen = false;
+  }
+  function onDocKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') menuOpen = false;
+  }
 
   // ── Edit mode (#0099) ────────────────────────────────────────────────────────
   let editing = $state(false);
@@ -222,6 +237,8 @@
   });
 </script>
 
+<svelte:document onclick={onDocClick} onkeydown={onDocKey} />
+
 <div class="app-shell detail-shell">
   <Breadcrumb crumbs={[{ label: 'Links', to: '/links' }, { label: detail?.title || '/u/' + key }]} />
 
@@ -238,86 +255,91 @@
       <Button variant="primary" onclick={() => load(key)}>Retry</Button>
     </Panel>
   {:else if detail}
-    <Panel>
-      <div class="title-row">
-        <h1 class="detail-title">{detail.title || '/u/' + detail.key}</h1>
-        <span
-          class="badge"
-          class:badge-success={status === 'active'}
-          class:badge-danger={status === 'denied'}
-          class:badge-muted={status === 'inactive'}
-        >
-          {statusLabel(detail)}
-        </span>
+    {#if status === 'inactive'}
+      <div class="banner" role="status">
+        <strong>This link is inactive.</strong> Visitors who open it are not redirected.
       </div>
+    {:else if status === 'denied'}
+      <div class="banner banner-danger" role="status">
+        <strong>{statusLabel(detail)}.</strong> This link is blocked.
+      </div>
+    {/if}
 
-      <dl class="fields">
-        <dt>Short URL</dt>
-        <dd>
-          <div class="row">
-            <a class="short-url" href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a>
-            <Button variant="subtle" onclick={copyShortUrl}>
-              {copied ? 'Copied!' : 'Copy'}
-            </Button>
+    {#if !editing}
+      <Panel>
+        <div class="title-row">
+          <h1 class="detail-title" title={detail.title || undefined}>{detail.title || '/u/' + detail.key}</h1>
+          <div class="head-actions">
+            <Button variant="default" onclick={startEdit}>Edit</Button>
+            {#if canDeactivate}
+              <div class="menu-wrap" bind:this={menuWrap}>
+                <button
+                  type="button"
+                  class="more-btn"
+                  aria-label="More actions"
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  onclick={() => (menuOpen = !menuOpen)}
+                >⋯</button>
+                {#if menuOpen}
+                  <div class="menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item menu-item-danger"
+                      disabled={deactivating}
+                      onclick={() => { menuOpen = false; handleDeactivate(); }}
+                    >{deactivating ? 'Deactivating…' : 'Deactivate link'}</button>
+                  </div>
+                {/if}
+              </div>
+            {/if}
           </div>
-        </dd>
+        </div>
 
-        <dt>QR code</dt>
-        <dd>
-          <div class="row">
-            <a class="qr-link" href={qrSvgUrl(detail.key)} download>Download SVG</a>
-            <a class="qr-link" href={qrPngUrl(detail.key)} download>Download PNG</a>
-          </div>
-        </dd>
-
-        <dt>Destination</dt>
-        <dd>
-          <a class="dest-link" href={detail.destination_url} target="_blank" rel="noreferrer">
-            {detail.destination_url}
-          </a>
-        </dd>
-
-        <dt>Total clicks</dt>
-        <dd class="num">{detail.click_count}</dd>
-
-        <dt>Created</dt>
-        <dd>{formatDate(detail.created_at)}</dd>
-
-        <dt>Expires</dt>
-        <dd>{formatDate(detail.expires_at)}</dd>
-
-        <dt>Campaign</dt>
-        <dd>
+        <p class="meta-line">
+          {#if metaParts.channel}<span>{metaParts.channel}</span>{/if}
+          {#if metaParts.sourceMedium}<span>{metaParts.sourceMedium}</span>{/if}
           {#if detail.campaign_slug}
-            <Link to={'/campaigns/' + encodeURIComponent(detail.campaign_slug)} class="text-link">{detail.campaign_name || detail.campaign_slug}</Link>
-          {:else}
-            {detail.campaign_name || 'None'}
+            <span><Link to={'/campaigns/' + encodeURIComponent(detail.campaign_slug)} class="text-link">{detail.campaign_name || detail.campaign_slug}</Link></span>
           {/if}
-        </dd>
+        </p>
 
-        <dt>Placement</dt>
-        <dd>{detail.placement || '—'}</dd>
-      </dl>
-
-      {#if loadError}
-        <p class="text-error" role="alert">{loadError}</p>
-      {/if}
-
-      <div class="row" style="margin-top: var(--space-3); gap: var(--space-2);">
-        <Button variant="default" onclick={startEdit} disabled={editing}>Edit</Button>
-        {#if canDeactivate}
-          <Button
-            variant="danger"
-            disabled={deactivating}
-            onclick={handleDeactivate}
-          >
-            {deactivating ? 'Deactivating…' : 'Deactivate link'}
-          </Button>
+        {#if loadError}
+          <p class="text-error" role="alert">{loadError}</p>
         {/if}
-      </div>
-    </Panel>
 
-    {#if editing}
+        <div class="hero">
+          <div class="url-box">
+            <div class="url-row">
+              <a class="short-url" href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a>
+              <Button variant="primary" onclick={copyShortUrl}>{copied ? 'Copied!' : 'Copy'}</Button>
+            </div>
+            <a
+              class="dest-link"
+              href={detail.destination_url}
+              target="_blank"
+              rel="noreferrer"
+              title={detail.destination_url}
+            >→ {destinationDisplay(detail.destination_url)}</a>
+          </div>
+          <div class="qr-box">
+            <img class="qr-img" src={qrSvgUrl(detail.key)} alt={'QR code for ' + shareUrl} width="120" height="120" />
+            <div class="qr-links">
+              <a class="qr-link" href={qrSvgUrl(detail.key)} download>SVG</a>
+              <span aria-hidden="true">·</span>
+              <a class="qr-link" href={qrPngUrl(detail.key)} download>PNG</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="tiles">
+          <div class="tile"><span class="tile-label">Clicks, 30 days</span><span class="tile-value">{windowTotal}</span></div>
+          <div class="tile"><span class="tile-label">All time</span><span class="tile-value">{detail.click_count}</span></div>
+          <div class="tile"><span class="tile-label">Created</span><span class="tile-value tile-date">{formatDate(detail.created_at)}</span></div>
+        </div>
+      </Panel>
+    {:else}
       <Panel title="Edit link">
         <form
           onsubmit={(e) => {
@@ -400,6 +422,30 @@
       <ClicksChart timeseries={detail.timeseries} from={chartRange[0]} to={chartRange[1]} title="Clicks over the last 30 days" />
     </Panel>
 
+    <details class="details-panel">
+      <summary>Details</summary>
+      <dl class="fields">
+        <dt>Status</dt>
+        <dd>{statusLabel(detail)}</dd>
+        <dt>Expires</dt>
+        <dd>{formatDate(detail.expires_at)}</dd>
+        <dt>Placement</dt>
+        <dd>{detail.placement || '—'}</dd>
+        <dt>utm_source</dt>
+        <dd>{detail.utm_source || '—'}</dd>
+        <dt>utm_medium</dt>
+        <dd>{detail.utm_medium || '—'}</dd>
+        <dt>utm_campaign</dt>
+        <dd>{detail.utm_campaign || '—'}</dd>
+        <dt>utm_term</dt>
+        <dd>{detail.utm_term || '—'}</dd>
+        <dt>utm_content</dt>
+        <dd>{detail.utm_content || '—'}</dd>
+        <dt>Destination</dt>
+        <dd class="break">{detail.destination_url}</dd>
+      </dl>
+    </details>
+
     <Panel title="UTM breakdown">
       {#if noStats}
         <p class="text-muted">No click data yet — share this link to start collecting stats.</p>
@@ -423,7 +469,7 @@
   }
   .title-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-4);
     margin-bottom: var(--space-4);
@@ -433,6 +479,81 @@
     font-size: var(--fs-lg);
     font-weight: 600;
     margin: 0;
+    min-width: 0;
+    flex: 1 1 14rem;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .head-actions { display: flex; gap: var(--space-2); align-items: center; }
+  .menu-wrap { position: relative; }
+  .more-btn {
+    min-height: 32px; min-width: 32px; background: var(--bg-panel); color: var(--text);
+    border: var(--border-w) solid var(--border-strong); border-radius: var(--radius);
+    font-size: var(--fs-lg); line-height: 1; cursor: pointer;
+  }
+  .more-btn:hover { background: var(--bg-subtle); }
+  .menu {
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 11rem;
+    background: var(--bg-panel); border: var(--border-w) solid var(--border-strong);
+    border-radius: var(--radius); padding: var(--space-1); box-shadow: 0 4px 12px rgba(0,0,0,.18);
+  }
+  .menu-item {
+    display: block; width: 100%; text-align: left; background: none; border: none;
+    padding: var(--space-2) var(--space-3); font: inherit; color: var(--text);
+    cursor: pointer; border-radius: var(--radius); min-height: 36px;
+  }
+  .menu-item:hover { background: var(--bg-subtle); }
+  .menu-item-danger { color: var(--danger); }
+  .banner {
+    background: var(--bg-subtle); border: var(--border-w) solid var(--border-strong);
+    border-left: 4px solid var(--warning); border-radius: var(--radius);
+    padding: var(--space-3); margin-bottom: var(--space-4);
+  }
+  .banner-danger { border-left-color: var(--danger); }
+  .meta-line {
+    display: flex; flex-wrap: wrap; gap: var(--space-1) 0; margin: 0 0 var(--space-4);
+    color: var(--text-muted); font-size: var(--fs-sm);
+  }
+  .meta-line > span + span::before { content: '·'; margin: 0 var(--space-2); }
+  .hero { display: flex; gap: var(--space-4); align-items: stretch; margin-bottom: var(--space-4); flex-wrap: wrap; }
+  .url-box {
+    flex: 1 1 18rem; min-width: 0; background: var(--bg-subtle);
+    border: var(--border-w) solid var(--border); border-radius: var(--radius);
+    padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); justify-content: center;
+  }
+  .url-row { display: flex; gap: var(--space-3); align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .url-box .short-url { font-size: var(--fs-lg); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+  .url-box .dest-link {
+    display: block; color: var(--text-muted); font-size: var(--fs-sm); word-break: normal;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .qr-box { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); }
+  .qr-img { background: #fff; border: var(--border-w) solid var(--border); border-radius: var(--radius); padding: 4px; }
+  .qr-links { display: flex; gap: var(--space-2); font-size: var(--fs-sm); color: var(--text-muted); }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); }
+  .tile {
+    border: var(--border-w) solid var(--border); border-radius: var(--radius);
+    padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-1); min-width: 0;
+  }
+  .tile-label { color: var(--text-muted); font-size: var(--fs-sm); }
+  .tile-value { font-size: var(--fs-xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile-date { font-size: var(--fs-md); line-height: 1.6; }
+  .details-panel {
+    background: var(--bg-panel); border: var(--border-w) solid var(--border);
+    border-radius: var(--radius); margin-bottom: var(--space-4);
+  }
+  .details-panel summary { padding: var(--space-3) var(--space-4); font-weight: 600; cursor: pointer; }
+  .details-panel .fields { padding: 0 var(--space-4) var(--space-3); }
+  .break { overflow-wrap: anywhere; }
+  @media (max-width: 480px) {
+    .tiles { gap: var(--space-2); }
+    .tile { padding: var(--space-2); }
+    .tile-date { font-size: var(--fs-base); line-height: 2; }
+    .qr-box { flex-direction: row; width: 100%; justify-content: space-between; }
   }
   .fields {
     display: grid;
@@ -462,9 +583,6 @@
   .qr-link {
     color: var(--accent);
     text-decoration: underline;
-  }
-  .num {
-    font-variant-numeric: tabular-nums;
   }
   .utm-grid {
     display: grid;
