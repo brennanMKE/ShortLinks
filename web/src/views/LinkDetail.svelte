@@ -31,7 +31,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { currentUser, links } from '../lib/stores';
-  import { getLink, getLinkPerformance, updateLink, deactivateLink, ApiError } from '../lib/api';
+  import { getLink, getLinkPerformance, updateLink, deactivateLink, reactivateLink, ApiError } from '../lib/api';
   import { getRoute, replace } from '../lib/hashRouter.svelte';
   import { getChartTimeZone } from '../lib/preferences';
   import {
@@ -65,7 +65,8 @@
   import type { UtmParams } from '../lib/utm';
   import type { LinkDetail } from '../lib/types';
   import Button from '../lib/Button.svelte';
-  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
+  import { pushToast } from '../lib/toasts';
+  import { deactivatedMessage, reactivateErrorMessage } from '../lib/linkActions';
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
   import Breadcrumb from '../lib/Breadcrumb.svelte';
@@ -322,30 +323,55 @@
     }
   }
 
-  // #0160: Deactivate asks first via ConfirmDialog (until #0165 adds Undo).
-  let confirmDeactivate = $state(false);
-
-  function handleDeactivate() {
-    if (!detail || !canDeactivate) return;
-    confirmDeactivate = true;
+  // #0165: Deactivate acts at once and offers Undo in a toast; an inactive
+  // link shows a banner with Reactivate.
+  function setActive(k: string, active: boolean) {
+    if (detail && detail.key === k) detail = { ...detail, active };
+    links.update((cur) => cur.map((l) => (l.key === k ? { ...l, active } : l)));
   }
 
-  async function performDeactivate() {
-    if (!detail || !canDeactivate) return;
-    const key = detail.key;
+  async function reactivate(k: string) {
+    try {
+      await reactivateLink(k);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) currentUser.set(null);
+      throw new Error(reactivateErrorMessage(err));
+    }
+    setActive(k, true);
+  }
+
+  async function handleDeactivate() {
+    if (!detail || !canDeactivate || deactivating) return;
+    const k = detail.key;
     deactivating = true;
     try {
-      await deactivateLink(key);
-      if (detail) detail = { ...detail, active: false };
-      links.update((cur) => cur.map((l) => (l.key === key ? { ...l, active: false } : l)));
+      await deactivateLink(k);
+      setActive(k, false);
+      pushToast({ message: deactivatedMessage(), actionLabel: 'Undo', returnFocus: () => moreBtn, onaction: () => reactivate(k) });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
         return;
       }
-      throw new Error('Could not deactivate this link. Please try again.');
+      pushToast({ message: 'Could not deactivate this link. Please try again.' });
     } finally {
       deactivating = false;
+    }
+  }
+
+  let reactivating = $state(false);
+  let reactivateError = $state<string | null>(null);
+
+  async function handleReactivate() {
+    if (!detail || reactivating) return;
+    reactivating = true;
+    reactivateError = null;
+    try {
+      await reactivate(detail.key);
+    } catch (err) {
+      reactivateError = err instanceof Error ? err.message : 'Could not reactivate this link.';
+    } finally {
+      reactivating = false;
     }
   }
 
@@ -353,17 +379,6 @@
     load(key);
   });
 </script>
-
-<ConfirmDialog
-  open={confirmDeactivate}
-  title="Deactivate link?"
-  message={`The short link "${detail?.key ?? ''}" will stop redirecting. Its click history is kept.`}
-  confirmLabel="Deactivate link"
-  busyLabel="Deactivating…"
-  returnFocus={moreBtn}
-  oncancel={() => (confirmDeactivate = false)}
-  onconfirm={performDeactivate}
-/>
 
 <svelte:document onclick={onDocClick} onkeydown={onDocKey} />
 
@@ -386,6 +401,8 @@
     {#if status === 'inactive'}
       <div class="banner" role="status">
         <strong>This link is inactive.</strong> Visitors who open it are not redirected.
+        <Button variant="default" onclick={handleReactivate} disabled={reactivating}>{reactivating ? 'Reactivating…' : 'Reactivate'}</Button>
+        {#if reactivateError}<span class="text-error" role="alert">{reactivateError}</span>{/if}
       </div>
     {:else if status === 'denied'}
       <div class="banner banner-danger" role="status">
@@ -743,6 +760,7 @@
   .menu-item:hover { background: var(--bg-subtle); }
   .menu-item-danger { color: var(--danger); }
   .banner {
+    display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3);
     background: var(--bg-subtle); border: var(--border-w) solid var(--border-strong);
     border-left: 4px solid var(--warning); border-radius: var(--radius);
     padding: var(--space-3); margin-bottom: var(--space-4);

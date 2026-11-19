@@ -190,6 +190,8 @@ export interface UpdateLinkInput {
   utm_term?: string;
   utm_content?: string;
   placement?: string;
+  /** false deactivates, true reactivates (#0145). */
+  active?: boolean;
 }
 
 /** PATCH /api/links/{key} — update title, destination, expiry, or UTM/placement. */
@@ -200,6 +202,11 @@ export function updateLink(key: string, input: UpdateLinkInput): Promise<Link> {
 /** DELETE /api/links/{key} — deactivate (soft delete) a link. */
 export function deactivateLink(key: string): Promise<{ message: string }> {
   return apiDelete<{ message: string }>(`/api/links/${encodeURIComponent(key)}`);
+}
+
+/** PATCH {active: true} — bring a deactivated link back (#0145). 422 destination_denied if a filter rule now blocks it. */
+export function reactivateLink(key: string): Promise<Link> {
+  return updateLink(key, { active: true });
 }
 
 // ── Campaigns (#0098, #0099, #0102, #0103) ──────────────────────────────────

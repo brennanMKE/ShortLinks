@@ -148,7 +148,8 @@
   import { formatDate } from '../lib/linkDetail';
   import type { CampaignDetail, LinkBucket, LinkSeries, PlacementBucket } from '../lib/types';
   import Button from '../lib/Button.svelte';
-  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
+  import { pushToast } from '../lib/toasts';
+  import { removedFromCampaignMessage } from '../lib/linkActions';
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
   import Breadcrumb from '../lib/Breadcrumb.svelte';
@@ -405,29 +406,40 @@
 
   // ── Unassign ─────────────────────────────────────────────────────────────
   let unassigning = $state<Record<string, boolean>>({});
-  let unassignError = $state<string | null>(null);
 
-  // #0160: Remove asks first via ConfirmDialog (until #0165 adds Undo).
-  let unassignTarget = $state<string | null>(null);
-
+  // #0165: Remove acts at once and offers Undo (re-assign) in a toast.
   function handleUnassign(key: string) {
-    unassignTarget = key;
+    void performUnassign(key);
   }
 
   async function performUnassign(key: string) {
     if (!detail) return;
     const campaignSlug = detail.slug;
     unassigning = { ...unassigning, [key]: true };
-    unassignError = null;
+    const campaignName = detail.name;
     try {
       await unassignLinkFromCampaign(campaignSlug, key);
       await load(campaignSlug);
+      pushToast({
+        message: removedFromCampaignMessage(campaignName),
+        actionLabel: 'Undo',
+        returnFocus: () => document.querySelector<HTMLElement>('h1.detail-title'),
+        onaction: async () => {
+          try {
+            await assignLinksToCampaign(campaignSlug, [key]);
+          } catch (err) {
+            if (err instanceof ApiError && err.status === 401) currentUser.set(null);
+            throw new Error('Could not put the link back. Please try again.');
+          }
+          if (detail?.slug === campaignSlug) await load(campaignSlug);
+        },
+      });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
         return;
       }
-      throw new Error('Could not remove this link. Please try again.');
+      pushToast({ message: 'Could not remove this link. Please try again.' });
     } finally {
       const { [key]: _removed, ...rest } = unassigning;
       unassigning = rest;
@@ -438,16 +450,6 @@
     load(slug);
   });
 </script>
-
-<ConfirmDialog
-  open={unassignTarget !== null}
-  title="Remove link from campaign?"
-  message={`The short link "${unassignTarget ?? ''}" will no longer count towards this campaign. The link itself stays active.`}
-  confirmLabel="Remove link"
-  busyLabel="Removing…"
-  oncancel={() => (unassignTarget = null)}
-  onconfirm={() => (unassignTarget ? performUnassign(unassignTarget) : undefined)}
-/>
 
 <div class="app-shell detail-shell">
   <Breadcrumb crumbs={[{ label: 'Campaigns', to: '/campaigns' }, { label: detail?.name || slug }]} />
@@ -776,10 +778,6 @@
         </div>
       </div>
 
-      {#if unassignError}
-        <p class="text-error links-toolbar-error" role="alert">{unassignError}</p>
-      {/if}
-
       {#if sortedRows.length === 0}
         <p class="text-muted empty-msg">No links assigned yet — add one below.</p>
       {:else}
@@ -1010,9 +1008,6 @@
   .links-toolbar {
     padding: var(--space-3) var(--space-4);
     border-bottom: var(--border-w) solid var(--border);
-  }
-  .links-toolbar-error {
-    padding: 0 var(--space-4) var(--space-3);
   }
   .toolbar-actions {
     flex-wrap: wrap;

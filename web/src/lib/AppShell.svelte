@@ -116,7 +116,7 @@
   </header>
 </div>
 
-<main class="shell-main">
+<main class="shell-main" tabindex="-1">
   {@render children()}
 </main>
 

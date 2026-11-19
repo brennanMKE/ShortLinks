@@ -26,6 +26,7 @@
   import Router from './lib/Router.svelte';
   import AppShell from './lib/AppShell.svelte';
   import Footer from './lib/Footer.svelte';
+  import Toast from './lib/Toast.svelte';
 
   // The route table lives HERE, not in hashRouter.svelte.ts, because it needs
   // the actual view components — hashRouter.svelte.ts stays free of any view
@@ -186,3 +187,4 @@
 {/if}
 
 <Footer />
+<Toast />

@@ -13,7 +13,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentUser, links } from '../lib/stores';
-  import { listLinks, listCampaigns, deactivateLink, ApiError } from '../lib/api';
+  import { listLinks, listCampaigns, deactivateLink, reactivateLink, ApiError } from '../lib/api';
   import { navigate, getRoute } from '../lib/hashRouter.svelte';
   import { shortUrl, linkStatus, linkMeta, qrSvgUrl, qrPngUrl, deniedReasonLabel } from '../lib/links';
   import { subscribeLinks, prependUniqueByKey } from '../lib/events';
@@ -25,7 +25,8 @@
   import RowMenu from '../lib/RowMenu.svelte';
   import InlineBar from '../lib/InlineBar.svelte';
   import Button from '../lib/Button.svelte';
-  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
+  import { pushToast } from '../lib/toasts';
+  import { deactivatedMessage, reactivateErrorMessage } from '../lib/linkActions';
   import Panel from '../lib/Panel.svelte';
   import { pastedUrl } from '../lib/newLink';
   import { openNewLink } from '../lib/newLinkDialog';
@@ -101,24 +102,41 @@
     return '#/links/' + encodeURIComponent(key);
   }
 
-  // #0160: Deactivate asks first via ConfirmDialog (until #0165 adds Undo).
-  let deactivateTarget = $state<Link | null>(null);
-
-  function handleDeactivate(link: Link) {
-    deactivateTarget = link;
+  // #0165: Deactivate acts at once and offers Undo in a toast.
+  function setActive(key: string, active: boolean) {
+    links.update((cur) => cur.map((l) => (l.key === key ? { ...l, active } : l)));
   }
 
-  async function performDeactivate(key: string) {
+  async function handleDeactivate(link: Link) {
+    const key = link.key;
     try {
       await deactivateLink(key);
-      links.update((cur) => cur.map((l) => (l.key === key ? { ...l, active: false } : l)));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
         return;
       }
-      throw new Error('Could not deactivate this link. Please try again.');
+      pushToast({ message: 'Could not deactivate this link. Please try again.' });
+      return;
     }
+    setActive(key, false);
+    pushToast({
+      message: deactivatedMessage(),
+      actionLabel: 'Undo',
+      returnFocus: () =>
+        Array.from(document.querySelectorAll<HTMLElement>('button')).find(
+          (b) => b.getAttribute('aria-label') === `Actions for ${link.title || link.key}`,
+        ),
+      onaction: async () => {
+        try {
+          await reactivateLink(key);
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 401) currentUser.set(null);
+          throw new Error(reactivateErrorMessage(err));
+        }
+        setActive(key, true);
+      },
+    });
   }
 
   function menuItems(link: Link) {
@@ -169,16 +187,6 @@
     return unsubscribe;
   });
 </script>
-
-<ConfirmDialog
-  open={deactivateTarget !== null}
-  title="Deactivate link?"
-  message={`"${deactivateTarget?.title || deactivateTarget?.key || ''}" will stop redirecting. Its click history is kept.`}
-  confirmLabel="Deactivate link"
-  busyLabel="Deactivating…"
-  oncancel={() => (deactivateTarget = null)}
-  onconfirm={() => (deactivateTarget ? performDeactivate(deactivateTarget.key) : undefined)}
-/>
 
 <svelte:window onpaste={onPaste} />
 
