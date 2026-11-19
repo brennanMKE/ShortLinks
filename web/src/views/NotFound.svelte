@@ -8,16 +8,12 @@
 <script lang="ts">
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
-  import { APP_NAME } from '../lib/branding';
 </script>
 
 <div class="app-shell">
-  <header class="app-header">
-    <h1 class="app-title">{APP_NAME}</h1>
-  </header>
-
+  <h1 class="page-title">Page not found</h1>
   <Panel title="Page not found">
     <p class="text-muted">There's nothing here. The link may be mistyped or out of date.</p>
-    <Link to="/" class="btn-link btn-link-primary">Back to dashboard</Link>
+    <Link to="/" class="btn-link btn-link-primary">Back to overview</Link>
   </Panel>
 </div>

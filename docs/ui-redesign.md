@@ -117,6 +117,7 @@ Note on the design reference: `design/ShortLinks.png` is only the app icon (whit
 - Avatar menu holds Account and Sign out, freeing a tab slot.
 - Detail pages keep the nav; the back button becomes a breadcrumb and the `<h1>` is the item's own name.
 - Mobile (≤480px): title + `[+]` + menu on row 1, tabs as a scrolling strip on row 2.
+  - Implementation note (#0153): the shell switches to this two-row layout at **600px**, not 480px. At 481-600px the brand, four tabs, the "+ New link" label and the avatar no longer fit on one row, so the wider breakpoint avoids a squeezed header on large phones and small tablets in portrait.
 - `[+ New link]` is on every page. Keyboard: `n` opens it, `/` focuses search where present.
 
 ### 3.2 Home → Overview (`#/`)

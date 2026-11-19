@@ -139,6 +139,47 @@ describe('isActiveLink', () => {
   });
 });
 
+// The real route table lives in App.svelte (it needs the view components), so
+// this mirrors its path order (#0153).
+describe('app route table (#0153)', () => {
+  const names = ['overview', 'login', 'links', 'linkDetail', 'new', 'campaigns', 'campaignDetail', 'account', 'admin', 'notFound'];
+  const paths = ['/', '/login', '/links', '/links/:key', '/new', '/campaigns', '/campaigns/:slug', '/account', '/admin', '*'];
+  const table: RouteDef<string>[] = paths.map((path, i) => ({ path, component: names[i] }));
+
+  it('routes /links to the list and /links/:key to the detail', () => {
+    expect(matchRoute('/links', table)?.component).toBe('links');
+    const m = matchRoute('/links/solder0903', table);
+    expect(m?.component).toBe('linkDetail');
+    expect(m?.params).toEqual({ key: 'solder0903' });
+  });
+
+  it('routes /new to the create form', () => {
+    expect(matchRoute('/new', table)?.component).toBe('new');
+  });
+
+  it('treats /links/new as the detail page of a link whose key is "new"', () => {
+    const m = matchRoute('/links/new', table);
+    expect(m?.component).toBe('linkDetail');
+    expect(m?.params).toEqual({ key: 'new' });
+  });
+
+  it('parses #/links/new as a detail path, not as /new', () => {
+    expect(parseHash('#/links/new').path).toBe('/links/new');
+    expect(matchRoute(parseHash('#/links/new').path, table)?.params.key).toBe('new');
+  });
+
+  it('routes /campaigns, /campaigns/:slug and /account', () => {
+    expect(matchRoute('/campaigns', table)?.component).toBe('campaigns');
+    expect(matchRoute('/campaigns/guides-2026-11', table)?.params).toEqual({ slug: 'guides-2026-11' });
+    expect(matchRoute('/account', table)?.component).toBe('account');
+  });
+
+  it('keeps the Links tab active on a link detail path but not on /new', () => {
+    expect(isActiveLink('/links/abc', '/links')).toBe(true);
+    expect(isActiveLink('/new', '/links')).toBe(false);
+  });
+});
+
 describe('login redirect-target encoding', () => {
   it('round-trips an ordinary deep path', () => {
     const loginPath = loginPathWithRedirect('/links/solder0903');

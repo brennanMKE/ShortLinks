@@ -18,8 +18,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentUser, links } from '../lib/stores';
-  import { replace } from '../lib/hashRouter.svelte';
-  import Link from '../lib/Link.svelte';
   import {
     getSettings,
     updateSetting,
@@ -32,7 +30,6 @@
     deactivateUser,
     reactivateUser,
     listAudit,
-    logout,
     ApiError,
   } from '../lib/api';
   import {
@@ -55,7 +52,6 @@
   import type { Setting, FilterRule, AdminUser, AuditEntry } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
-  import { APP_NAME } from '../lib/branding';
 
   type Section = 'settings' | 'filters' | 'users' | 'audit';
   let section = $state<Section>('settings');
@@ -441,20 +437,6 @@
     return false;
   }
 
-  async function handleSignOut() {
-    try {
-      await logout();
-    } catch {
-      // Drop local state regardless of the server result.
-    }
-    currentUser.set(null);
-    links.set([]);
-    // Explicit sign-out: replace straight to a bare /login — see
-    // Dashboard.svelte's handleSignOut for why this differs from a bare
-    // currentUser.set(null) on an involuntary 401.
-    replace('/login');
-  }
-
   onMount(() => {
     void loadSettings();
     void loadRules();
@@ -464,17 +446,7 @@
 </script>
 
 <div class="app-shell">
-  <header class="app-header">
-    <h1 class="app-title">{APP_NAME}</h1>
-    <nav class="nav-tabs" aria-label="Primary">
-      <Link to="/" class="nav-tab">Dashboard</Link>
-      <Link to="/campaigns" class="nav-tab">Campaigns</Link>
-      <Link to="/account" class="nav-tab">Account</Link>
-      <Link to="/admin" class="nav-tab">Admin</Link>
-    </nav>
-    <Button variant="default" onclick={handleSignOut}>Sign out</Button>
-  </header>
-
+  <h1 class="page-title">Admin</h1>
   {#if !$currentUser?.is_admin}
     <Panel title="Admin">
       <p class="text-error" role="alert">You do not have access to this area.</p>

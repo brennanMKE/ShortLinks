@@ -45,6 +45,7 @@
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
+  import Breadcrumb from '../lib/Breadcrumb.svelte';
   import ClicksChart from '../lib/ClicksChart.svelte';
   import UTMBarChart from '../lib/UTMBarChart.svelte';
   import UtmField from '../lib/UtmField.svelte';
@@ -212,17 +213,14 @@
 </script>
 
 <div class="app-shell detail-shell">
-  <header class="app-header">
-    <Link to="/" class="btn-link">&larr; Dashboard</Link>
-    <h1 class="app-title">Link detail</h1>
-  </header>
+  <Breadcrumb crumbs={[{ label: 'Links', to: '/links' }, { label: detail?.title || '/u/' + key }]} />
 
   {#if loading}
     <p class="text-muted" role="status">Loading link…</p>
   {:else if notFound}
     <Panel title="Link not found">
       <p class="text-muted">This link no longer exists, or you don't have access to it.</p>
-      <Link to="/" class="btn-link btn-link-primary">Back to dashboard</Link>
+      <Link to="/links" class="btn-link btn-link-primary">Back to links</Link>
     </Panel>
   {:else if loadError && !detail}
     <Panel>
@@ -232,7 +230,7 @@
   {:else if detail}
     <Panel>
       <div class="title-row">
-        <h2 class="detail-title">{detail.title || 'Untitled link'}</h2>
+        <h1 class="detail-title">{detail.title || '/u/' + detail.key}</h1>
         <span
           class="badge"
           class:badge-success={status === 'active'}
@@ -279,7 +277,13 @@
         <dd>{formatDate(detail.expires_at)}</dd>
 
         <dt>Campaign</dt>
-        <dd>{detail.campaign_name || 'None'}</dd>
+        <dd>
+          {#if detail.campaign_slug}
+            <Link to={'/campaigns/' + encodeURIComponent(detail.campaign_slug)} class="text-link">{detail.campaign_name || detail.campaign_slug}</Link>
+          {:else}
+            {detail.campaign_name || 'None'}
+          {/if}
+        </dd>
 
         <dt>Placement</dt>
         <dd>{detail.placement || '—'}</dd>

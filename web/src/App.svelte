@@ -13,6 +13,8 @@
   import Home from './views/Home.svelte';
   import Login from './views/Login.svelte';
   import Dashboard from './views/Dashboard.svelte';
+  import LinksList from './views/LinksList.svelte';
+  import NewLink from './views/NewLink.svelte';
   import LinkDetail from './views/LinkDetail.svelte';
   import CampaignsList from './views/CampaignsList.svelte';
   import CampaignDetail from './views/CampaignDetail.svelte';
@@ -22,6 +24,7 @@
   import RegisterVerify from './views/RegisterVerify.svelte';
   import RecoverVerify from './views/RecoverVerify.svelte';
   import Router from './lib/Router.svelte';
+  import AppShell from './lib/AppShell.svelte';
   import Footer from './lib/Footer.svelte';
 
   // The route table lives HERE, not in hashRouter.svelte.ts, because it needs
@@ -29,9 +32,14 @@
   // import so routing.ts's matching logic can be unit-tested with no Svelte
   // runtime at all (#0120). Match in declaration order; '*' (NotFound) goes last.
   const routes: RouteDef<unknown>[] = [
+    // '/' is the old Dashboard until #0162 replaces it with the Overview.
     { path: '/', component: Dashboard },
     { path: '/login', component: Login },
+    { path: '/links', component: LinksList },
     { path: '/links/:key', component: LinkDetail },
+    // '/new', not '/links/new': 'new' is a legal custom key, so /links/new
+    // must stay the detail page of the link whose key is 'new' (#0153).
+    { path: '/new', component: NewLink },
     { path: '/campaigns', component: CampaignsList },
     { path: '/campaigns/:slug', component: CampaignDetail },
     { path: '/account', component: Account },
@@ -168,6 +176,10 @@
   <RecoverVerify onverified={() => enterApp('/')} ongotologin={() => enterApp('/login')} />
 {:else if showHome && homeInfo}
   <Home info={homeInfo} />
+{:else if $currentUser !== null && getRoute().path !== '/login'}
+  <AppShell>
+    <Router />
+  </AppShell>
 {:else}
   <Router />
 {/if}

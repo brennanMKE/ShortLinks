@@ -150,6 +150,7 @@
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import Link from '../lib/Link.svelte';
+  import Breadcrumb from '../lib/Breadcrumb.svelte';
   import CampaignClicksChart from '../lib/CampaignClicksChart.svelte';
   import UTMBarChart from '../lib/UTMBarChart.svelte';
   import BatchCreateLinks from '../lib/BatchCreateLinks.svelte';
@@ -431,10 +432,7 @@
 </script>
 
 <div class="app-shell detail-shell">
-  <header class="app-header">
-    <Link to="/campaigns" class="btn-link">&larr; Campaigns</Link>
-    <h1 class="app-title">Campaign detail</h1>
-  </header>
+  <Breadcrumb crumbs={[{ label: 'Campaigns', to: '/campaigns' }, { label: detail?.name || slug }]} />
 
   {#if loading}
     <p class="text-muted" role="status">Loading campaign…</p>
@@ -452,7 +450,7 @@
     <!-- Header -->
     <Panel>
       <div class="title-row">
-        <h2 class="detail-title">{detail.name}</h2>
+        <h1 class="detail-title">{detail.name}</h1>
         {#if detail.archived}<span class="badge badge-muted">Archived</span>{/if}
       </div>
       {#if detail.description}

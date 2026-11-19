@@ -23,15 +23,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentUser } from '../lib/stores';
-  import { listCampaigns, createCampaign, logout, ApiError, type CreateCampaignInput } from '../lib/api';
+  import { listCampaigns, createCampaign, ApiError, type CreateCampaignInput } from '../lib/api';
   import { visibleCampaigns, campaignDateRangeLabel, toIsoDate } from '../lib/campaigns';
   import type { CampaignWithCounts } from '../lib/types';
-  import { replace } from '../lib/hashRouter.svelte';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
   import UtmField from '../lib/UtmField.svelte';
   import Link from '../lib/Link.svelte';
-  import { APP_NAME } from '../lib/branding';
 
   const MAX_NAME_LENGTH = 255; // mirrors maxCampaignNameLength (internal/handlers/campaigns.go), counted in code points to match utf8.RuneCountInString.
 
@@ -134,36 +132,11 @@
     }
   }
 
-  async function handleSignOut() {
-    try {
-      await logout();
-    } catch {
-      // Drop local state and return to login even on failure.
-    }
-    currentUser.set(null);
-    // Explicit sign-out: replace straight to a bare /login — see
-    // Dashboard.svelte's handleSignOut for why this differs from a bare
-    // currentUser.set(null) on an involuntary 401.
-    replace('/login');
-  }
-
   onMount(load);
 </script>
 
 <div class="app-shell">
-  <header class="app-header">
-    <h1 class="app-title">{APP_NAME}</h1>
-    <nav class="nav-tabs" aria-label="Primary">
-      <Link to="/" class="nav-tab">Dashboard</Link>
-      <Link to="/campaigns" class="nav-tab">Campaigns</Link>
-      <Link to="/account" class="nav-tab">Account</Link>
-      {#if $currentUser?.is_admin}
-        <Link to="/admin" class="nav-tab">Admin</Link>
-      {/if}
-    </nav>
-    <Button variant="default" onclick={handleSignOut}>Sign out</Button>
-  </header>
-
+  <h1 class="page-title">Campaigns</h1>
   <Panel title="Create a campaign">
     <form
       onsubmit={(e) => {

@@ -12,7 +12,6 @@
     listCredentials,
     renameCredential,
     revokeCredential,
-    logout,
     logoutAll,
     ApiError,
   } from '../lib/api';
@@ -27,9 +26,7 @@
   import { replace } from '../lib/hashRouter.svelte';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
-  import Link from '../lib/Link.svelte';
   import ApiTokens from '../lib/ApiTokens.svelte';
-  import { APP_NAME } from '../lib/branding';
 
   let loading = $state(true);
   let loadError = $state<string | null>(null);
@@ -131,20 +128,6 @@
     }
   }
 
-  async function handleSignOut() {
-    try {
-      await logout();
-    } catch {
-      // Drop local state regardless of server result.
-    }
-    currentUser.set(null);
-    links.set([]);
-    // Explicit sign-out: replace straight to a bare /login — see
-    // Dashboard.svelte's handleSignOut for why this differs from a bare
-    // currentUser.set(null) on an involuntary 401.
-    replace('/login');
-  }
-
   let signingOutAll = $state(false);
   let signOutAllError = $state<string | null>(null);
 
@@ -189,19 +172,7 @@
 </script>
 
 <div class="app-shell account-shell">
-  <header class="app-header">
-    <h1 class="app-title">{APP_NAME}</h1>
-    <nav class="nav-tabs" aria-label="Primary">
-      <Link to="/" class="nav-tab">Dashboard</Link>
-      <Link to="/campaigns" class="nav-tab">Campaigns</Link>
-      <Link to="/account" class="nav-tab">Account</Link>
-      {#if $currentUser?.is_admin}
-        <Link to="/admin" class="nav-tab">Admin</Link>
-      {/if}
-    </nav>
-    <Button variant="default" onclick={handleSignOut}>Sign out</Button>
-  </header>
-
+  <h1 class="page-title">Account</h1>
   <Panel title="Account">
     {#if $currentUser}
       <p class="text-muted">Signed in as <strong>{$currentUser.email}</strong></p>
@@ -318,7 +289,6 @@
   .account-shell {
     max-width: 760px;
   }
-  /* .nav-tabs/.nav-tab are global — see app.css (#0120). */
 
   @media (max-width: 480px) {
     /* Credential cards: stack the main content and revoke button vertically */
