@@ -29,9 +29,28 @@
   doc comment for why it's the short URL, never destination_url.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { currentUser, links } from '../lib/stores';
-  import { getLink, updateLink, deactivateLink, ApiError } from '../lib/api';
+  import { getLink, getLinkPerformance, updateLink, deactivateLink, ApiError } from '../lib/api';
+  import { getRoute, replace } from '../lib/hashRouter.svelte';
+  import { getChartTimeZone } from '../lib/preferences';
+  import {
+    RANGE_PRESETS,
+    parseRange,
+    rangeQuery,
+    reportQuery,
+    toDayBuckets,
+    percentChange,
+    siblingRows,
+    referrerLabel,
+    stripScheme,
+    urlSegments,
+    rangeLabel,
+    type LinkPerformance,
+    type RangeSel,
+  } from '../lib/linkReport';
+  import InlineBar from '../lib/InlineBar.svelte';
+  import RelativeDate from '../lib/RelativeDate.svelte';
   import { shortUrl, qrSvgUrl, qrPngUrl, linkStatus, isValidHttpUrl } from '../lib/links';
   import {
     isEmptyStats,
@@ -76,6 +95,89 @@
   let loadError = $state<string | null>(null);
   let detail = $state<LinkDetail | null>(null);
 
+  // ── link-performance report (#0169) ────────────────────────────────────────
+  // The range lives in the hash query (?range=7d|90d, or custom with from/to),
+  // so a reload or a pasted link keeps it. The report supplies the window's
+  // clicks and chart, the previous-period change, last click, siblings and
+  // referrers. The in-memory dev server has no reports: then `report` stays
+  // null and the view falls back to the link record's own 30-day series.
+  const sel = $derived<RangeSel>(parseRange(getRoute().query));
+  let report = $state<LinkPerformance | null>(null);
+  let reportLoading = $state(false);
+  // Set once a report has loaded, so the range control stays after a later fetch fails.
+  let hadReport = $state(false);
+  let reportFailed = $state(false);
+  let reportSeq = 0;
+  let customFrom = $state('');
+  let customTo = $state('');
+
+  $effect(() => {
+    const q = reportQuery(key, sel, getChartTimeZone());
+    const seq = ++reportSeq;
+    reportLoading = true;
+    getLinkPerformance(q)
+      .then((r) => {
+        if (seq === reportSeq) { report = r; hadReport = true; reportFailed = false; }
+      })
+      .catch((err) => {
+        if (seq !== reportSeq) return;
+        if (err instanceof ApiError && err.status === 401) currentUser.set(null);
+        report = null;
+        reportFailed = true;
+      })
+      .finally(() => {
+        if (seq === reportSeq) reportLoading = false;
+      });
+  });
+
+  $effect(() => {
+    if (sel.kind === 'custom') {
+      customFrom = sel.from;
+      customTo = sel.to;
+    }
+  });
+
+  function setRange(next: RangeSel) {
+    const q = rangeQuery(next);
+    replace(getRoute().path + (q ? '?' + q : ''));
+  }
+  function applyCustom() {
+    if (customFrom && customTo && customFrom <= customTo) {
+      setRange({ kind: 'custom', from: customFrom, to: customTo });
+    }
+  }
+  let showCustom = $state(false);
+  const customOpen = $derived(showCustom || sel.kind === 'custom');
+  const customValid = $derived(!!customFrom && !!customTo && customFrom <= customTo);
+  // Today's civil date in the chart time zone (the report's windows use it too).
+  const todayIso = new Intl.DateTimeFormat('en-CA', { timeZone: getChartTimeZone() }).format(new Date());
+
+  const rep = $derived(report?.data ?? null);
+  const periodClicks = $derived(rep ? rep.totals.clicks : detail ? windowClicks(detail.timeseries) : 0);
+  const change = $derived(rep ? percentChange(rep.totals.clicks, rep.totals.previous_clicks) : null);
+  // Without a report the view shows the link record's own 30-day series.
+  const periodLabel = $derived(report ? rangeLabel(sel, report.window) : '30 days');
+  const chartSeries = $derived(rep ? { days: toDayBuckets(rep.timeseries) } : detail?.timeseries);
+  const chartWindow = $derived<[string, string]>(report ? [report.window.from, report.window.to] : chartRange);
+  const siblings = $derived(
+    rep && detail
+      ? siblingRows(
+          { key: detail.key, label: detail.placement || rep.link.label, campaign_slug: detail.campaign_slug, clicks: rep.totals.clicks },
+          rep.siblings,
+        )
+      : [],
+  );
+  const siblingMax = $derived(Math.max(1, ...siblings.map((s) => s.clicks)));
+  const referrers = $derived(rep?.by_referer ?? []);
+  const referrerMax = $derived(Math.max(1, ...referrers.map((r) => r.clicks)));
+  const shortSegments = $derived(detail ? urlSegments(stripScheme(shortUrl(detail.key))) : []);
+
+  let titleEl = $state<HTMLElement | null>(null);
+  async function focusTitle() {
+    await tick();
+    titleEl?.focus();
+  }
+
   let deactivating = $state(false);
   let copied = $state(false);
 
@@ -84,17 +186,21 @@
   const dimensions = $derived(detail ? utmDimensions(detail.utm_stats) : []);
   const noStats = $derived(detail ? isEmptyStats(detail.utm_stats) : true);
   const canDeactivate = $derived(status === 'active');
-  const windowTotal = $derived(detail ? windowClicks(detail.timeseries) : 0);
   const metaParts = $derived(detail ? headerMetaParts(detail) : { channel: '', sourceMedium: '' });
 
   // ⋯ menu (#0159): Deactivate lives here instead of as a red button.
   let menuOpen = $state(false);
   let menuWrap = $state<HTMLElement | null>(null);
+  let moreBtn = $state<HTMLElement | null>(null);
   function onDocClick(e: MouseEvent) {
     if (menuOpen && menuWrap && !menuWrap.contains(e.target as Node)) menuOpen = false;
   }
+  // Escape closes the disclosure and puts focus back on its trigger.
   function onDocKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') menuOpen = false;
+    if (e.key === 'Escape' && menuOpen) {
+      menuOpen = false;
+      moreBtn?.focus();
+    }
   }
 
   // ── Edit mode (#0099) ────────────────────────────────────────────────────────
@@ -144,6 +250,7 @@
   function cancelEdit() {
     editing = false;
     saveError = null;
+    focusTitle();
   }
 
   async function saveEdit() {
@@ -167,6 +274,7 @@
       detail = { ...detail, ...updated };
       links.update((cur) => cur.map((l) => (l.key === updated.key ? { ...l, ...updated } : l)));
       editing = false;
+      focusTitle();
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         currentUser.set(null);
@@ -268,7 +376,7 @@
     {#if !editing}
       <Panel>
         <div class="title-row">
-          <h1 class="detail-title" title={detail.title || undefined}>{detail.title || '/u/' + detail.key}</h1>
+          <h1 class="detail-title" tabindex="-1" bind:this={titleEl} title={detail.title || undefined}>{detail.title || '/u/' + detail.key}</h1>
           <div class="head-actions">
             <Button variant="default" onclick={startEdit}>Edit</Button>
             {#if canDeactivate}
@@ -277,15 +385,15 @@
                   type="button"
                   class="more-btn"
                   aria-label="More actions"
-                  aria-haspopup="menu"
                   aria-expanded={menuOpen}
+                  aria-controls="more-actions"
+                  bind:this={moreBtn}
                   onclick={() => (menuOpen = !menuOpen)}
                 >⋯</button>
                 {#if menuOpen}
-                  <div class="menu" role="menu">
+                  <div class="menu" id="more-actions">
                     <button
                       type="button"
-                      role="menuitem"
                       class="menu-item menu-item-danger"
                       disabled={deactivating}
                       onclick={() => { menuOpen = false; handleDeactivate(); }}
@@ -312,7 +420,7 @@
         <div class="hero">
           <div class="url-box">
             <div class="url-row">
-              <a class="short-url" href={shareUrl} target="_blank" rel="noreferrer">{shareUrl}</a>
+              <a class="short-url" href={shareUrl} target="_blank" rel="noreferrer" aria-label={shareUrl}>{#each shortSegments as seg}{seg}<wbr />{/each}</a>
               <Button variant="primary" onclick={copyShortUrl}>{copied ? 'Copied!' : 'Copy'}</Button>
             </div>
             <a
@@ -334,8 +442,24 @@
         </div>
 
         <div class="tiles">
-          <div class="tile"><span class="tile-label">Clicks, 30 days</span><span class="tile-value">{windowTotal}</span></div>
-          <div class="tile"><span class="tile-label">All time</span><span class="tile-value">{detail.click_count}</span></div>
+          <div class="tile">
+            <span class="tile-label">Clicks, {periodLabel}</span>
+            <span class="tile-value">
+              {periodClicks.toLocaleString('en-US')}
+              {#if change}
+                <span class="change change-{change.dir}" aria-label={change.label}>{change.text}</span>
+              {/if}
+            </span>
+          </div>
+          <div class="tile"><span class="tile-label">All time</span><span class="tile-value">{(rep?.totals.all_time ?? detail.click_count).toLocaleString('en-US')}</span></div>
+          {#if rep}
+            <div class="tile">
+              <span class="tile-label">Last click</span>
+              <span class="tile-value tile-date">
+                {#if rep.totals.last_clicked_at}<RelativeDate date={rep.totals.last_clicked_at} />{:else}Never{/if}
+              </span>
+            </div>
+          {/if}
           <div class="tile"><span class="tile-label">Created</span><span class="tile-value tile-date">{formatDate(detail.created_at)}</span></div>
         </div>
       </Panel>
@@ -419,8 +543,91 @@
     {/if}
 
     <Panel title="Clicks over time">
-      <ClicksChart timeseries={detail.timeseries} from={chartRange[0]} to={chartRange[1]} title="Clicks over the last 30 days" />
+      {#if report || hadReport}
+        <div class="range" role="group" aria-label="Date range">
+          {#each RANGE_PRESETS as r (r)}
+            <button
+              type="button"
+              class="range-btn"
+              class:active={sel.kind === r}
+              aria-pressed={sel.kind === r}
+              onclick={() => { showCustom = false; setRange({ kind: r, from: '', to: '' }); }}
+            >{r.replace('d', ' days')}</button>
+          {/each}
+          <button
+            type="button"
+            class="range-btn"
+            class:active={sel.kind === 'custom'}
+            aria-pressed={sel.kind === 'custom'}
+            aria-expanded={customOpen}
+            aria-controls="custom-range"
+            onclick={() => { showCustom = !showCustom; }}
+          >Custom</button>
+        </div>
+        {#if customOpen}
+          <form class="custom-range" id="custom-range" onsubmit={(e) => { e.preventDefault(); applyCustom(); }}>
+            <label>From <input type="date" bind:value={customFrom} max={todayIso} /></label>
+            <label>To <input type="date" bind:value={customTo} max={todayIso} /></label>
+            <Button type="submit" variant="default" disabled={!customValid}>Apply</Button>
+          </form>
+        {/if}
+      {/if}
+      {#if reportFailed && hadReport}
+        <p class="text-error" role="alert">Could not load this range. Showing the 30-day series.</p>
+      {/if}
+      <div class="chart-wrap" class:loading={reportLoading}>
+        <ClicksChart
+          timeseries={chartSeries}
+          from={chartWindow[0]}
+          to={chartWindow[1]}
+          comparison={rep ? toDayBuckets(rep.previous_timeseries) : null}
+          comparisonFrom={report?.previous_window?.from}
+          partialLast={report?.window.partial_last_day ?? false}
+          title={'Clicks, ' + periodLabel}
+        />
+      </div>
     </Panel>
+
+    {#if rep}
+      <div class="insights" class:loading={reportLoading}>
+        <Panel title="Same content, other links">
+          {#if siblings.length <= 1}
+            <p class="text-muted">No other links point to this content.</p>
+          {:else}
+            <ul class="rank">
+              {#each siblings as s (s.key)}
+                <li class="rank-row">
+                  <div class="rank-name">
+                    {#if s.current}
+                      <span class="rank-label">{s.label} <span class="text-faint">(this link)</span></span>
+                    {:else}
+                      <Link to={'/links/' + encodeURIComponent(s.key)} class="text-link rank-label">{s.label}</Link>
+                    {/if}
+                    {#if s.campaign}<span class="rank-sub">{s.campaign}</span>{/if}
+                  </div>
+                  <div class="rank-bar"><InlineBar value={s.clicks} max={siblingMax} alwaysShowBar /></div>
+                </li>
+              {/each}
+            </ul>
+            {#if rep.truncated}<p class="text-faint rank-note">Showing the most recent links only.</p>{/if}
+          {/if}
+        </Panel>
+        <Panel title="Where clicks came from">
+          {#if referrers.length === 0}
+            <p class="text-muted">No clicks in this range.</p>
+          {:else}
+            <ul class="rank">
+              {#each referrers as r (r.value)}
+                <li class="rank-row">
+                  <div class="rank-name"><span class="rank-label">{referrerLabel(r.value)}</span></div>
+                  <div class="rank-bar"><InlineBar value={r.clicks} max={referrerMax} alwaysShowBar /></div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </Panel>
+      </div>
+    {/if}
 
     <details class="details-panel">
       <summary>Details</summary>
@@ -487,7 +694,13 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+    /* An explicit line-height plus bottom padding stops the clamp's overflow
+       box from clipping descenders (g, y, p) on the last visible line. */
+    line-height: 1.35;
+    padding-bottom: 0.2em;
   }
+  .detail-title:focus { outline: none; }
+  .detail-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
   .head-actions { display: flex; gap: var(--space-2); align-items: center; }
   .menu-wrap { position: relative; }
   .more-btn {
@@ -526,7 +739,8 @@
     padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); justify-content: center;
   }
   .url-row { display: flex; gap: var(--space-3); align-items: center; justify-content: space-between; flex-wrap: wrap; }
-  .url-box .short-url { font-size: var(--fs-lg); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+  /* Breaks only at the <wbr> after each "/" — never mid-word. */
+  .url-box .short-url { font-size: var(--fs-lg); font-weight: 600; min-width: 0; word-break: normal; overflow-wrap: normal; }
   .url-box .dest-link {
     display: block; color: var(--text-muted); font-size: var(--fs-sm); word-break: normal;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -534,7 +748,29 @@
   .qr-box { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); }
   .qr-img { background: #fff; border: var(--border-w) solid var(--border); border-radius: var(--radius); padding: 4px; }
   .qr-links { display: flex; gap: var(--space-2); font-size: var(--fs-sm); color: var(--text-muted); }
-  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: var(--space-3); }
+  .change { font-size: var(--fs-sm); font-weight: 600; margin-left: var(--space-1); white-space: nowrap; }
+  .change-up { color: var(--success, var(--accent)); }
+  .change-down { color: var(--danger); }
+  .change-flat { color: var(--text-muted); }
+  .range { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-bottom: var(--space-3); }
+  .range-btn {
+    min-height: 32px; padding: 0 var(--space-3); font: inherit; font-size: var(--fs-sm);
+    background: var(--bg-panel); color: var(--text); cursor: pointer;
+    border: var(--border-w) solid var(--border-strong); border-radius: var(--radius);
+  }
+  .range-btn:hover { background: var(--bg-subtle); }
+  .range-btn.active { background: var(--accent-subtle); border-color: var(--accent); font-weight: 600; }
+  .custom-range { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: flex-end; margin-bottom: var(--space-3); }
+  .custom-range label { display: flex; flex-direction: column; gap: var(--space-1); font-size: var(--fs-sm); color: var(--text-muted); }
+  .chart-wrap.loading, .insights.loading { opacity: 0.6; transition: opacity 0.15s; }
+  .insights { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-4); }
+  .rank { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+  .rank-row { display: grid; grid-template-columns: minmax(0, 1fr) 7rem; gap: var(--space-3); align-items: center; }
+  .rank-name { min-width: 0; display: flex; flex-direction: column; }
+  .rank-label { overflow-wrap: anywhere; }
+  .rank-sub { color: var(--text-muted); font-size: var(--fs-sm); }
+  .rank-note { margin: var(--space-2) 0 0; font-size: var(--fs-sm); }
   .tile {
     border: var(--border-w) solid var(--border); border-radius: var(--radius);
     padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-1); min-width: 0;
@@ -553,7 +789,13 @@
     .tiles { gap: var(--space-2); }
     .tile { padding: var(--space-2); }
     .tile-date { font-size: var(--fs-base); line-height: 2; }
-    .qr-box { flex-direction: row; width: 100%; justify-content: space-between; }
+    .qr-box { flex-direction: row; width: 100%; justify-content: flex-start; gap: var(--space-3); }
+    .hero { gap: var(--space-3); }
+    .url-box { padding: var(--space-3); }
+    .rank-row { grid-template-columns: minmax(0, 1fr) 5.5rem; }
+  }
+  @media (max-width: 760px) {
+    .insights { grid-template-columns: 1fr; }
   }
   .fields {
     display: grid;

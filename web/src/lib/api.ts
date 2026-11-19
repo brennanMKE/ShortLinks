@@ -4,6 +4,7 @@
 // `credentials: 'include'`, and throw a typed ApiError on a non-2xx response.
 
 import type { HomeInfo } from './home';
+import type { LinkPerformance } from './linkReport';
 import type {
   User,
   Link,
@@ -131,6 +132,16 @@ export function listLinks(page = 1, perPage = 20): Promise<LinkList> {
 /** GET /api/links/{key} — link detail plus UTM click stats. */
 export function getLink(key: string): Promise<LinkDetail> {
   return apiGet<LinkDetail>(`/api/links/${encodeURIComponent(key)}`);
+}
+
+/**
+ * GET /api/reports/link-performance — one link's window, previous window,
+ * siblings and referrers (#0169). `query` comes from lib/linkReport.reportQuery.
+ * The in-memory dev server has no reports (404), so callers treat any failure
+ * as "no report".
+ */
+export function getLinkPerformance(query: string): Promise<LinkPerformance> {
+  return apiGet<LinkPerformance>(`/api/reports/link-performance?${query}`);
 }
 
 /**
