@@ -176,6 +176,36 @@ openssl rand -hex 32
 Paste the output as the `SESSION_SECRET` value. Rotating this secret later
 invalidates all active sessions.
 
+### Embedded Portiko provider (optional, off by default)
+
+Release #0130 adds an identity provider served under `/id`. **Leave it off
+until you mean to use it**: with `PORTIKO_ENABLED` unset the binary behaves as
+before and nothing is created in the database. Nothing signs in through it yet
+(#0132). To turn it on for an instance, add to `/etc/shortlinks/config.env`:
+
+```bash
+PORTIKO_ENABLED=true
+PORTIKO_CRYPTO_KEY=<openssl rand -hex 32>      # keep it; losing it loses the provider's signing keys
+PORTIKO_CLIENT_SECRET=<openssl rand -hex 32>
+PORTIKO_TRUSTED_PROXIES=127.0.0.1,::1          # Apache runs on the same host
+```
+
+Then restart. The `shortlinks` role owns its database, so it can create the
+`portiko` schema itself; to create it by hand instead, run
+`CREATE SCHEMA portiko AUTHORIZATION shortlinks;` first. Check it with
+`curl -s https://<host>/id/.well-known/openid-configuration` (the issuer is
+`https://<host>/id`) and `curl -s https://<host>/id/health`. If the provider cannot start (a wrong key, an unreachable schema, a
+30-second startup timeout) the service logs the error and keeps running
+without it: `/id/...` answers 503 and everything else is unaffected.
+
+**`DATABASE_URL` encoding.** This change also upgrades `pgx` (5.9 to 5.11),
+which parses connection URLs more strictly. A password or user name containing
+`@`, `:`, `/`, `?` or `#` must be percent-encoded in `DATABASE_URL` (for
+example `@` as `%40`). Check each instance's URL before deploying; a URL that
+only worked by accident will now fail at startup. Each instance has
+its own key, secret and schema; accounts are not shared. The full variable list
+is in [docs/configuration.md](docs/configuration.md#embedded-portiko-provider-id).
+
 ---
 
 ## 4. Build

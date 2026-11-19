@@ -24,6 +24,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/filters"
 	"github.com/brennanMKE/ShortLinks/internal/handlers"
 	"github.com/brennanMKE/ShortLinks/internal/idempotency"
+	"github.com/brennanMKE/ShortLinks/internal/idp"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/mcpserver"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
@@ -261,7 +262,14 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 		urlFiltersH, eventsH, redirectH, linksH, campaignsH, reportsH, meH, homeH, apiTokensH,
 		requireSession, requireAdmin, requireAPI, requireCookie, nil, /* no outer middleware in production */
 		idempotency.Middleware(idemStore))
-	return handler, patterns, redirectCache.Close, nil
+	// Embedded Portiko provider under /id (#0130). A no-op unless
+	// PORTIKO_ENABLED=true, which is off by default.
+	handler, closePortiko, err := idp.Mount(ctx, cfg, pool, handler)
+	if err != nil {
+		redirectCache.Close()
+		return nil, nil, nil, err
+	}
+	return handler, patterns, func() { closePortiko(); redirectCache.Close() }, nil
 }
 
 // serveDevMode boots the app without PostgreSQL using the in-memory dev store.

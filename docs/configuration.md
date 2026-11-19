@@ -24,6 +24,11 @@ implemented in [`internal/config/config.go`](../internal/config/config.go).
 | `CACHE_TTL_SECONDS` | optional | `300` | Default TTL in seconds for cache entries (5 minutes). |
 | `ADMIN_EMAIL` | **required** | — | Email address of the bootstrap admin user. On first startup with an empty database, this address is pre-authorized as admin when the user completes passkey registration. |
 | `DEFAULT_TIMEZONE` | optional | `UTC` | IANA time zone name (e.g. `America/Los_Angeles`) the reports API (`/api/reports`, #0139) uses to bucket clicks into days when a request has no `tz` parameter. Validated at load: an unknown zone name stops startup with an error naming `DEFAULT_TIMEZONE`. |
+| `PORTIKO_ENABLED` | optional | `false` | Runs the embedded [Portiko](https://github.com/Kolonnade/Portiko) identity provider under `/id` on this instance's own host (#0130). **Off by default**: with it unset or `false` the binary behaves exactly as before, reads no other `PORTIKO_*` value and creates nothing in the database. `true` or `false` only; any other value stops startup. It is refused with `STORAGE=json`. Sign-in does not use the provider yet (#0132). See [Embedded Portiko provider](#embedded-portiko-provider-id). |
+| `PORTIKO_CRYPTO_KEY` | **required when enabled** | — | 32 bytes as 64 hex characters (or base64). Seals the provider's signing keys and authorization codes. Generate with `openssl rand -hex 32`. Keep it stable: with a different key the provider refuses to start (`cannot decrypt the private key`). |
+| `PORTIKO_CLIENT_SECRET` | **required when enabled** | — | At least 16 characters. The secret ShortLinks itself signs in with; it is registered as the `shortlinks` client on every start. Generate with `openssl rand -hex 32`. |
+| `PORTIKO_DATABASE_URL` | optional | `DATABASE_URL` with `search_path=portiko` | Where the provider keeps its tables. The default is the same database in its own `portiko` schema, created at startup if missing. If you set it, include a `search_path` for a schema of your own (created if missing) or point it at a separate database. |
+| `PORTIKO_TRUSTED_PROXIES` | optional | `""` | Comma-separated IPs or CIDRs whose `X-Forwarded-For` the provider believes, so its rate limits see real client addresses. Behind Apache on the same host set `127.0.0.1,::1`. Unset, the provider logs a warning and every visitor shares the proxy's address. |
 | `REDIRECT_RATE_PER_MIN` | optional | `120` | Per-client-IP limit on all `GET /u/{key}` requests per minute (#0178). Must be at least 1. |
 | `REDIRECT_MISS_RATE_PER_MIN` | optional | `20` | Stricter per-IP limit on `/u/{key}` requests that answer 404 or 410, per minute, with a burst of half this value (default 10). When it is exhausted, every `/u/*` request from that IP gets `429` with `Retry-After` until it refills, even for live keys. Hits under `REDIRECT_RATE_PER_MIN` are unaffected, so a poster scanned by many people behind one NAT keeps working. 429s are not recorded as clicks. Must be at least 1. |
 
@@ -35,6 +40,29 @@ The per-IP key is the **last** `X-Forwarded-For` entry (the one Apache appends; 
 `WEBAUTHN_RP_ORIGIN`, `SESSION_SECRET`, `ADMIN_EMAIL`. The loader collects all
 missing-required and invalid-integer errors in a single pass and returns them
 together; see [Validation behavior](#validation-behavior) below.
+
+---
+
+## Embedded Portiko provider (`/id`)
+
+With `PORTIKO_ENABLED=true` the binary also serves Portiko's identity provider
+under `/id` (#0126, #0130). Derived from existing settings, so there is nothing
+else to set:
+
+| Provider setting | Value |
+|---|---|
+| Issuer | `BASE_URL` + `/id` (discovery at `/id/.well-known/openid-configuration`) |
+| WebAuthn RP ID and origin | `WEBAUTHN_RP_ID` and `WEBAUTHN_RP_ORIGIN`, so existing passkeys stay usable |
+| Service name | `ShortLinks` |
+| Mail | SES through the same `SES_SMTP_*` settings; without them the codes are written to the log |
+| Who may register | the admin's `registrations_enabled` setting, read on every attempt |
+| Own client | `shortlinks`, first party, redirect `BASE_URL/auth/portiko/callback`, post-logout `BASE_URL/`, back-channel `BASE_URL/auth/portiko/backchannel` |
+
+At startup it creates the `portiko` schema if missing, migrates it, builds the
+provider and registers the client. The provider's `users` and
+`schema_migrations` tables live in that schema and never in `public`. The
+provider's health check is `/id/health`; `/health` stays ShortLinks'. Apache's
+`ProxyPass /` already carries `/id/...`, so no vhost change is needed.
 
 ---
 

@@ -94,6 +94,14 @@ func (m *SESMailer) SendSessionsRevoked(ctx context.Context, toEmail string, at 
 	return m.send(ctx, toEmail, subject, text)
 }
 
+// SendText sends a plain-text message through the same transport and From
+// address as the other emails. The embedded Portiko provider's mail adapter
+// (internal/idp, #0130) uses it, so its one-time codes and notices leave
+// through the same SES account.
+func (m *SESMailer) SendText(ctx context.Context, toEmail, subject, textBody string) error {
+	return m.send(ctx, toEmail, subject, textBody)
+}
+
 // send composes an RFC 5322 message and hands it to the transport. The context
 // is honored before dispatch; the default transport does not itself accept a
 // context, so cancellation is checked up front.

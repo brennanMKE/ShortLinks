@@ -1,7 +1,10 @@
 package config
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -69,6 +72,27 @@ type Config struct {
 	// to bucket days when a request carries no tz parameter (#0139). Optional,
 	// validated at load, "UTC" when unset.
 	DefaultTimezone string
+
+	// Portiko (#0130): the embedded identity provider served under /id. Every
+	// field is inert unless PortikoEnabled is true, which is the default
+	// (PORTIKO_ENABLED unset or "false"), so a binary built with this code
+	// behaves exactly as before on an instance that has not opted in.
+	PortikoEnabled bool
+	// PortikoCryptoKey (PORTIKO_CRYPTO_KEY) seals the provider's signing keys
+	// and authorization codes: 32 bytes as 64 hex characters or base64.
+	// Required when enabled. It must be stable across restarts.
+	PortikoCryptoKey [32]byte
+	// PortikoClientSecret (PORTIKO_CLIENT_SECRET) is the secret ShortLinks
+	// itself signs in with, registered at every start. Required when enabled.
+	PortikoClientSecret string
+	// PortikoDatabaseURL (PORTIKO_DATABASE_URL) defaults to DATABASE_URL with
+	// search_path=portiko, so the provider's tables live in their own schema.
+	PortikoDatabaseURL string
+	// PortikoTrustedProxies (PORTIKO_TRUSTED_PROXIES, comma-separated IPs or
+	// CIDRs) are the proxies whose X-Forwarded-For the provider believes, so its
+	// rate limits see real client addresses. Behind Apache on the same host this
+	// is "127.0.0.1,::1".
+	PortikoTrustedProxies []netip.Prefix
 
 	// RedirectRatePerMin / RedirectMissRatePerMin (#0178) cap GET /u/{key}
 	// per client IP: all requests, and 404/410 responses only.
@@ -159,11 +183,74 @@ func loadFromFile(path string) (*Config, error) {
 		}
 	}
 
+	loadPortiko(cfg, &errs)
+
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("config: %s", strings.Join(errs, "; "))
 	}
 
 	return cfg, nil
+}
+
+// loadPortiko reads the PORTIKO_* settings (#0130). With PORTIKO_ENABLED unset
+// or false it reads nothing else and reports no error, so a stray or malformed
+// PORTIKO_* value cannot stop an instance that has not opted in from booting.
+func loadPortiko(cfg *Config, errs *[]string) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("PORTIKO_ENABLED"))) {
+	case "", "false", "0":
+		return
+	case "true", "1":
+		cfg.PortikoEnabled = true
+	default:
+		*errs = append(*errs, fmt.Sprintf("invalid boolean for PORTIKO_ENABLED: %q (use true or false)", os.Getenv("PORTIKO_ENABLED")))
+		return
+	}
+	if cfg.DevMode() {
+		*errs = append(*errs, "PORTIKO_ENABLED=true needs Postgres; it cannot be combined with STORAGE=json")
+	}
+	key, err := decodePortikoKey(os.Getenv("PORTIKO_CRYPTO_KEY"))
+	if err != nil {
+		*errs = append(*errs, "PORTIKO_CRYPTO_KEY "+err.Error()+" (generate one with: openssl rand -hex 32)")
+	}
+	cfg.PortikoCryptoKey = key
+	cfg.PortikoClientSecret = os.Getenv("PORTIKO_CLIENT_SECRET")
+	if len(cfg.PortikoClientSecret) < 16 {
+		*errs = append(*errs, "PORTIKO_CLIENT_SECRET is required when PORTIKO_ENABLED=true and must be at least 16 characters (generate one with: openssl rand -hex 32)")
+	}
+	cfg.PortikoDatabaseURL = os.Getenv("PORTIKO_DATABASE_URL")
+	for _, p := range strings.Split(os.Getenv("PORTIKO_TRUSTED_PROXIES"), ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(p); err == nil {
+			cfg.PortikoTrustedProxies = append(cfg.PortikoTrustedProxies, prefix)
+		} else if addr, err := netip.ParseAddr(p); err == nil {
+			cfg.PortikoTrustedProxies = append(cfg.PortikoTrustedProxies, netip.PrefixFrom(addr, addr.BitLen()))
+		} else {
+			*errs = append(*errs, fmt.Sprintf("PORTIKO_TRUSTED_PROXIES: %q is not an IP address or CIDR", p))
+		}
+	}
+}
+
+// decodePortikoKey accepts 32 bytes as 64 hex characters or as base64.
+func decodePortikoKey(v string) ([32]byte, error) {
+	var key [32]byte
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return key, fmt.Errorf("is required when PORTIKO_ENABLED=true")
+	}
+	if b, err := hex.DecodeString(v); err == nil && len(b) == 32 {
+		copy(key[:], b)
+		return key, nil
+	}
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(v); err == nil && len(b) == 32 {
+			copy(key[:], b)
+			return key, nil
+		}
+	}
+	return key, fmt.Errorf("must be 32 bytes as 64 hex characters or base64")
 }
 
 // requiredField describes one environment variable Load insists on.

@@ -39,6 +39,10 @@ func NewWebAuthn(cfg *config.Config) (*webauthn.WebAuthn, error) {
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
 			UserVerification: protocol.VerificationRequired,
 		},
+		// go-webauthn 0.18 fails a ceremony when the client returns an extension
+		// output (e.g. credProps) that was not requested. Real clients send them
+		// unasked, so ignore rather than lock people out (#0130).
+		ExtensionsUnsolicitedOutputPolicy: protocol.UnsolicitedOutputPolicyIgnore,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("auth: configuring webauthn: %w", err)
