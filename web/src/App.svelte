@@ -27,6 +27,9 @@
   import AppShell from './lib/AppShell.svelte';
   import Footer from './lib/Footer.svelte';
   import Toast from './lib/Toast.svelte';
+  import Button from './lib/Button.svelte';
+  import { reloadToSameURL, restoreScrollAfterReload, startVersionWatch } from './lib/versionCheck';
+  import { setUnsaved } from './lib/unsavedWork';
 
   // The route table lives HERE, not in hashRouter.svelte.ts, because it needs
   // the actual view components — hashRouter.svelte.ts stays free of any view
@@ -57,6 +60,24 @@
   // rendering via <Router />.
   type Mode = 'loading' | 'verify-register' | 'verify-recover' | 'app';
   let mode = $state<Mode>('loading');
+
+  // #0185: set when a newer build is out but unsaved input (an open dialog, a
+  // dirty form, a focused field) holds the reload back.
+  let updateAvailable = $state(false);
+
+  // Show the notice in the top layer so an open modal dialog cannot cover it.
+  function topLayer(node: HTMLElement) {
+    try {
+      node.showPopover?.();
+    } catch {
+      // already shown, or unsupported: the fixed-position CSS still shows it
+    }
+  }
+
+  onMount(() => {
+    restoreScrollAfterReload();
+    return startVersionWatch({ onNotify: () => (updateAvailable = true) });
+  });
 
   // Public home info (#0125): fetched only on a signed-out cold load at the
   // bare root, cleared the moment someone signs in so a later sign-out falls
@@ -94,6 +115,7 @@
   // rendering over to the router.
   function enterApp(initialPath?: string) {
     initRouter(routes);
+    setUnsaved('verify-ceremony', false);
     if (initialPath) {
       replace(initialPath);
     } else if (window.location.hash === '' || window.location.hash === '#') {
@@ -126,6 +148,7 @@
       // token found" — correct behavior.
       history.replaceState({}, '', '/register/verify');
       mode = 'verify-register';
+      setUnsaved('verify-ceremony', true); // never reload mid-ceremony (#0185)
       return;
     }
 
@@ -134,6 +157,7 @@
       pendingVerifyToken.set(params.get('token'));
       history.replaceState({}, '', '/recover/verify');
       mode = 'verify-recover';
+      setUnsaved('verify-ceremony', true);
       return;
     }
 
@@ -188,3 +212,49 @@
 
 <Footer />
 <Toast />
+
+<!-- A live region must exist before its text changes to be announced, so it stays
+     mounted and visually hidden; the visible bar below appears separately (#0185). -->
+<p class="sr-only" role="status">{updateAvailable ? 'A new version is available. Reload to update.' : ''}</p>
+
+{#if updateAvailable}
+  <!-- Reload is unclickable while a modal is open: the modal makes everything
+       outside it inert, so the bar is informational until the modal closes. -->
+  <div class="update-notice" popover="manual" use:topLayer>
+    <span aria-hidden="true">A new version is available.</span>
+    <Button variant="primary" onclick={() => reloadToSameURL()}>Reload</Button>
+  </div>
+{/if}
+
+<style>
+  .update-notice {
+    position: fixed;
+    inset: auto 0 var(--space-4) 0;
+    margin-inline: auto;
+    margin-block: 0;
+    width: max-content;
+    z-index: 50;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+    max-width: min(36rem, calc(100% - 2 * var(--space-4)));
+    padding: var(--space-3) var(--space-4);
+    background: var(--bg-panel);
+    color: var(--text);
+    border: var(--border-w) solid var(--border-strong);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+</style>

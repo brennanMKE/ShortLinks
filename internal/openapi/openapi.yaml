@@ -120,6 +120,28 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PublicHome" }
         "500": { $ref: "#/components/responses/InternalError" }
+  /api/version:
+    get:
+      tags: [Account]
+      operationId: getVersion
+      summary: The running build id
+      description: |
+        Needs no credentials. Open browser tabs compare this id with the one
+        stamped into the page they loaded and reload when it differs.
+      security: []
+      responses:
+        "200":
+          description: The build id.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [build]
+                properties:
+                  build: { type: string, description: The git commit or bundle hash of this build. }
   /api/openapi.yaml:
     get:
       tags: [Documentation]

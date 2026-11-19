@@ -24,4 +24,5 @@ var Excluded = map[string]string{
 
 	// Not an authenticated action at all.
 	"GET /api/public/home": "unauthenticated signed-out home page info for the web UI",
+	"GET /api/version":     "unauthenticated build id the web UI polls to notice a new deploy",
 }

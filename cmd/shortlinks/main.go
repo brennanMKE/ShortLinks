@@ -34,6 +34,12 @@ import (
 
 const version = "0.6.0"
 
+// buildID identifies this build to open browser tabs (#0185). Set at build time
+// with -ldflags "-X main.buildID=$(git rev-parse --short HEAD)"; when empty,
+// handlers.BuildID falls back to a hash of the embedded index.html, which
+// changes whenever the SPA bundle does.
+var buildID string
+
 func main() {
 	// Subcommand routing: `shortlinks serve` starts the HTTP server;
 	// `shortlinks seed` bootstraps the admin user and a test link; anything
@@ -552,6 +558,12 @@ func buildMux(
 	// {redirect_url, registrations_enabled}, never other settings.
 	mux.Handle("GET /api/public/home", homeH)
 
+	// Build id for stale-tab detection (#0185) — UNAUTHENTICATED and no-store.
+	// The same id is stamped into the SPA shell as <meta name="sl-build">.
+	dist := web.DistFS()
+	build := handlers.BuildID(dist, buildID)
+	mux.Handle("GET /api/version", handlers.NewVersionHandler(build))
+
 	// OpenAPI 3.1 description of the REST API (#0148) — also UNAUTHENTICATED:
 	// it describes the API and holds no secrets. A drift test compares it with
 	// the routes registered here.
@@ -587,7 +599,7 @@ func buildMux(
 	// over it. It serves hashed assets from the embedded web/dist directly and
 	// falls back to index.html for any other path, so SPA deep links survive a
 	// hard refresh.
-	mux.Handle("GET /", handlers.NewSPAHandler(web.DistFS()))
+	mux.Handle("GET /", handlers.NewSPAHandler(handlers.StampBuild(dist, build)))
 
 	// The MCP tools dispatch to the bare mux, never to /mcp itself and never
 	// through the outer middleware (the dev auto-login must not run on an

@@ -13,7 +13,7 @@ dev-built:
 # Full production build (SPA + Go binary with embedded web/dist/).
 build:
 	cd web && npm run build && cd ..
-	go build ./cmd/shortlinks
+	go build -ldflags "-X main.buildID=$$(git rev-parse --short HEAD)" ./cmd/shortlinks
 
 # Run all Go tests.
 test:
