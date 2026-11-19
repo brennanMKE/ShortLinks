@@ -719,15 +719,31 @@ paths:
       tags: [Campaigns]
       operationId: getCampaignQRZip
       summary: Every QR code in a campaign
-      description: A zip archive of PNG QR codes, one per link.
+      description: A zip archive of PNG and SVG QR codes, one per link. With `keys`, only those links.
+      parameters:
+        - name: keys
+          in: query
+          description: >-
+            Only these link keys, each of which must belong to the campaign. Repeat the parameter
+            (`keys=a&keys=b`) or send one comma-separated value (`keys=a,b`). At most 200.
+          schema: { type: string }
       responses:
         "200":
           description: The archive.
           content:
             application/zip:
               schema: { type: string, contentEncoding: base64 }
+        "400":
+          description: More than 200 `keys`, or a `keys` parameter that is present but empty.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
-        "404": { $ref: "#/components/responses/CampaignNotFound" }
+        "404":
+          description: The campaign was not found, or one of the `keys` is not a link in it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "500": { $ref: "#/components/responses/InternalError" }
         "429": { $ref: "#/components/responses/RateLimited" }
   /api/campaigns/{slug}/export.csv:

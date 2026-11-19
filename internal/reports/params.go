@@ -224,6 +224,10 @@ func splitList(raw []string) []string {
 	return out
 }
 
+// SplitList is splitList for callers outside the package that read the same
+// list-valued query parameters (the campaign QR zip's keys, #0191).
+func SplitList(raw []string) []string { return splitList(raw) }
+
 // splitEscaped splits on commas not preceded by a backslash and unescapes \,
 // to , and \\ to \. Any other backslash is kept as written.
 func splitEscaped(s string) []string {

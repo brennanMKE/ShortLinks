@@ -408,9 +408,15 @@ export function copyAllShortUrlsText(links: Pick<Link, 'key'>[]): string {
  * links.ts's qrSvgUrl/qrPngUrl doc comment) — a plain `<a href download>`
  * is sufficient, no fetch/blob plumbing needed.
  */
-export function campaignQrZipUrl(slug: string): string {
-  return `/api/campaigns/${encodeURIComponent(slug)}/qr.zip`;
+export function campaignQrZipUrl(slug: string, keys?: string[]): string {
+  const base = `/api/campaigns/${encodeURIComponent(slug)}/qr.zip`;
+  if (!keys || keys.length === 0) return base;
+  // Repeated params hold whole values (#0187), so no key needs escaping beyond URL encoding.
+  return `${base}?${keys.map((k) => `keys=${encodeURIComponent(k)}`).join('&')}`;
 }
+
+/** The server's cap on the qr.zip `keys` filter (#0191). */
+export const MAX_QR_ZIP_KEYS = 200;
 
 // ── CSV export (#0107) ───────────────────────────────────────────────────
 

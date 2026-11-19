@@ -743,6 +743,14 @@ describe('campaignQrZipUrl', () => {
   it('encodes an unusual slug defensively', () => {
     expect(campaignQrZipUrl('a b')).toBe('/api/campaigns/a%20b/qr.zip');
   });
+
+  it('adds one repeated keys param per selected link (#0191)', () => {
+    expect(campaignQrZipUrl('summer-fair', ['a', 'b c'])).toBe('/api/campaigns/summer-fair/qr.zip?keys=a&keys=b%20c');
+  });
+
+  it('an empty selection is the whole campaign', () => {
+    expect(campaignQrZipUrl('summer-fair', [])).toBe('/api/campaigns/summer-fair/qr.zip');
+  });
 });
 
 // ── campaignExportCsvUrl (#0107) ──────────────────────────────────────────

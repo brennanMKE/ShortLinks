@@ -212,7 +212,14 @@
     {#if error}<p class="text-error" role="alert">{error}</p>{/if}
     <div class="actions">
       <Button variant="default" onclick={copyAll}>{copied ? 'Copied' : 'Copy all'}</Button>
-      <a class="btn-link" href={campaignQrZipUrl(campaign.slug)} download>Campaign QR zip</a>
+      <a
+        class="btn-link"
+        href={campaignQrZipUrl(
+          campaign.slug,
+          created.map((l) => l.key),
+        )}
+        download>QR zip for {created.length === 1 ? 'this link' : `these ${created.length} links`}</a
+      >
       <span class="spacer"></span>
       <span class="end-actions">
         <Button variant="default" onclick={again}>Create more</Button>

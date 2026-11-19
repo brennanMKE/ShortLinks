@@ -61,6 +61,7 @@
     copyAllShortUrlsText,
     campaignQrZipUrl,
     campaignExportCsvUrl,
+    MAX_QR_ZIP_KEYS,
     toDateInput,
     toIsoDate,
     joinSentences,
@@ -276,6 +277,26 @@
   async function copySelected(keys: string[]) {
     const text = copyAllShortUrlsText(rowsForKeys(keys));
     if (text) await writeClipboard(text);
+  }
+  // #0191: the selection's QR codes. Group rows (content) select their links'
+  // keys, so only keys that are links of this campaign go in. The server caps
+  // the filter, so the whole campaign goes without keys (one download) and a
+  // partial selection over the cap is refused in the bulk bar.
+  function qrZipKeys(keys: string[]): string[] | undefined {
+    const linkKeys = rowsForKeys(keys).map((r) => r.key);
+    return linkKeys.length >= rows.length ? undefined : linkKeys;
+  }
+  function qrZipTooMany(keys: string[]): boolean {
+    const k = qrZipKeys(keys);
+    return k !== undefined && k.length > MAX_QR_ZIP_KEYS;
+  }
+  function downloadQrZip(keys: string[]) {
+    const a = document.createElement('a');
+    a.href = campaignQrZipUrl(slug, qrZipKeys(keys));
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
   function exportSelected(keys: string[]) {
     const blob = new Blob([selectedLinksCsv(rowsForKeys(keys))], { type: 'text/csv' });
@@ -939,6 +960,15 @@
             {#snippet bulk(keys: string[])}
               <Button variant="subtle" onclick={() => copySelected(keys)}>Copy URLs</Button>
               <Button variant="subtle" onclick={() => exportSelected(keys)}>Export</Button>
+              <Button
+                variant="subtle"
+                disabled={qrZipTooMany(keys)}
+                title={qrZipTooMany(keys) ? `Select up to ${MAX_QR_ZIP_KEYS} links for a QR zip` : undefined}
+                onclick={() => downloadQrZip(keys)}>QR zip</Button
+              >
+              {#if qrZipTooMany(keys)}
+                <span class="text-faint">Select up to {MAX_QR_ZIP_KEYS} links for a QR zip</span>
+              {/if}
               <Button variant="subtle" onclick={() => removeLinks(keys)}>Remove from campaign</Button>
             {/snippet}
             <DataTable

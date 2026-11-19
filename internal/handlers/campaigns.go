@@ -1552,6 +1552,9 @@ func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Reque
 // that matters here.
 const qrZipContentType = "application/zip"
 
+// maxQRZipKeys caps the keys filter of QRZip (#0191).
+const maxQRZipKeys = 200
+
 // QRZip handles GET /api/campaigns/{slug}/qr.zip: a zip archive containing
 // every link CURRENTLY assigned to the caller's own campaign, as both
 // "{key}-{placement-slug}.svg" and "{key}-{placement-slug}.png" (see
@@ -1589,6 +1592,37 @@ func (h *CampaignsHandler) QRZip(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
+	}
+
+	// Optional keys filter (#0191): only these links, each of which must be in
+	// this campaign. Read like the report filters (#0187): a repeated param
+	// holds whole values, a single param is comma-separated.
+	if raw, present := r.URL.Query()["keys"]; present {
+		keys := reports.SplitList(raw)
+		if len(keys) == 0 {
+			writeError(w, http.StatusBadRequest, "keys is empty; omit it for the whole campaign")
+			return
+		}
+		if len(keys) > maxQRZipKeys {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("at most %d keys per request", maxQRZipKeys))
+			return
+		}
+		if len(keys) > 0 {
+			byKey := make(map[string]links.Link, len(rows))
+			for _, l := range rows {
+				byKey[l.Key] = l
+			}
+			picked := make([]links.Link, 0, len(keys))
+			for _, k := range keys {
+				l, ok := byKey[k]
+				if !ok {
+					writeError(w, http.StatusNotFound, "link not found in this campaign")
+					return
+				}
+				picked = append(picked, l)
+			}
+			rows = picked
+		}
 	}
 
 	// Built into an in-memory buffer (campaigns are personal/small-team
