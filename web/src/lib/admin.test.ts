@@ -1,7 +1,7 @@
 // Unit tests for the Admin pure logic (#0037): the reason-code/value ↔ label
 // maps, the deactivation `other`-requires-note validation, the URL-filter
-// test-result mapping, audit actor/target/metadata rendering, the user-id filter
-// parser, and the pagination math. No DOM or network — only the data shaping the
+// test-result mapping, audit actor/target/metadata rendering,
+// and the pagination math. No DOM or network — only the data shaping the
 // Admin view delegates to lib/admin.ts.
 
 import { describe, it, expect } from 'vitest';
@@ -20,7 +20,6 @@ import {
   formatMetadata,
   formatDateTime,
   pageInfo,
-  parseUserIdFilter,
   registrationsEnabled,
 } from './admin';
 
@@ -39,7 +38,9 @@ function auditEntry(overrides: Partial<AuditEntry> = {}): AuditEntry {
   return {
     id: 1,
     actor_id: 1,
+    actor_email: 'admin@example.com',
     user_id: null,
+    user_email: null,
     action: 'settings.updated',
     target_type: 'settings',
     target_id: null,
@@ -158,7 +159,8 @@ describe('filterTestNotice', () => {
 describe('audit rendering', () => {
   it('labels a NULL actor as system and a numeric actor as user #N', () => {
     expect(actorLabel(auditEntry({ actor_id: null }))).toBe('system');
-    expect(actorLabel(auditEntry({ actor_id: 7 }))).toBe('user #7');
+    expect(actorLabel(auditEntry({ actor_id: 7, actor_email: null }))).toBe('user #7');
+    expect(actorLabel(auditEntry({ actor_id: 7, actor_email: 'sam@example.com' }))).toBe('sam@example.com');
   });
 
   it('labels the target with type and optional id', () => {
@@ -184,24 +186,6 @@ describe('audit rendering', () => {
   it('formats a timestamp and falls back on a bad one', () => {
     expect(formatDateTime('not-a-date')).toBe('not-a-date');
     expect(formatDateTime('2026-05-25T12:00:00Z')).not.toBe('2026-05-25T12:00:00Z');
-  });
-});
-
-describe('parseUserIdFilter', () => {
-  it('treats empty as no filter', () => {
-    expect(parseUserIdFilter('')).toEqual({ userId: null });
-    expect(parseUserIdFilter('   ')).toEqual({ userId: null });
-  });
-
-  it('parses a positive integer', () => {
-    expect(parseUserIdFilter(' 42 ')).toEqual({ userId: 42 });
-  });
-
-  it('rejects non-numeric or non-positive input', () => {
-    expect(parseUserIdFilter('abc')).toEqual({ error: 'Enter a numeric user id.' });
-    expect(parseUserIdFilter('0')).toEqual({ error: 'Enter a numeric user id.' });
-    expect(parseUserIdFilter('-3')).toEqual({ error: 'Enter a numeric user id.' });
-    expect(parseUserIdFilter('1.5')).toEqual({ error: 'Enter a numeric user id.' });
   });
 });
 

@@ -622,14 +622,23 @@ export interface AuditPage {
   per_page: number;
 }
 
-/**
- * GET /admin/audit — paginated audit log (admin only), newest-first. An optional
- * `userId` narrows to a single actor/target via `?user_id=`.
- */
-export function listAudit(page = 1, perPage = 50, userId?: number): Promise<AuditPage> {
-  let path = `/admin/audit?page=${page}&per_page=${perPage}`;
-  if (userId !== undefined) {
-    path += `&user_id=${userId}`;
-  }
-  return apiGet<AuditPage>(path);
+/** Server-side filters for GET /admin/audit (all optional). */
+export interface AuditQuery {
+  /** Actor or affected account, by email (case-insensitive, exact). */
+  email?: string;
+  /** Action names; any match. */
+  actions?: string[];
+  /** RFC 3339 instants: `from` inclusive, `to` exclusive. */
+  from?: string;
+  to?: string;
+}
+
+/** GET /admin/audit — paginated audit log (admin only), newest-first. */
+export function listAudit(page = 1, perPage = 50, query: AuditQuery = {}): Promise<AuditPage> {
+  const params = new URLSearchParams({ page: String(page), per_page: String(perPage) });
+  if (query.email) params.set('email', query.email);
+  if (query.actions && query.actions.length > 0) params.set('action', query.actions.join(','));
+  if (query.from) params.set('from', query.from);
+  if (query.to) params.set('to', query.to);
+  return apiGet<AuditPage>(`/admin/audit?${params}`);
 }

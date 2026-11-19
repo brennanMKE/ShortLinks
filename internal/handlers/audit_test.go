@@ -70,7 +70,9 @@ type auditListResponse struct {
 	AuditLog []struct {
 		ID         int64           `json:"id"`
 		ActorID    *int64          `json:"actor_id"`
+		ActorEmail *string         `json:"actor_email"`
 		UserID     *int64          `json:"user_id"`
+		UserEmail  *string         `json:"user_email"`
 		Action     string          `json:"action"`
 		TargetType *string         `json:"target_type"`
 		TargetID   *int64          `json:"target_id"`

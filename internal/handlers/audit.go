@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/audit"
@@ -22,12 +23,18 @@ const (
 // layer. *audit.Reader satisfies it. Depending on an interface keeps the
 // handler unit-testable with a fake and documents the exact contract.
 type auditReader interface {
-	ListAuditLog(ctx context.Context, userID *int64, limit, offset int) ([]audit.Record, int64, error)
+	ListAuditLog(ctx context.Context, f audit.Filter, limit, offset int) ([]audit.Record, int64, error)
 }
 
 // AdminAuditHandler serves the admin-only audit log route:
 //
-//	GET /admin/audit  — paginated audit log, newest-first, optional ?user_id=
+//	GET /admin/audit  — paginated audit log, newest-first. Optional filters:
+//	  user_id  affected account id
+//	  email    actor or affected account email (case-insensitive, exact)
+//	  action   comma-separated action names
+//	  from, to RFC 3339 instants or YYYY-MM-DD dates (UTC); from is inclusive,
+//	           to is exclusive for an instant and inclusive of the whole day
+//	           for a date
 //
 // It MUST be mounted behind middleware.RequireSession then
 // middleware.RequireAdmin (#0017): RequireSession answers 401 for an
@@ -50,7 +57,9 @@ func NewAdminAuditHandler(reader auditReader) *AdminAuditHandler {
 type auditRecordView struct {
 	ID         int64           `json:"id"`
 	ActorID    *int64          `json:"actor_id"`
+	ActorEmail *string         `json:"actor_email"`
 	UserID     *int64          `json:"user_id"`
+	UserEmail  *string         `json:"user_email"`
 	Action     string          `json:"action"`
 	TargetType *string         `json:"target_type"`
 	TargetID   *int64          `json:"target_id"`
@@ -63,7 +72,9 @@ func toAuditRecordView(r audit.Record) auditRecordView {
 	return auditRecordView{
 		ID:         r.ID,
 		ActorID:    r.ActorID,
+		ActorEmail: r.ActorEmail,
 		UserID:     r.UserID,
+		UserEmail:  r.UserEmail,
 		Action:     r.Action,
 		TargetType: r.TargetType,
 		TargetID:   r.TargetID,
@@ -106,18 +117,36 @@ func (h *AdminAuditHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	// Optional ?user_id= filter. Present-but-unparseable is a client error (400);
 	// absent means "no filter".
-	var userID *int64
+	var f audit.Filter
 	if raw := q.Get("user_id"); raw != "" {
 		id, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || id <= 0 {
 			writeError(w, http.StatusBadRequest, "invalid user_id")
 			return
 		}
-		userID = &id
+		f.UserID = &id
+	}
+
+	f.Email = strings.TrimSpace(q.Get("email"))
+	for _, a := range strings.Split(q.Get("action"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			f.Actions = append(f.Actions, a)
+		}
+	}
+	var okTime bool
+	if f.From, okTime = parseAuditTime(w, q.Get("from"), "from", false); !okTime {
+		return
+	}
+	if f.To, okTime = parseAuditTime(w, q.Get("to"), "to", true); !okTime {
+		return
+	}
+	if f.From != nil && f.To != nil && !f.From.Before(*f.To) {
+		writeError(w, http.StatusBadRequest, "from must be before to")
+		return
 	}
 
 	offset := (page - 1) * perPage
-	records, total, err := h.reader.ListAuditLog(r.Context(), userID, perPage, offset)
+	records, total, err := h.reader.ListAuditLog(r.Context(), f, perPage, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -133,6 +162,27 @@ func (h *AdminAuditHandler) List(w http.ResponseWriter, r *http.Request) {
 		Page:     page,
 		PerPage:  perPage,
 	})
+}
+
+// parseAuditTime parses a from/to query value: an RFC 3339 instant or a
+// YYYY-MM-DD date (UTC). A date given as the upper bound (endOfDay) covers the
+// whole day, so it becomes the start of the next day. Empty means unset; an
+// unparseable value writes a 400 and returns ok=false.
+func parseAuditTime(w http.ResponseWriter, raw, name string, endOfDay bool) (*time.Time, bool) {
+	if raw == "" {
+		return nil, true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return &t, true
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		if endOfDay {
+			t = t.AddDate(0, 0, 1)
+		}
+		return &t, true
+	}
+	writeError(w, http.StatusBadRequest, "invalid "+name)
+	return nil, false
 }
 
 // parsePositiveQueryInt parses a positive integer query parameter, returning

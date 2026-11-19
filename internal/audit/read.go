@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,6 +31,54 @@ type Record struct {
 	Metadata   json.RawMessage
 	IP         *string
 	CreatedAt  time.Time
+	// ActorEmail and UserEmail are the emails of the actor and the affected
+	// user, resolved from users when the row is read (nil when the id is NULL).
+	ActorEmail *string
+	UserEmail  *string
+}
+
+// Filter narrows an audit log listing. The zero value matches every row.
+type Filter struct {
+	// UserID matches rows whose user_id (the affected account) is this id.
+	UserID *int64
+	// Email matches rows where either the actor or the affected user has this
+	// email (case-insensitive, exact).
+	Email string
+	// Actions matches rows whose action is any of these values.
+	Actions []string
+	// From is inclusive and To is exclusive, both on created_at.
+	From, To *time.Time
+}
+
+// where builds the WHERE clause (with a leading space, or empty) and its
+// positional args, numbering placeholders from first.
+func (f Filter) where(first int) (string, []any) {
+	var conds []string
+	var args []any
+	add := func(cond string, v any) {
+		args = append(args, v)
+		conds = append(conds, strings.ReplaceAll(cond, "$N", fmt.Sprintf("$%d", first+len(args)-1)))
+	}
+	if f.UserID != nil {
+		add("a.user_id = $N", *f.UserID)
+	}
+	if f.Email != "" {
+		add(`(a.actor_id IN (SELECT id FROM users WHERE lower(email) = lower($N))
+		   OR a.user_id  IN (SELECT id FROM users WHERE lower(email) = lower($N)))`, f.Email)
+	}
+	if len(f.Actions) > 0 {
+		add("a.action = ANY($N)", f.Actions)
+	}
+	if f.From != nil {
+		add("a.created_at >= $N", *f.From)
+	}
+	if f.To != nil {
+		add("a.created_at < $N", *f.To)
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
 }
 
 // Reader reads audit_log rows over the shared pgx pool for the admin audit
@@ -46,54 +95,33 @@ func NewReader(pool *pgxpool.Pool) *Reader {
 
 // ListAuditLog returns a page of audit_log rows newest-first (created_at DESC,
 // id DESC as a stable tiebreak) together with the total row count matching the
-// filter. When userID is non-nil only rows for that user_id are returned (using
-// the (user_id, created_at DESC) index); when nil the whole log is returned
-// (using the (created_at DESC) index). limit/offset page the result; the caller
-// is responsible for clamping limit to a sane maximum.
+// filter. limit/offset page the result; the caller is responsible for clamping
+// limit to a sane maximum.
 //
 // ip_address is read as host(ip_address) so an INET like 203.0.113.7/32 comes
 // back as the bare address string. metadata is read as raw JSONB bytes so it
 // reaches the client as a JSON object, not a quoted string.
-func (r *Reader) ListAuditLog(ctx context.Context, userID *int64, limit, offset int) (rows []Record, total int64, err error) {
-	// Total count first so the handler can report it for pagination. The filter
-	// (user_id) is applied identically to the count and the page query.
-	if userID != nil {
-		err = r.pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM audit_log WHERE user_id = $1`, *userID,
-		).Scan(&total)
-	} else {
-		err = r.pool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM audit_log`,
-		).Scan(&total)
-	}
-	if err != nil {
+func (r *Reader) ListAuditLog(ctx context.Context, f Filter, limit, offset int) (rows []Record, total int64, err error) {
+	const from = ` FROM audit_log a`
+	const join = `
+	   LEFT JOIN users ua ON ua.id = a.actor_id
+	   LEFT JOIN users uu ON uu.id = a.user_id`
+
+	// The same filter feeds the count and the page query; the page query's
+	// $1/$2 are limit/offset, so its filter placeholders start at $3.
+	countWhere, countArgs := f.where(1)
+	if err = r.pool.QueryRow(ctx, `SELECT COUNT(*)`+from+countWhere, countArgs...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("audit: counting audit_log: %w", err)
 	}
 
-	// $1 = limit, $2 = offset; the optional user_id filter shifts the parameter
-	// positions, so build the query/args together to keep them in step.
-	var (
-		sql  string
-		args []any
-	)
-	if userID != nil {
-		sql = `SELECT id, actor_id, user_id, action, target_type, target_id,
-		              metadata, host(ip_address), created_at
-		         FROM audit_log
-		        WHERE user_id = $3
-		        ORDER BY created_at DESC, id DESC
-		        LIMIT $1 OFFSET $2`
-		args = []any{limit, offset, *userID}
-	} else {
-		sql = `SELECT id, actor_id, user_id, action, target_type, target_id,
-		              metadata, host(ip_address), created_at
-		         FROM audit_log
-		        ORDER BY created_at DESC, id DESC
-		        LIMIT $1 OFFSET $2`
-		args = []any{limit, offset}
-	}
-
-	queryRows, err := r.pool.Query(ctx, sql, args...)
+	where, fargs := f.where(3)
+	args := append([]any{limit, offset}, fargs...)
+	queryRows, err := r.pool.Query(ctx,
+		`SELECT a.id, a.actor_id, a.user_id, a.action, a.target_type, a.target_id,
+		        a.metadata, host(a.ip_address), a.created_at, ua.email, uu.email`+
+			from+join+where+`
+		  ORDER BY a.created_at DESC, a.id DESC
+		  LIMIT $1 OFFSET $2`, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("audit: querying audit_log: %w", err)
 	}
@@ -104,13 +132,12 @@ func (r *Reader) ListAuditLog(ctx context.Context, userID *int64, limit, offset 
 		var metaRaw []byte
 		if err := queryRows.Scan(
 			&rec.ID, &rec.ActorID, &rec.UserID, &rec.Action, &rec.TargetType,
-			&rec.TargetID, &metaRaw, &rec.IP, &rec.CreatedAt,
+			&rec.TargetID, &metaRaw, &rec.IP, &rec.CreatedAt, &rec.ActorEmail, &rec.UserEmail,
 		); err != nil {
 			return nil, 0, fmt.Errorf("audit: scanning audit_log row: %w", err)
 		}
 		// metaRaw is nil for a SQL NULL metadata column; leave Metadata nil so it
-		// serializes as JSON null. Otherwise hand the raw JSONB bytes straight
-		// through so the client receives a JSON object.
+		// serializes as JSON null.
 		if metaRaw != nil {
 			rec.Metadata = json.RawMessage(metaRaw)
 		}

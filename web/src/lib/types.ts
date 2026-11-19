@@ -329,7 +329,11 @@ export interface Credential {
 export interface AuditEntry {
   id: number;
   actor_id: number | null;
+  /** Email of the actor, resolved by the server; null for system actions. */
+  actor_email: string | null;
   user_id: number | null;
+  /** Email of the affected account. */
+  user_email: string | null;
   action: string;
   target_type: string | null;
   target_id: number | null;

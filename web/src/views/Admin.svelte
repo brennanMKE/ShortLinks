@@ -7,14 +7,13 @@
 
   - Settings   — GET/PATCH /admin/settings: a registrations_enabled toggle and
     the home_redirect_url primary URL (#0125).
-  - URL filters — GET/POST/PATCH/DELETE /admin/url-filters plus
-    POST /admin/url-filters/test: list, create, edit, delete (with confirm), and
-    a dry-run test tool.
+  - URL filters — lib/AdminFilters.svelte (#0171): an inline "Test a URL" that
+    highlights the matching rule, rules in a table, add/edit in a dialog.
   - Users      — GET /admin/users plus POST .../{id}/deactivate|reactivate:
     list with status, deactivate a non-admin (reason dropdown + note, note
     required for "other"), reactivate with an optional note.
-  - Audit log  — GET /admin/audit?page=&per_page=&user_id=: a paginated,
-    newest-first table with a per-user filter.
+  - Audit log  — lib/AdminAudit.svelte (#0171): GET /admin/audit filtered by
+    user email, action and date range, with the filters held in the hash.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -22,32 +21,17 @@
   import {
     getSettings,
     updateSetting,
-    listFilterRules,
-    createFilterRule,
-    updateFilterRule,
-    deleteFilterRule,
-    testFilterRule,
     listUsers,
     deactivateUser,
     reactivateUser,
-    listAudit,
     ApiError,
   } from '../lib/api';
   import {
-    REASON_OPTIONS,
-    reasonLabel,
     DEACTIVATION_REASONS,
     deactivationReasonLabel,
     validateDeactivation,
     canDeactivate,
-    filterTestNotice,
-    type FilterTestNotice,
-    actorLabel,
-    targetLabel,
-    formatMetadata,
     formatDateTime,
-    pageInfo,
-    parseUserIdFilter,
     registrationsEnabled,
     ADMIN_SECTIONS,
     DEFAULT_ADMIN_SECTION,
@@ -58,10 +42,11 @@
   import { navigate, replace } from '../lib/hashRouter.svelte';
   import Link from '../lib/Link.svelte';
   import NotFound from './NotFound.svelte';
-  import type { Setting, FilterRule, AdminUser, AuditEntry } from '../lib/types';
+  import type { Setting, AdminUser } from '../lib/types';
   import Button from '../lib/Button.svelte';
-  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   import Panel from '../lib/Panel.svelte';
+  import AdminFilters from '../lib/AdminFilters.svelte';
+  import AdminAudit from '../lib/AdminAudit.svelte';
 
   // The section comes from the route (#0154): `#/admin/:section`, and bare
   // `#/admin` redirects to the default section.
@@ -143,159 +128,6 @@
       settingsError = 'Could not update the setting. Please try again.';
     } finally {
       togglingRegistrations = false;
-    }
-  }
-
-  // ── URL filters ─────────────────────────────────────────────────────────────
-  let rules = $state<FilterRule[]>([]);
-  let rulesLoading = $state(true);
-  let rulesError = $state<string | null>(null);
-
-  let newPattern = $state('');
-  let newReason = $state<number>(REASON_OPTIONS[0].code);
-  let newDescription = $state('');
-  let creating = $state(false);
-  let createError = $state<string | null>(null);
-
-  let editingRuleId = $state<number | null>(null);
-  let editPattern = $state('');
-  let editReason = $state<number>(REASON_OPTIONS[0].code);
-  let editDescription = $state('');
-  let editActive = $state(true);
-  let savingRule = $state(false);
-  let ruleRowError = $state<Record<number, string>>({});
-
-  let testUrl = $state('');
-  let testing = $state(false);
-  let testNotice = $state<FilterTestNotice | null>(null);
-  let testError = $state<string | null>(null);
-
-  async function loadRules() {
-    rulesLoading = true;
-    rulesError = null;
-    try {
-      rules = (await listFilterRules()).rules;
-    } catch (err) {
-      if (handleAuthError(err)) return;
-      rulesError = 'Could not load filter rules. Please try again.';
-    } finally {
-      rulesLoading = false;
-    }
-  }
-
-  async function handleCreateRule(e: SubmitEvent) {
-    e.preventDefault();
-    createError = null;
-    if (newPattern.trim() === '') {
-      createError = 'A pattern is required.';
-      return;
-    }
-    creating = true;
-    try {
-      await createFilterRule({
-        pattern: newPattern.trim(),
-        reason_code: newReason,
-        description: newDescription.trim(),
-      });
-      newPattern = '';
-      newDescription = '';
-      newReason = REASON_OPTIONS[0].code;
-      await loadRules();
-    } catch (err) {
-      if (handleAuthError(err)) return;
-      if (err instanceof ApiError && err.status === 400) {
-        createError = err.message || 'The pattern must be a valid regular expression.';
-        return;
-      }
-      createError = 'Could not create the rule. Please try again.';
-    } finally {
-      creating = false;
-    }
-  }
-
-  function startEditRule(rule: FilterRule) {
-    editingRuleId = rule.id;
-    editPattern = rule.pattern;
-    editReason = rule.reason_code;
-    editDescription = rule.description;
-    editActive = rule.active;
-    clearRuleRowError(rule.id);
-  }
-
-  function cancelEditRule() {
-    editingRuleId = null;
-  }
-
-  async function saveEditRule(rule: FilterRule) {
-    if (editPattern.trim() === '') {
-      ruleRowError = { ...ruleRowError, [rule.id]: 'A pattern is required.' };
-      return;
-    }
-    savingRule = true;
-    clearRuleRowError(rule.id);
-    try {
-      await updateFilterRule(rule.id, {
-        pattern: editPattern.trim(),
-        reason_code: editReason,
-        description: editDescription.trim(),
-        active: editActive,
-      });
-      editingRuleId = null;
-      await loadRules();
-    } catch (err) {
-      if (handleAuthError(err)) return;
-      const msg =
-        err instanceof ApiError && err.status === 400
-          ? err.message || 'The pattern must be a valid regular expression.'
-          : 'Could not update the rule. Please try again.';
-      ruleRowError = { ...ruleRowError, [rule.id]: msg };
-    } finally {
-      savingRule = false;
-    }
-  }
-
-  // #0160: Delete asks first via ConfirmDialog; confirming runs performDeleteRule.
-  let deleteRuleTarget = $state<FilterRule | null>(null);
-
-  function handleDeleteRule(rule: FilterRule) {
-    deleteRuleTarget = rule;
-  }
-
-  async function performDeleteRule(rule: FilterRule) {
-    clearRuleRowError(rule.id);
-    try {
-      await deleteFilterRule(rule.id);
-      await loadRules();
-    } catch (err) {
-      if (handleAuthError(err)) return;
-      throw new Error('Could not delete the rule. Please try again.');
-    }
-  }
-
-  function clearRuleRowError(id: number) {
-    if (id in ruleRowError) {
-      const { [id]: _removed, ...rest } = ruleRowError;
-      ruleRowError = rest;
-    }
-  }
-
-  async function handleTest(e: SubmitEvent) {
-    e.preventDefault();
-    testError = null;
-    testNotice = null;
-    if (testUrl.trim() === '') {
-      testError = 'Enter a URL to test.';
-      return;
-    }
-    testing = true;
-    try {
-      const result = await testFilterRule(testUrl.trim());
-      testNotice = filterTestNotice(result);
-    } catch (err) {
-      if (handleAuthError(err)) return;
-      testError = 'Could not run the test. Please try again.';
-    } finally {
-      testing = false;
     }
   }
 
@@ -389,60 +221,6 @@
     }
   }
 
-  // ── Audit log ───────────────────────────────────────────────────────────────
-  const AUDIT_PER_PAGE = 50;
-  let auditEntries = $state<AuditEntry[]>([]);
-  let auditTotal = $state(0);
-  let auditPage = $state(1);
-  let auditLoading = $state(true);
-  let auditError = $state<string | null>(null);
-  let auditUserIdRaw = $state('');
-  let auditUserIdFilter = $state<number | null>(null);
-  let auditFilterError = $state<string | null>(null);
-  const auditPaging = $derived(pageInfo(auditTotal, auditPage, AUDIT_PER_PAGE));
-
-  async function loadAudit() {
-    auditLoading = true;
-    auditError = null;
-    try {
-      const res = await listAudit(auditPage, AUDIT_PER_PAGE, auditUserIdFilter ?? undefined);
-      auditEntries = res.audit_log;
-      auditTotal = res.total;
-      auditPage = res.page;
-    } catch (err) {
-      if (handleAuthError(err)) return;
-      auditError = 'Could not load the audit log. Please try again.';
-    } finally {
-      auditLoading = false;
-    }
-  }
-
-  function applyAuditFilter(e: SubmitEvent) {
-    e.preventDefault();
-    const parsed = parseUserIdFilter(auditUserIdRaw);
-    if ('error' in parsed) {
-      auditFilterError = parsed.error;
-      return;
-    }
-    auditFilterError = null;
-    auditUserIdFilter = parsed.userId;
-    auditPage = 1;
-    void loadAudit();
-  }
-
-  function clearAuditFilter() {
-    auditUserIdRaw = '';
-    auditUserIdFilter = null;
-    auditFilterError = null;
-    auditPage = 1;
-    void loadAudit();
-  }
-
-  function auditGoTo(page: number) {
-    auditPage = page;
-    void loadAudit();
-  }
-
   // ── Shared ──────────────────────────────────────────────────────────────────
   function handleAuthError(err: unknown): boolean {
     if (err instanceof ApiError && err.status === 401) {
@@ -462,21 +240,9 @@
     }
     if (action.kind === 'not-found') return;
     void loadSettings();
-    void loadRules();
     void loadUsers();
-    void loadAudit();
   });
 </script>
-
-<ConfirmDialog
-  open={deleteRuleTarget !== null}
-  title="Delete filter rule?"
-  message={`The rule "${deleteRuleTarget?.pattern ?? ''}" will stop blocking URLs. This cannot be undone.`}
-  confirmLabel="Delete rule"
-  busyLabel="Deleting…"
-  oncancel={() => (deleteRuleTarget = null)}
-  onconfirm={() => (deleteRuleTarget ? performDeleteRule(deleteRuleTarget) : undefined)}
-/>
 
 {#if action.kind === 'not-found' && $currentUser?.is_admin}
   <NotFound />
@@ -586,150 +352,7 @@
     {/if}
 
     {#if section === 'filters'}
-      <Panel title="Test a URL">
-        <p class="text-muted intro">
-          Check whether a destination URL would be blocked by the active rules. This is a dry run —
-          nothing is created.
-        </p>
-        <form class="inline-form" onsubmit={handleTest}>
-          <label class="sr-only" for="test-url">URL to test</label>
-          <input
-            id="test-url"
-            type="text"
-            placeholder="https://example.com/path"
-            bind:value={testUrl}
-            disabled={testing}
-            style="flex: 1; min-width: 12rem; width: auto;"
-          />
-          <Button type="submit" variant="primary" disabled={testing}>
-            {testing ? 'Testing…' : 'Test'}
-          </Button>
-        </form>
-        {#if testError}
-          <p class="text-error" role="alert">{testError}</p>
-        {:else if testNotice}
-          <p class={testNotice.kind === 'match' ? 'text-error' : 'text-notice'} role="status">
-            {testNotice.message}
-          </p>
-        {/if}
-      </Panel>
-
-      <Panel title="Add a rule">
-        <form onsubmit={handleCreateRule}>
-          <div class="field">
-            <label for="new-pattern">Pattern (Go regular expression)</label>
-            <input
-              id="new-pattern"
-              type="text"
-              placeholder="(?i)malware\\.example\\.com"
-              bind:value={newPattern}
-              disabled={creating}
-            />
-          </div>
-          <div class="field">
-            <label for="new-reason">Reason</label>
-            <select id="new-reason" bind:value={newReason} disabled={creating}>
-              {#each REASON_OPTIONS as opt (opt.code)}
-                <option value={opt.code}>{opt.label}</option>
-              {/each}
-            </select>
-          </div>
-          <div class="field">
-            <label for="new-description">Description</label>
-            <input
-              id="new-description"
-              type="text"
-              placeholder="Known malware host"
-              bind:value={newDescription}
-              disabled={creating}
-            />
-          </div>
-          <Button type="submit" variant="primary" disabled={creating}>
-            {creating ? 'Adding…' : 'Add rule'}
-          </Button>
-        </form>
-        {#if createError}
-          <p class="text-error" role="alert">{createError}</p>
-        {/if}
-      </Panel>
-
-      <Panel title="Filter rules" noPadding={rules.length > 0 && !rulesLoading && !rulesError}>
-        {#if rulesLoading}
-          <p class="text-muted" role="status">Loading rules…</p>
-        {:else if rulesError}
-          <p class="text-error" role="alert">{rulesError}</p>
-          <Button variant="primary" onclick={loadRules}>Retry</Button>
-        {:else if rules.length === 0}
-          <p class="text-muted">No filter rules defined.</p>
-        {:else}
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Pattern</th>
-                  <th>Reason</th>
-                  <th>Description</th>
-                  <th>Active</th>
-                  <th class="actions-col">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each rules as rule (rule.id)}
-                  <tr>
-                    {#if editingRuleId === rule.id}
-                      <td>
-                        <input type="text" bind:value={editPattern} disabled={savingRule} />
-                      </td>
-                      <td>
-                        <select bind:value={editReason} disabled={savingRule}>
-                          {#each REASON_OPTIONS as opt (opt.code)}
-                            <option value={opt.code}>{opt.label}</option>
-                          {/each}
-                        </select>
-                      </td>
-                      <td>
-                        <input type="text" bind:value={editDescription} disabled={savingRule} />
-                      </td>
-                      <td>
-                        <label class="inline-check">
-                          <input type="checkbox" bind:checked={editActive} disabled={savingRule} />
-                          Active
-                        </label>
-                      </td>
-                      <td class="actions-col">
-                        <div class="row">
-                          <Button variant="primary" disabled={savingRule} onclick={() => saveEditRule(rule)}>
-                            {savingRule ? 'Saving…' : 'Save'}
-                          </Button>
-                          <Button disabled={savingRule} onclick={cancelEditRule}>Cancel</Button>
-                        </div>
-                      </td>
-                    {:else}
-                      <td class="mono">{rule.pattern}</td>
-                      <td>{rule.reason_label || reasonLabel(rule.reason_code)}</td>
-                      <td>{rule.description || '—'}</td>
-                      <td>{rule.active ? 'Yes' : 'No'}</td>
-                      <td class="actions-col">
-                        <div class="row">
-                          <Button onclick={() => startEditRule(rule)}>Edit</Button>
-                          <Button variant="danger" onclick={() => handleDeleteRule(rule)}>Delete</Button>
-                        </div>
-                      </td>
-                    {/if}
-                  </tr>
-                  {#if ruleRowError[rule.id]}
-                    <tr>
-                      <td colspan="5">
-                        <p class="text-error" role="alert">{ruleRowError[rule.id]}</p>
-                      </td>
-                    </tr>
-                  {/if}
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        {/if}
-      </Panel>
+      <AdminFilters onAuthError={handleAuthError} />
     {/if}
 
     {#if section === 'users'}
@@ -858,77 +481,7 @@
     {/if}
 
     {#if section === 'audit'}
-      <Panel title="Audit log">
-        <form class="inline-form" onsubmit={applyAuditFilter} style="margin-bottom: var(--space-3);">
-          <label for="audit-user" style="white-space: nowrap;">Filter by user id</label>
-          <input
-            id="audit-user"
-            type="text"
-            inputmode="numeric"
-            placeholder="e.g. 5"
-            bind:value={auditUserIdRaw}
-            style="width: 8rem;"
-          />
-          <Button type="submit" variant="primary">Apply</Button>
-          {#if auditUserIdFilter !== null}
-            <Button onclick={clearAuditFilter}>Clear</Button>
-          {/if}
-        </form>
-        {#if auditFilterError}
-          <p class="text-error" role="alert">{auditFilterError}</p>
-        {/if}
-
-        {#if auditLoading}
-          <p class="text-muted" role="status">Loading audit log…</p>
-        {:else if auditError}
-          <p class="text-error" role="alert">{auditError}</p>
-          <Button variant="primary" onclick={loadAudit}>Retry</Button>
-        {:else if auditEntries.length === 0}
-          <p class="text-muted">No audit entries.</p>
-        {:else}
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>When</th>
-                  <th>Action</th>
-                  <th>Actor</th>
-                  <th>Target</th>
-                  <th>Metadata</th>
-                  <th>IP</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each auditEntries as entry (entry.id)}
-                  <tr>
-                    <td>{formatDateTime(entry.created_at)}</td>
-                    <td class="mono">{entry.action}</td>
-                    <td>{actorLabel(entry)}</td>
-                    <td>{targetLabel(entry)}</td>
-                    <td class="meta-cell mono">{formatMetadata(entry.metadata)}</td>
-                    <td>{entry.ip_address ?? '—'}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-
-          <div class="pager">
-            <Button
-              disabled={!auditPaging.hasPrev}
-              onclick={() => auditGoTo(auditPaging.page - 1)}
-            >Previous</Button>
-            <span class="text-muted">
-              {auditPaging.firstItem}–{auditPaging.lastItem} of {auditPaging.total} · page
-              {auditPaging.page} of {auditPaging.totalPages}
-            </span>
-            <Button
-              disabled={!auditPaging.hasNext}
-              onclick={() => auditGoTo(auditPaging.page + 1)}
-            >Next</Button>
-          </div>
-        {/if}
-      </Panel>
+      <AdminAudit {users} onAuthError={handleAuthError} />
     {/if}
     </div>
     </div>
@@ -993,18 +546,6 @@
   }
 
   @media (max-width: 480px) {
-    /* Pager: allow center + wrap */
-    .pager {
-      flex-wrap: wrap;
-      justify-content: center;
-    }
-    /* Audit filter inline-form label + input on narrow width */
-    .inline-form {
-      gap: var(--space-2);
-    }
-  }
-  .intro {
-    margin: 0 0 var(--space-3);
   }
   .setting-row {
     display: flex;
@@ -1058,44 +599,8 @@
     opacity: 0.5;
     cursor: default;
   }
-  .inline-form {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
   .actions-col {
     white-space: nowrap;
-  }
-  .mono {
-    font-family: var(--font-mono);
-    font-size: var(--fs-sm);
-    overflow-wrap: anywhere;
-  }
-  .meta-cell {
-    max-width: 280px;
-    overflow-wrap: anywhere;
-  }
-  .inline-check {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    font-size: var(--fs-sm);
-    font-weight: normal;
-    color: var(--text);
-    cursor: pointer;
-  }
-  .inline-check input {
-    width: auto;
-    margin: 0;
-  }
-  .pager {
-    display: flex;
-    align-items: center;
-    gap: var(--space-4);
-    margin-top: var(--space-3);
-    padding-top: var(--space-3);
-    border-top: var(--border-w) solid var(--border);
   }
   .modal-backdrop {
     position: fixed;
@@ -1122,9 +627,4 @@
     overflow-wrap: anywhere;
   }
 
-  /* Inputs inside table cells need to override the global 100% width */
-  tbody td input[type="text"],
-  tbody td select {
-    width: 100%;
-  }
 </style>

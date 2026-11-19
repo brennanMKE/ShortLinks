@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -125,6 +126,8 @@ func New(adminEmail string) *Store {
 		},
 	}
 
+	s.seedAuditLog(now)
+
 	// Seed the registrations_enabled setting.
 	s.settings = []auth.Setting{
 		{Key: "registrations_enabled", Value: "true"},
@@ -133,6 +136,49 @@ func New(adminEmail string) *Store {
 
 	logger.Info("devstore: seeded in-memory store", "admin_email", adminEmail, "links", len(s.links))
 	return s
+}
+
+// seedAuditLog adds two more accounts and a spread of audit rows (only for
+// entities that exist in the seed: users 1-3 and links 1-2) so the Admin
+// audit log (filters, relative times, metadata) has something to show in dev
+// mode, where the audit writer is otherwise nil.
+func (s *Store) seedAuditLog(now time.Time) {
+	s.users = append(s.users,
+		auth.ManagedUser{ID: 2, Email: "sam@example.com", Active: true, CreatedAt: now.Add(-30 * 24 * time.Hour)},
+		auth.ManagedUser{ID: 3, Email: "riley@example.com", Active: true, CreatedAt: now.Add(-9 * 24 * time.Hour)},
+	)
+	i64 := func(v int64) *int64 { return &v }
+	str := func(v string) *string { return &v }
+	meta := func(v string) json.RawMessage { return json.RawMessage(v) }
+	rows := []struct {
+		ago      time.Duration
+		actor    *int64
+		user     *int64
+		action   string
+		tType    *string
+		tID      *int64
+		metadata json.RawMessage
+	}{
+		{26 * 24 * time.Hour, i64(2), i64(2), audit.ActionAccountLogin, nil, nil, meta(`{"device":"MacBook"}`)},
+		{20 * 24 * time.Hour, i64(1), i64(1), audit.ActionLinkCreated, str(audit.TargetLink), i64(1), meta(`{"key":"wiki","destination_url":"https://www.wikipedia.org"}`)},
+		{6 * 24 * time.Hour, i64(3), i64(3), audit.ActionAccountRegistered, str(audit.TargetUser), i64(3), nil},
+		{4 * 24 * time.Hour, i64(1), i64(1), audit.ActionLinkReactivated, str(audit.TargetLink), i64(2), meta(`{"key":"gh"}`)},
+		{3 * 24 * time.Hour, i64(1), i64(1), audit.ActionSettingsUpdated, str(audit.TargetSettings), nil, meta(`{"key":"registrations_enabled","new_value":"true"}`)},
+		{30 * time.Hour, i64(1), i64(1), audit.ActionLinkCreated, str(audit.TargetLink), i64(2), meta(`{"key":"gh","destination_url":"https://github.com","duplicate":false}`)},
+		{5 * time.Hour, i64(1), i64(3), audit.ActionAccountDeactivated, str(audit.TargetUser), i64(3), meta(`{"reason":"spam","note":"bulk links"}`)},
+		{3 * time.Hour, i64(2), i64(2), audit.ActionAccountLogout, nil, nil, nil},
+		{2 * time.Hour, i64(1), i64(3), audit.ActionAccountReactivated, str(audit.TargetUser), i64(3), nil},
+		{40 * time.Minute, i64(1), i64(1), audit.ActionAccountLogin, nil, nil, meta(`{"device":"iPhone"}`)},
+		{5 * time.Minute, nil, nil, audit.ActionAccountRegistrationStarted, nil, nil, meta(`{"email":"new@example.com"}`)},
+	}
+	for _, r := range rows {
+		s.audit = append(s.audit, audit.Record{
+			ID: s.nextAuditID, ActorID: r.actor, UserID: r.user, Action: r.action,
+			TargetType: r.tType, TargetID: r.tID, Metadata: r.metadata,
+			CreatedAt: now.Add(-r.ago),
+		})
+		s.nextAuditID++
+	}
 }
 
 // ── Pinger ─────────────────────────────────────────────────────────────────
@@ -327,15 +373,44 @@ func (s *Store) ReactivateUser(_ context.Context, id int64, auditor *audit.Logge
 
 // ── auditReader (handlers.AdminAuditHandler) ────────────────────────────────
 
-// ListAuditLog returns audit records newest-first with optional user filter.
-func (s *Store) ListAuditLog(_ context.Context, userID *int64, limit, offset int) ([]audit.Record, int64, error) {
+// ListAuditLog returns audit records newest-first, applying the same filter
+// semantics as the Postgres reader (audit.Filter) and resolving emails from the
+// in-memory users.
+func (s *Store) ListAuditLog(_ context.Context, f audit.Filter, limit, offset int) ([]audit.Record, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	emailOf := func(id *int64) *string {
+		if id == nil {
+			return nil
+		}
+		for _, u := range s.users {
+			if u.ID == *id {
+				e := u.Email
+				return &e
+			}
+		}
+		return nil
+	}
+	same := func(p *string) bool { return p != nil && strings.EqualFold(*p, f.Email) }
 
 	var filtered []audit.Record
 	for i := len(s.audit) - 1; i >= 0; i-- {
 		rec := s.audit[i]
-		if userID != nil && (rec.UserID == nil || *rec.UserID != *userID) {
+		rec.ActorEmail, rec.UserEmail = emailOf(rec.ActorID), emailOf(rec.UserID)
+		if f.UserID != nil && (rec.UserID == nil || *rec.UserID != *f.UserID) {
+			continue
+		}
+		if f.Email != "" && !same(rec.ActorEmail) && !same(rec.UserEmail) {
+			continue
+		}
+		if len(f.Actions) > 0 && !slices.Contains(f.Actions, rec.Action) {
+			continue
+		}
+		if f.From != nil && rec.CreatedAt.Before(*f.From) {
+			continue
+		}
+		if f.To != nil && !rec.CreatedAt.Before(*f.To) {
 			continue
 		}
 		filtered = append(filtered, rec)
@@ -1591,7 +1666,7 @@ var _ interface {
 } = (*Store)(nil)
 
 var _ interface {
-	ListAuditLog(ctx context.Context, userID *int64, limit, offset int) ([]audit.Record, int64, error)
+	ListAuditLog(ctx context.Context, f audit.Filter, limit, offset int) ([]audit.Record, int64, error)
 } = (*Store)(nil)
 
 var _ interface {
