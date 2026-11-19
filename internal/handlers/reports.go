@@ -27,11 +27,16 @@ type reportRunner interface {
 // Both routes are GET, so read-only API tokens may use them.
 type ReportsHandler struct {
 	svc reportRunner
+	// service is the concrete service, for the MCP report tools (#0150).
+	service *reports.Service
 }
+
+// Service returns the underlying report service (nil for a zero handler).
+func (h *ReportsHandler) Service() *reports.Service { return h.service }
 
 // NewReportsHandler wraps a reports.Service.
 func NewReportsHandler(svc *reports.Service) *ReportsHandler {
-	return &ReportsHandler{svc: svc}
+	return &ReportsHandler{svc: svc, service: svc}
 }
 
 // List handles GET /api/reports.

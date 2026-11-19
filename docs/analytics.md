@@ -82,11 +82,12 @@ a one-way hash, and click detail expires.
   (rotate it with logrotate), and `audit_log` / `api_tokens.last_used_ip` hold
   the signed-in operator's IP, not visitors'.
 
-Four indexes support analytics queries:
+Five indexes support analytics queries:
 
 - `idx_clicks_link_id` on `(link_id)` — aggregate counts per link.
 - `idx_clicks_clicked_at` on `(clicked_at)` — time-range queries.
 - `idx_clicks_campaign_id` on `(campaign_id) WHERE campaign_id IS NOT NULL` — aggregate counts per campaign.
+- `idx_clicks_link_time` on `(link_id, clicked_at)` — per-link time probes (idle-links, last click; migration `000019`, [#0150](../issues/0150.md)).
 - `idx_clicks_campaign_time` on `(campaign_id, clicked_at) WHERE campaign_id IS NOT NULL` — campaign-scoped time-range queries (backs [#0102](../issues/0102.md)'s campaign timeseries).
 
 ### UTM fallback precedence (#0100)

@@ -559,8 +559,12 @@ func buildMux(
 	// read-only token's session, and its tools call back into this mux (the
 	// /api routes above, through requireAPI again) so a write by a read-only
 	// token is refused twice. Mounted in dev mode too: the dev store serves
-	// the same /api routes, though the report routes (#0150) do not exist there.
-	mcpH := mcpserver.New(mcpserver.Options{BaseURL: cfg.BaseURL})
+	// the same /api routes, though the report routes and tools do not exist there.
+	mcpOpts := mcpserver.Options{BaseURL: cfg.BaseURL, DefaultTimezone: cfg.DefaultTimezone}
+	if reportsH != nil && reportsH.Service() != nil {
+		mcpOpts.Reports = reportsH.Service()
+	}
+	mcpH := mcpserver.New(mcpOpts)
 	// Method-qualified, because a bare "/mcp" conflicts with the "GET /" SPA
 	// catch-all. GET and DELETE are routed so the SDK answers 405 (stateless
 	// mode has no stream or session) instead of the SPA returning index.html.

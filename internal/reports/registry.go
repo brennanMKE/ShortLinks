@@ -307,6 +307,12 @@ func (s *Service) Run(ctx context.Context, userID int64, name string, raw url.Va
 		return nil, fmt.Errorf("reports: begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// The default work_mem (4MB) makes the sorts and hash aggregates behind
+	// DISTINCT and GROUPING SETS spill to disk on a six-figure click window.
+	// SET LOCAL ends with the transaction and is allowed in a read-only one.
+	if _, err := tx.Exec(ctx, "SET LOCAL work_mem = '32MB'"); err != nil {
+		return nil, fmt.Errorf("reports: set work_mem: %w", err)
+	}
 
 	var earliest *time.Time
 	if p.From == "" && p.Range == RangeAll {

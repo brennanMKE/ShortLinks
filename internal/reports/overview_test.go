@@ -3,6 +3,7 @@ package reports
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"reflect"
@@ -592,5 +593,117 @@ func TestService_FutureFromRejected(t *testing.T) {
 	env := f.overview(u, "from=2026-11-10&to=2027-01-01")
 	if env.Window.To != "2026-11-18" || !env.Window.PartialLastDay {
 		t.Errorf("future to not clamped: %+v", env.Window)
+	}
+}
+
+// TestOverview_FiltersWithComparison checks the filtered figures that the
+// one-pass overview derives from flags rather than separate queries. The
+// expected values were worked out by hand from the seeded rows, applying the
+// rule that a facet ignores its own dimension's filter, the campaign list
+// ignores the campaign filter, and everything else applies every filter.
+func TestOverview_FiltersWithComparison(t *testing.T) {
+	f := newFixture(t)
+	u := f.user("eq@example.com")
+	l1, l2, l3 := f.link(u, "l1", ""), f.link(u, "l2", ""), f.link(u, "l3", "")
+	spring := f.campaign(u, "Spring", "spring")
+
+	// Current window (7d: Nov 12 - Nov 18).
+	f.clicks(4, click{link: l1, campaign: spring, at: daysAgo(1, 10), source: "x"})
+	f.clicks(2, click{link: l1, campaign: spring, at: daysAgo(1, 10), source: "x", bot: true})
+	f.clicks(3, click{link: l2, at: daysAgo(2, 10), source: "y"})
+	f.clicks(1, click{link: l2, at: daysAgo(2, 11), source: "y", bot: true})
+	f.clicks(1, click{link: l1, campaign: spring, at: daysAgo(3, 9), source: "y"})
+	f.clicks(2, click{link: l3, at: daysAgo(3, 9), source: "z"})
+	// Previous window (Nov 5 - Nov 11).
+	f.clicks(3, click{link: l1, campaign: spring, at: daysAgo(8, 10), source: "x"})
+	f.clicks(2, click{link: l2, at: daysAgo(9, 10), source: "y"})
+	f.clicks(1, click{link: l2, at: daysAgo(9, 10), source: "y", bot: true})
+	f.clicks(5, click{link: l3, at: daysAgo(10, 10), source: "z"})
+
+	day := func(ds []DayCount, date string) int64 {
+		for _, d := range ds {
+			if d.Date == date {
+				return d.Clicks
+			}
+		}
+		t.Fatalf("no day %s in %v", date, ds)
+		return 0
+	}
+	facet := func(fs []FacetValue) string {
+		out := ""
+		for _, v := range fs {
+			out += fmt.Sprintf("%s:%d ", v.Value, v.Clicks)
+		}
+		return out
+	}
+	camps := func(cs []CampaignRow) string {
+		out := ""
+		for _, c := range cs {
+			s := "none"
+			if c.Slug != nil {
+				s = *c.Slug
+			}
+			out += fmt.Sprintf("%s:%d ", s, c.Clicks)
+		}
+		return out
+	}
+	type want struct {
+		clicks, bots, linksClicked, prev int64
+		sources, campaigns               string
+	}
+	for _, c := range []struct {
+		query string
+		want  want
+	}{
+		// 4+3+1+2 humans; bots 2+1; l1, l2, l3 clicked; previous 3+2+5.
+		{"range=7d", want{10, 3, 3, 10, "x:4 y:4 z:2 ", "spring:5 none:5 "}},
+		// source=y: humans 3+1; the one source-y bot; l2 and l1; previous 2.
+		// The source facet ignores source=y; campaigns apply it.
+		{"range=7d&source=y", want{4, 1, 2, 2, "x:4 y:4 z:2 ", "none:3 spring:1 "}},
+		// campaign=spring: humans 4+1; the two spring bots; l1 only; previous 3.
+		// Campaigns ignore the campaign filter, so "none" (3+2) is listed;
+		// the source facet applies it.
+		{"range=7d&campaign=spring", want{5, 2, 1, 3, "x:4 y:1 ", "spring:5 none:5 "}},
+		// Both: only the source-y spring click; no bots; previous (source x) 0.
+		{"range=7d&campaign=spring&source=y", want{1, 0, 1, 0, "x:4 y:1 ", "none:3 spring:1 "}},
+	} {
+		d := data(t, f.overview(u, c.query))
+		if d.Totals.Clicks != c.want.clicks || d.Totals.ExcludedBots != c.want.bots || d.Totals.LinksClicked != c.want.linksClicked {
+			t.Errorf("%q totals = %+v; want clicks %d, bots %d, links_clicked %d", c.query, d.Totals, c.want.clicks, c.want.bots, c.want.linksClicked)
+		}
+		if d.Previous == nil || d.Previous.Clicks != c.want.prev {
+			t.Errorf("%q previous = %+v; want %d", c.query, d.Previous, c.want.prev)
+		}
+		if got := facet(d.Facets.Source); got != c.want.sources {
+			t.Errorf("%q source facet = %q; want %q", c.query, got, c.want.sources)
+		}
+		if got := camps(d.Campaigns); got != c.want.campaigns {
+			t.Errorf("%q campaigns = %q; want %q", c.query, got, c.want.campaigns)
+		}
+	}
+
+	// previous_timeseries and the current series under a filter.
+	d := data(t, f.overview(u, "range=7d&source=y"))
+	if got := day(d.PreviousTimeseries, "2026-11-09"); got != 2 {
+		t.Errorf("source=y previous 11-09 = %d; want 2 (the bot is excluded)", got)
+	}
+	if got := day(d.PreviousTimeseries, "2026-11-08"); got != 0 {
+		t.Errorf("source=y previous 11-08 = %d; want 0 (that day's clicks are source x)", got)
+	}
+	if got, other := day(d.Timeseries, "2026-11-16"), day(d.Timeseries, "2026-11-17"); got != 3 || other != 0 {
+		t.Errorf("source=y current 11-16 = %d, 11-17 = %d; want 3, 0", got, other)
+	}
+	if d.BestDay == nil || d.BestDay.Date != "2026-11-16" || d.BestDay.Clicks != 3 {
+		t.Errorf("source=y best day = %+v; want 2026-11-16 with 3", d.BestDay)
+	}
+
+	// A tie at the limit boundary: x and y both have 4, so limit=1 keeps the
+	// one that sorts first, x; the campaign list is not limited.
+	d = data(t, f.overview(u, "range=7d&limit=1"))
+	if got := facet(d.Facets.Source); got != "x:4 " {
+		t.Errorf("limit=1 source facet = %q; want %q", got, "x:4 ")
+	}
+	if got := camps(d.Campaigns); got != "spring:5 none:5 " {
+		t.Errorf("limit=1 campaigns = %q; want both", got)
 	}
 }

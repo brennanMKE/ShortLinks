@@ -18,6 +18,13 @@ type Options struct {
 	// BaseURL is the instance's public base URL (config BASE_URL). Every
 	// link a tool returns carries a short_url built from it.
 	BaseURL string
+	// Reports runs the analytics reports for the report tools (#0150). Nil
+	// (dev mode, which has no clicks table) makes those tools answer with an
+	// error.
+	Reports ReportRunner
+	// DefaultTimezone is the instance's DEFAULT_TIMEZONE, advertised as the
+	// default of every report tool's tz input.
+	DefaultTimezone string
 	// Version is reported to clients as the server version.
 	Version string
 }
@@ -30,6 +37,8 @@ type Handler struct {
 	// guarded is stream behind Go's cross-origin protection (Go 1.25+).
 	guarded http.Handler
 	cache   *mcp.SchemaCache
+	// schemas caches each refined tool input schema, as JSON, by tool name.
+	schemas sync.Map
 
 	mu       sync.RWMutex
 	dispatch http.Handler

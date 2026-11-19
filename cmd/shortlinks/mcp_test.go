@@ -168,6 +168,14 @@ func TestMCPRealMux(t *testing.T) {
 	if cnt != 1 {
 		t.Errorf("audit rows via mcp = %d; want 1", cnt)
 	}
+	// A report tool runs on the real mux with the real service.
+	rep, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "get_overview", Arguments: map[string]any{"range": "7d"}})
+	if err != nil || rep.IsError {
+		t.Fatalf("get_overview: %v %+v", err, rep)
+	}
+	if len(rep.Content) != 2 || rep.StructuredContent == nil {
+		t.Errorf("get_overview content = %d blocks, structured = %v", len(rep.Content), rep.StructuredContent)
+	}
 	// A cookie-less, token-less request is refused by the real guard.
 	resp, err := http.Post(srv.URL+"/mcp", "application/json", strings.NewReader(`{}`))
 	if err != nil {

@@ -81,8 +81,14 @@ func sortBuckets(bs []bucket) {
 func sqlBuckets(ctx context.Context, req *Request, d string, w Window) ([]bucket, error) {
 	ds, _ := dimensionSQL(d)
 	sc := req.Params.ScopedQuery(req.UserID, w, ScopeOpts{Joins: ds.joins})
-	rows, err := req.Q.Query(ctx,
-		`SELECT `+ds.value+`, `+ds.label+`, count(*)`+sc.SQL+` GROUP BY 1, 2`, sc.Args...)
+	q := `SELECT ` + ds.value + `, ` + ds.label + `, count(*)` + sc.SQL + ` GROUP BY 1, 2`
+	if d == "referer" {
+		// The host regexp is the expensive part; count per raw referer first
+		// and run it once per distinct value rather than once per click.
+		q = `SELECT ` + ds.value + `, ` + ds.label + `, sum(n)::bigint FROM (SELECT k.referer AS referer, count(*) AS n` +
+			sc.SQL + ` GROUP BY k.referer) k GROUP BY 1, 2`
+	}
+	rows, err := req.Q.Query(ctx, q, sc.Args...)
 	if err != nil {
 		return nil, fmt.Errorf("reports: breakdown %s: %w", d, err)
 	}

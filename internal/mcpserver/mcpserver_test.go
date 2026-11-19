@@ -22,6 +22,7 @@ import (
 	"github.com/brennanMKE/ShortLinks/internal/idempotency"
 	"github.com/brennanMKE/ShortLinks/internal/links"
 	"github.com/brennanMKE/ShortLinks/internal/middleware"
+	"github.com/brennanMKE/ShortLinks/internal/reports"
 )
 
 const testBase = "https://go.example.test"
@@ -84,7 +85,12 @@ func newEnv(t *testing.T) *env {
 	mux.Handle("DELETE /api/campaigns/{slug}/links/{key}", requireAPI(http.HandlerFunc(campH.UnassignLink)))
 	mux.Handle("POST /api/campaigns/{slug}/links/batch", requireAPI(idem(http.HandlerFunc(campH.BatchCreateLinks))))
 	mux.Handle("GET /api/me", requireAPI(http.HandlerFunc(meH.Me)))
-	h := New(Options{BaseURL: testBase, Version: "test"})
+	repSvc := reports.NewService(pool, "America/Los_Angeles")
+	repSvc.BaseURL = testBase
+	repH := handlers.NewReportsHandler(repSvc)
+	mux.Handle("GET /api/reports", requireAPI(http.HandlerFunc(repH.List)))
+	mux.Handle("GET /api/reports/{name}", requireAPI(http.HandlerFunc(repH.Get)))
+	h := New(Options{BaseURL: testBase, Version: "test", Reports: repSvc, DefaultTimezone: "America/Los_Angeles"})
 	mux.Handle(middleware.MCPPath, requireAPI(h))
 	h.SetDispatcher(mux)
 
@@ -205,6 +211,8 @@ var allTools = []string{
 	"whoami", "list_links", "get_link", "get_link_qr", "create_link", "update_link", "deactivate_link", "reactivate_link",
 	"list_campaigns", "get_campaign", "list_campaign_links", "create_campaign", "update_campaign", "delete_campaign",
 	"batch_create_campaign_links", "assign_links_to_campaign", "remove_link_from_campaign",
+	"list_reports", "get_overview", "get_top_content", "get_top_links", "get_breakdown", "get_timeseries",
+	"get_movers", "get_idle_links", "compare_campaigns", "get_campaign_performance", "get_link_performance",
 }
 
 func TestRoundTrip_InitializeListAndEveryTool(t *testing.T) {

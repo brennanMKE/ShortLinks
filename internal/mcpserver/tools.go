@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/brennanMKE/ShortLinks/internal/qr"
@@ -35,9 +36,13 @@ type Spec struct {
 	Idempotent  bool
 	// Routes lists the REST routes the tool covers, as registered on the mux
 	// ("GET /api/links/{key}"). The parity test requires every /api route to
-	// appear here or on Excluded. A tool that does not call REST (the report
-	// tools, #0150) leaves it empty.
+	// appear here or on Excluded. A report tool, which reads internal/reports
+	// directly, names the report route it replaces.
 	Routes []string
+	// Refine, when set, adjusts the input schema inferred from the In struct
+	// (jsonschema struct tags cannot express enums or formats). It receives
+	// the schema's properties and must only modify them.
+	Refine func(props map[string]*jsonschema.Schema)
 }
 
 // ToolInfo is a registered tool as the parity test and docs see it.
@@ -69,6 +74,8 @@ var registrars = []Registrar{
 	registerIdentityTools,
 	registerLinkTools,
 	registerCampaignTools,
+	registerReportTools,
+	registerPrompts,
 }
 
 // AddTool registers a typed tool. In is the input struct; its json tags name
@@ -90,6 +97,28 @@ func AddTool[In any](b *Builder, s Spec, fn func(ctx context.Context, c *Caller,
 			IdempotentHint:  s.Idempotent,
 			OpenWorldHint:   &open,
 		},
+	}
+	if s.Refine != nil {
+		// Built once per tool and decoded fresh per request, because the SDK
+		// resolves the schema it is given and a shared one would race.
+		raw, ok := b.h.schemas.Load(s.Name)
+		if !ok {
+			sch, err := jsonschema.For[In](nil)
+			if err != nil {
+				panic("mcpserver: schema for " + s.Name + ": " + err.Error())
+			}
+			s.Refine(sch.Properties)
+			enc, err := json.Marshal(sch)
+			if err != nil {
+				panic("mcpserver: schema for " + s.Name + ": " + err.Error())
+			}
+			raw, _ = b.h.schemas.LoadOrStore(s.Name, enc)
+		}
+		sch := &jsonschema.Schema{}
+		if err := json.Unmarshal(raw.([]byte), sch); err != nil {
+			panic("mcpserver: schema for " + s.Name + ": " + err.Error())
+		}
+		t.InputSchema = sch
 	}
 	b.infos = append(b.infos, ToolInfo{Name: s.Name, Write: s.Write, Routes: s.Routes})
 	if s.Write && b.Caller.ReadOnly {
@@ -124,7 +153,8 @@ func (h *Handler) buildServer(c *Caller) (*mcp.Server, []ToolInfo) {
 			SchemaCache: h.cache,
 			Instructions: "ShortLinks creates and manages short links and campaigns. " +
 				"Short URLs in results are complete and ready to share. " +
-				"Pass idempotency_key on create tools so a retry after a timeout cannot make a duplicate.",
+				"Pass idempotency_key on create tools so a retry after a timeout cannot make a duplicate. " +
+				"The get_* report tools answer questions about clicks; start with list_reports to see what each one covers.",
 		})
 	b := &Builder{Caller: c, h: h, server: srv, hidden: map[string]bool{}}
 	for _, reg := range registrars {

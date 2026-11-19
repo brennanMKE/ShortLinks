@@ -40,11 +40,33 @@ answer `405`, which clients treat as "no server-to-client stream".
 | `delete_campaign` | `DELETE /api/campaigns/{slug}` | write, destructive |
 | `batch_create_campaign_links` | `POST /api/campaigns/{slug}/links/batch` | write |
 | `assign_links_to_campaign`, `remove_link_from_campaign` | the campaign link routes | write, idempotent |
+| `list_reports` | `GET /api/reports` | read-only |
+| `get_overview`, `get_top_content`, `get_top_links`, `get_breakdown`, `get_timeseries`, `get_movers`, `get_idle_links`, `compare_campaigns`, `get_campaign_performance`, `get_link_performance` | `GET /api/reports/{name}`, but they call `internal/reports` directly | read-only |
+
+## Report tools and prompts
+
+Each report is a typed tool. Shared inputs: `range` (enum), `from` / `to`
+(dates), `tz` (defaults to the instance `DEFAULT_TIMEZONE`), `compare`,
+`campaign`, `source` / `medium` / `utm_campaign` / `content` / `term` /
+`placement` (string arrays), `include_bots`, `limit`; plus the report's own
+(`sort`, `dimension`, `granularity`, `split_by`, `unit`, `columns`, `slug`,
+`key`, ...), as enums where the report defines them. The text content is the
+report's `highlights` followed by the JSON; the structured content is the full
+envelope. A bad parameter is a tool error carrying the field and code
+(`invalid_tz`, field `tz`); an unknown campaign or link carries `campaign_not_found`
+or `link_not_found`.
+
+A test fails if a report is registered in `reports.NewDefaultRegistry()` without
+a tool (`reportTools` in `tools_reports.go`).
+
+Prompts (`prompts.go`, available to read-only tokens too): `weekly_summary(tz?)`,
+`campaign_report(slug)` and `whats_working(range?)`. They return one message
+telling the model which tools to call and what to write.
 
 Routes with no tool are listed, each with its reason, in `mcpserver.Excluded`
 (`internal/mcpserver/parity.go`): the SVG QR code, the QR zip, the CSV export,
-the SSE stream, campaign `/stats`, `DELETE /api/links/{key}`, the report routes
-(tools come with #0150) and the public home info. The parity test keeps that
+the SSE stream, campaign `/stats`, `DELETE /api/links/{key}` and the public home
+info. The parity test keeps that
 list complete.
 
 **Limits.** A request body is capped at 256 KiB (`413` above that). JSON-RPC
@@ -97,16 +119,15 @@ store's link and campaign routes. With the dev auto-login, a request with no
 `Authorization` header looks like a cookie session and gets
 `403 api_token_required`; mint a token at `/account/api-tokens` first.
 
-## Adding tools (for #0150 and later)
+## Adding tools
 
 Write a `Registrar` that calls `mcpserver.AddTool(b, Spec{…}, fn)` and append
 it to `registrars` in `internal/mcpserver/tools.go`. Set `Write` for anything
 that changes data (hidden from read-only tokens automatically), and list the
 REST `Routes` the tool covers. A tool that reads `internal/reports` directly
-leaves `Routes` empty, and the caller's identity is on `c.UserID`. The parity
+still names the route it replaces, and the caller's identity is on `c.UserID`. The parity
 test (`cmd/shortlinks/mcp_test.go`) fails if an `/api` route is neither
-covered by a tool nor listed, with a reason, in `mcpserver.Excluded`; when a
-report tool lands, remove its excluded route entry.
+covered by a tool nor listed, with a reason, in `mcpserver.Excluded`.
 
 ## Key files
 
@@ -115,5 +136,7 @@ report tool lands, remove its excluded route entry.
 | `internal/mcpserver/server.go` | The handler: token check, per-request server |
 | `internal/mcpserver/caller.go` | `Caller`, in-process dispatch, error mapping |
 | `internal/mcpserver/tools*.go` | `AddTool`, the tools, short URLs |
+| `internal/mcpserver/tools_reports.go` | The report tools and their schema enums |
+| `internal/mcpserver/prompts.go` | The three prompts |
 | `internal/mcpserver/parity.go` | `Excluded` |
 | `cmd/shortlinks/main.go` | `buildMux` records route patterns; mounts `/mcp` |

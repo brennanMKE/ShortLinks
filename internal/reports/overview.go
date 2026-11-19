@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/brennanMKE/ShortLinks/internal/clicks"
@@ -76,38 +77,191 @@ var overviewReport = Report{
 	Run:          runOverview,
 }
 
+// keepOnly returns the predicate that applies just one part of the filters
+// (SkipBots, SkipCampaign or a dimension name), numbered from next.
+func (p Params) keepOnly(next int, keep string) (string, []any) {
+	skip := []string{SkipBots, SkipCampaign}
+	skip = append(skip, Dimensions...)
+	out := skip[:0:0]
+	for _, s := range skip {
+		if s != keep {
+			out = append(out, s)
+		}
+	}
+	return p.Predicate(next, out...)
+}
+
+// runOverview reads the clicks of both windows once and derives every figure
+// from that one pass (#0150). A CTE holds the rows with one boolean per filter
+// (bots, campaign, each dimension); a facet counts the rows that pass every
+// filter except its own, the campaign list every filter except the campaign,
+// and the totals and daily series every filter. GROUPING SETS then produce
+// the totals, the days, each facet and the campaigns together.
 func runOverview(ctx context.Context, req *Request) (Output, error) {
 	p := req.Params
 	limit := p.LimitOr(defaultFacetLimit)
 	cur := req.Windows.Current
-	dayExpr := DayExpr
-	visitors := `count(DISTINCT (k.ip_hash, ` + dayExpr + `)) FILTER (WHERE k.ip_hash IS NOT NULL)`
+	prev := req.Windows.Previous
 
-	scope := p.ScopedQuery(req.UserID, cur, ScopeOpts{})
-	data := OverviewData{}
-
-	// Totals.
-	if err := req.Q.QueryRow(ctx,
-		`SELECT count(*), `+visitors+`, count(DISTINCT l.id)`+scope.SQL, scope.Args...,
-	).Scan(&data.Totals.Clicks, &data.Totals.VisitorDays, &data.Totals.LinksClicked); err != nil {
-		return Output{}, fmt.Errorf("reports: overview totals: %w", err)
-	}
-	if !p.IncludeBots {
-		bots := p.ScopedQuery(req.UserID, cur, ScopeOpts{Skip: []string{SkipBots}, Where: "k.is_bot = TRUE"})
-		if err := req.Q.QueryRow(ctx, `SELECT count(*)`+bots.SQL, bots.Args...).Scan(&data.Totals.ExcludedBots); err != nil {
-			return Output{}, fmt.Errorf("reports: overview excluded bots: %w", err)
+	lo, prevStart, prevEnd := cur.Start, cur.Start, cur.Start
+	if prev != nil {
+		lo, prevStart, prevEnd = prev.Start, prev.Start, prev.End
+		if cur.Start.Before(lo) {
+			lo = cur.Start
 		}
 	}
-	if err := req.Q.QueryRow(ctx, `SELECT count(*) FROM links WHERE user_id = $1`, req.UserID).Scan(&data.Totals.LinksTotal); err != nil {
-		return Output{}, fmt.Errorf("reports: overview links total: %w", err)
+	args := []any{req.UserID, lo, cur.End, p.TZName, cur.Start, prevStart, prevEnd}
+
+	// One flag per filter part.
+	parts := append([]string{SkipBots, SkipCampaign}, Dimensions...)
+	flagCol := map[string]string{SkipBots: "f_bots", SkipCampaign: "f_camp"}
+	var flagSQL []string
+	for _, d := range Dimensions {
+		flagCol[d] = "f_" + d
+	}
+	for _, part := range parts {
+		cond, a := p.keepOnly(len(args)+1, part)
+		args = append(args, a...)
+		flagSQL = append(flagSQL, "("+cond+") AS "+flagCol[part])
+	}
+	// allBut ANDs every flag except the named ones.
+	allBut := func(except ...string) string {
+		var fs []string
+	next:
+		for _, part := range parts {
+			for _, e := range except {
+				if e == part {
+					continue next
+				}
+			}
+			fs = append(fs, flagCol[part])
+		}
+		return strings.Join(fs, " AND ")
 	}
 
-	// Timeseries (zero-filled).
-	var err error
-	data.Timeseries, err = timeseries(ctx, req, cur)
-	if err != nil {
-		return Output{}, err
+	var dimCols, dimSel, nFilters, nCases, vCases []string
+	for _, d := range Dimensions {
+		expr, _ := DimensionExpr(d)
+		dimSel = append(dimSel, expr+" AS d_"+d)
+		dimCols = append(dimCols, "d_"+d)
 	}
+	// GROUPING(day, d_*..., camp_id): a set's bit is 0 for the column it groups by.
+	groupCols := append(append([]string{"day"}, dimCols...), "camp_id")
+	full := (1 << len(groupCols)) - 1
+	gidOf := func(col int) int { return full &^ (1 << (len(groupCols) - 1 - col)) }
+	sets := []string{"()", "(day)"}
+	for i, d := range Dimensions {
+		sets = append(sets, "(d_"+d+")")
+		nFilters = append(nFilters, fmt.Sprintf("count(*) FILTER (WHERE in_cur AND %s) AS n_%s", allBut(d), d))
+		nCases = append(nCases, fmt.Sprintf("WHEN %d THEN n_%s", gidOf(i+1), d))
+		vCases = append(vCases, fmt.Sprintf("WHEN %d THEN d_%s", gidOf(i+1), d))
+	}
+	sets = append(sets, "(camp_id)")
+	campGID := gidOf(len(groupCols) - 1)
+	nCases = append(nCases, fmt.Sprintf("WHEN %d THEN n_camp", campGID))
+	vCases = append(vCases, fmt.Sprintf("WHEN %d THEN c.slug", campGID))
+	dayGID := gidOf(0)
+
+	q := `WITH w AS (
+	  SELECT ` + DayExpr + ` AS day, k.is_bot, k.campaign_id AS camp_id,
+	         (k.clicked_at >= $5) AS in_cur, (k.clicked_at >= $6 AND k.clicked_at < $7) AS in_prev,
+	         ` + strings.Join(dimSel, ", ") + `,
+	         ` + strings.Join(flagSQL, ", ") + `
+	  FROM clicks k JOIN links l ON l.id = k.link_id
+	  WHERE l.user_id = $1 AND k.clicked_at >= $2 AND k.clicked_at < $3
+	), x AS (
+	  SELECT w.*, ` + allBut() + ` AS ok_all, ` + allBut(SkipBots) + ` AS ok_nb, ` + allBut(SkipCampaign) + ` AS ok_nc FROM w
+	), g AS (
+	  SELECT GROUPING(` + strings.Join(groupCols, ", ") + `) AS gid, day, ` + strings.Join(dimCols, ", ") + `, camp_id,
+	         count(*) FILTER (WHERE in_cur AND ok_all) AS n_cur,
+	         count(*) FILTER (WHERE in_prev AND ok_all) AS n_prev,
+	         count(*) FILTER (WHERE in_cur AND is_bot AND ok_nb) AS bots,
+	         ` + strings.Join(nFilters, ", ") + `,
+	         count(*) FILTER (WHERE in_cur AND ok_nc) AS n_camp
+	  FROM x GROUP BY GROUPING SETS (` + strings.Join(sets, ", ") + `)
+	), g2 AS (
+	  SELECT g.*, c.slug AS camp_slug, COALESCE(c.name, 'No campaign') AS camp_name,
+	         CASE gid ` + strings.Join(nCases, " ") + ` END AS nsel,
+	         CASE gid ` + strings.Join(vCases, " ") + ` END AS vsel
+	  FROM g LEFT JOIN campaigns c ON c.id = g.camp_id
+	), g3 AS (
+	  SELECT g2.*, row_number() OVER (PARTITION BY gid ORDER BY nsel DESC, vsel ASC NULLS LAST) AS rn FROM g2
+	)
+	SELECT gid, day, ` + strings.Join(dimCols, ", ") + `, camp_slug, camp_name, n_cur, n_prev, bots, COALESCE(nsel, 0)
+	FROM g3
+	WHERE gid IN (` + fmt.Sprint(full, ",", dayGID) + `) OR (nsel > 0 AND (gid = ` + fmt.Sprint(campGID) + ` OR rn <= ` + strconv.Itoa(limit) + `))
+	ORDER BY gid, rn`
+
+	rows, err := req.Q.Query(ctx, q, args...)
+	if err != nil {
+		return Output{}, fmt.Errorf("reports: overview: %w", err)
+	}
+	defer rows.Close()
+
+	data := OverviewData{Campaigns: []CampaignRow{}}
+	facets := map[string]*[]FacetValue{}
+	for _, d := range Dimensions {
+		facets[d] = &[]FacetValue{}
+	}
+	curDays, prevDays := map[string]int64{}, map[string]int64{}
+	var prevClicks int64
+	for rows.Next() {
+		var gid int
+		var day *time.Time
+		dv := make([]*string, len(Dimensions))
+		var slug, name *string
+		var nCur, nPrev, bots, nsel int64
+		dest := []any{&gid, &day}
+		for i := range dv {
+			dest = append(dest, &dv[i])
+		}
+		dest = append(dest, &slug, &name, &nCur, &nPrev, &bots, &nsel)
+		if err := rows.Scan(dest...); err != nil {
+			return Output{}, fmt.Errorf("reports: overview scan: %w", err)
+		}
+		switch {
+		case gid == full:
+			data.Totals.Clicks, prevClicks = nCur, nPrev
+			if !p.IncludeBots {
+				data.Totals.ExcludedBots = bots
+			}
+		case gid == dayGID:
+			if day != nil {
+				curDays[day.Format(dayLayout)] = nCur
+				prevDays[day.Format(dayLayout)] = nPrev
+			}
+		case gid == campGID:
+			data.Campaigns = append(data.Campaigns, CampaignRow{Slug: slug, Name: *name, Clicks: nsel})
+		default:
+			for i, d := range Dimensions {
+				if gid == gidOf(i+1) {
+					f := FacetValue{Value: NoneValue, Clicks: nsel}
+					if dv[i] != nil {
+						f.Value = *dv[i]
+					}
+					*facets[d] = append(*facets[d], f)
+				}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Output{}, fmt.Errorf("reports: overview: %w", err)
+	}
+	rows.Close()
+	data.Facets = Facets{
+		Source: *facets["source"], Medium: *facets["medium"], UTMCampaign: *facets["utm_campaign"],
+		Content: *facets["content"], Term: *facets["term"], Placement: *facets["placement"],
+	}
+
+	fill := func(w Window, counts map[string]int64) []DayCount {
+		days := w.DayList()
+		out := make([]DayCount, len(days))
+		for i, d := range days {
+			out[i] = DayCount{Date: d, Clicks: counts[d]}
+		}
+		return out
+	}
+	data.Timeseries = fill(cur, curDays)
 	data.PreviousTimeseries = []DayCount{}
 	for _, d := range data.Timeseries {
 		if data.BestDay == nil || d.Clicks > data.BestDay.Clicks {
@@ -119,126 +273,63 @@ func runOverview(ctx context.Context, req *Request) (Output, error) {
 		data.BestDay = nil
 	}
 
-	// Previous window.
+	// Links clicked: each link probes the (link_id, clicked_at) index and
+	// stops at its first counted click.
+	pred, pargs := p.Predicate(4)
+	lc := `SELECT count(*) FROM links l WHERE l.user_id = $1 AND EXISTS (SELECT 1 FROM clicks k WHERE k.link_id = l.id AND k.clicked_at >= $2 AND k.clicked_at < $3 AND (` + pred + `))`
+	if err := req.Q.QueryRow(ctx, lc, append([]any{req.UserID, cur.Start, cur.End}, pargs...)...).Scan(&data.Totals.LinksClicked); err != nil {
+		return Output{}, fmt.Errorf("reports: overview links clicked: %w", err)
+	}
+	if err := req.Q.QueryRow(ctx, `SELECT count(*) FROM links WHERE user_id = $1`, req.UserID).Scan(&data.Totals.LinksTotal); err != nil {
+		return Output{}, fmt.Errorf("reports: overview links total: %w", err)
+	}
+
+	// Visitor days: distinct (visitor, day) pairs, hashed with SELECT DISTINCT
+	// (count(DISTINCT (a, b)) sorts and took about twice as long). One scan
+	// covers both windows.
 	visitorsTruncated := false
-	if prev := req.Windows.Previous; prev != nil {
-		ps := p.ScopedQuery(req.UserID, *prev, ScopeOpts{})
-		pt := &PreviousTotals{}
-		var vd int64
-		if err := req.Q.QueryRow(ctx, `SELECT count(*), `+visitors+ps.SQL, ps.Args...).Scan(&pt.Clicks, &vd); err != nil {
-			return Output{}, fmt.Errorf("reports: overview previous totals: %w", err)
+	prevVisitors := prev != nil && !prev.Start.Before(req.Now.Add(-clicks.DetailRetention))
+	visScope := p.ScopedQuery(req.UserID, Window{Start: lo, End: cur.End}, ScopeOpts{})
+	n := visScope.Next
+	vq := `SELECT in_cur, count(*) FROM (SELECT DISTINCT (k.clicked_at >= $` + strconv.Itoa(n) + `) AS in_cur, k.ip_hash, ` + DayExpr + visScope.SQL +
+		` AND k.ip_hash IS NOT NULL AND (k.clicked_at >= $` + strconv.Itoa(n) + ` OR (k.clicked_at >= $` + strconv.Itoa(n+1) + ` AND k.clicked_at < $` + strconv.Itoa(n+2) + `))) v GROUP BY in_cur`
+	vrows, err := req.Q.Query(ctx, vq, append(visScope.Args, cur.Start, prevStart, prevEnd)...)
+	if err != nil {
+		return Output{}, fmt.Errorf("reports: overview visitor days: %w", err)
+	}
+	var curVisitors, prevVisitorDays int64
+	for vrows.Next() {
+		var isCur bool
+		var c int64
+		if err := vrows.Scan(&isCur, &c); err != nil {
+			vrows.Close()
+			return Output{}, fmt.Errorf("reports: overview visitor days: %w", err)
 		}
-		if prev.Start.Before(req.Now.Add(-clicks.DetailRetention)) {
-			visitorsTruncated = true
+		if isCur {
+			curVisitors = c
 		} else {
-			pt.VisitorDays = &vd
+			prevVisitorDays = c
+		}
+	}
+	vrows.Close()
+	if err := vrows.Err(); err != nil {
+		return Output{}, fmt.Errorf("reports: overview visitor days: %w", err)
+	}
+	data.Totals.VisitorDays = curVisitors
+
+	if prev != nil {
+		pt := &PreviousTotals{Clicks: prevClicks}
+		if prevVisitors {
+			pt.VisitorDays = &prevVisitorDays
+		} else {
+			// ip_hash is gone for part of the window: no visitor count.
+			visitorsTruncated = true
 		}
 		data.Previous = pt
-		data.PreviousTimeseries, err = timeseries(ctx, req, *prev)
-		if err != nil {
-			return Output{}, err
-		}
-	}
-
-	// Campaigns: UTM filters apply, the campaign filter does not.
-	cs := p.ScopedQuery(req.UserID, cur, ScopeOpts{
-		Joins: "LEFT JOIN campaigns c ON c.id = k.campaign_id",
-		Skip:  []string{SkipCampaign},
-	})
-	rows, err := req.Q.Query(ctx,
-		`SELECT c.slug, COALESCE(c.name, 'No campaign'), count(*) AS n`+cs.SQL+
-			` GROUP BY c.slug, c.name ORDER BY n DESC, c.slug ASC NULLS LAST`, cs.Args...)
-	if err != nil {
-		return Output{}, fmt.Errorf("reports: overview campaigns: %w", err)
-	}
-	data.Campaigns = []CampaignRow{}
-	for rows.Next() {
-		var r CampaignRow
-		if err := rows.Scan(&r.Slug, &r.Name, &r.Clicks); err != nil {
-			rows.Close()
-			return Output{}, fmt.Errorf("reports: overview campaigns scan: %w", err)
-		}
-		data.Campaigns = append(data.Campaigns, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return Output{}, fmt.Errorf("reports: overview campaigns: %w", err)
-	}
-
-	// Facets: each ignores its own dimension's filter.
-	for _, d := range Dimensions {
-		fs := p.ScopedQuery(req.UserID, cur, ScopeOpts{Skip: []string{d}})
-		expr, _ := DimensionExpr(d)
-		rows, err := req.Q.Query(ctx,
-			`SELECT `+expr+` AS v, count(*) AS n`+fs.SQL+
-				` GROUP BY v ORDER BY n DESC, v ASC NULLS LAST LIMIT `+strconv.Itoa(limit),
-			fs.Args...)
-		if err != nil {
-			return Output{}, fmt.Errorf("reports: overview facet %s: %w", d, err)
-		}
-		vals := []FacetValue{}
-		for rows.Next() {
-			var v *string
-			var f FacetValue
-			if err := rows.Scan(&v, &f.Clicks); err != nil {
-				rows.Close()
-				return Output{}, fmt.Errorf("reports: overview facet %s scan: %w", d, err)
-			}
-			f.Value = NoneValue
-			if v != nil {
-				f.Value = *v
-			}
-			vals = append(vals, f)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return Output{}, fmt.Errorf("reports: overview facet %s: %w", d, err)
-		}
-		switch d {
-		case "source":
-			data.Facets.Source = vals
-		case "medium":
-			data.Facets.Medium = vals
-		case "utm_campaign":
-			data.Facets.UTMCampaign = vals
-		case "content":
-			data.Facets.Content = vals
-		case "term":
-			data.Facets.Term = vals
-		case "placement":
-			data.Facets.Placement = vals
-		}
+		data.PreviousTimeseries = fill(*prev, prevDays)
 	}
 
 	return Output{Highlights: overviewHighlights(data, req, visitorsTruncated), Data: data}, nil
-}
-
-// timeseries returns one DayCount per day of w, zero-filled.
-func timeseries(ctx context.Context, req *Request, w Window) ([]DayCount, error) {
-	sc := req.Params.ScopedQuery(req.UserID, w, ScopeOpts{})
-	rows, err := req.Q.Query(ctx, `SELECT `+DayExpr+` AS d, count(*)`+sc.SQL+` GROUP BY d`, sc.Args...)
-	if err != nil {
-		return nil, fmt.Errorf("reports: overview timeseries: %w", err)
-	}
-	defer rows.Close()
-	counts := map[string]int64{}
-	for rows.Next() {
-		var d time.Time
-		var n int64
-		if err := rows.Scan(&d, &n); err != nil {
-			return nil, fmt.Errorf("reports: overview timeseries scan: %w", err)
-		}
-		counts[d.Format(dayLayout)] = n
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("reports: overview timeseries: %w", err)
-	}
-	days := w.DayList()
-	out := make([]DayCount, len(days))
-	for i, d := range days {
-		out[i] = DayCount{Date: d, Clicks: counts[d]}
-	}
-	return out, nil
 }
 
 // overviewHighlights writes up to five plain-English sentences from data.
