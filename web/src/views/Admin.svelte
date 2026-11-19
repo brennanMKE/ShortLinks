@@ -1,8 +1,9 @@
 <!--
   Admin view (#0037). Admin-only — rendered only when currentUser.is_admin; a
   non-admin who somehow reaches it sees an access-denied notice rather than any
-  admin data. It ties together four backend areas behind a single view with a
-  tab bar:
+  admin data. It ties together four backend areas behind one view. Each section is its own route (#0154: #/admin/settings,
+  /filters, /users, /audit; bare #/admin redirects to settings), with a side
+  nav on desktop and a select on phones:
 
   - Settings   — GET/PATCH /admin/settings: a registrations_enabled toggle and
     the home_redirect_url primary URL (#0125).
@@ -48,13 +49,26 @@
     pageInfo,
     parseUserIdFilter,
     registrationsEnabled,
+    ADMIN_SECTIONS,
+    DEFAULT_ADMIN_SECTION,
+    adminRouteAction,
+    adminSectionPath,
+    type AdminSection,
   } from '../lib/admin';
+  import { navigate, replace } from '../lib/hashRouter.svelte';
+  import Link from '../lib/Link.svelte';
+  import NotFound from './NotFound.svelte';
   import type { Setting, FilterRule, AdminUser, AuditEntry } from '../lib/types';
   import Button from '../lib/Button.svelte';
   import Panel from '../lib/Panel.svelte';
 
-  type Section = 'settings' | 'filters' | 'users' | 'audit';
-  let section = $state<Section>('settings');
+  // The section comes from the route (#0154): `#/admin/:section`, and bare
+  // `#/admin` redirects to the default section.
+  let { section: sectionParam }: { section?: string } = $props();
+  const action = $derived(adminRouteAction(sectionParam));
+  const section: AdminSection = $derived(
+    action.kind === 'show' ? action.section : DEFAULT_ADMIN_SECTION,
+  );
 
   // ── Settings ──────────────────────────────────────────────────────────────
   let settings = $state<Setting[]>([]);
@@ -438,6 +452,11 @@
   }
 
   onMount(() => {
+    if (action.kind === 'redirect') {
+      replace(action.to);
+      return;
+    }
+    if (action.kind === 'not-found') return;
     void loadSettings();
     void loadRules();
     void loadUsers();
@@ -445,6 +464,11 @@
   });
 </script>
 
+{#if action.kind === 'not-found' && $currentUser?.is_admin}
+  <NotFound />
+{:else if action.kind === 'redirect'}
+  <div class="app-shell"><p class="text-muted" role="status">Loading…</p></div>
+{:else}
 <div class="app-shell">
   <h1 class="page-title">Admin</h1>
   {#if !$currentUser?.is_admin}
@@ -452,37 +476,23 @@
       <p class="text-error" role="alert">You do not have access to this area.</p>
     </Panel>
   {:else}
-    <nav class="subtabs" aria-label="Admin sections">
-      <button
-        type="button"
-        class="subtab"
-        class:active={section === 'settings'}
-        aria-current={section === 'settings' ? 'page' : undefined}
-        onclick={() => (section = 'settings')}
-      >Settings</button>
-      <button
-        type="button"
-        class="subtab"
-        class:active={section === 'filters'}
-        aria-current={section === 'filters' ? 'page' : undefined}
-        onclick={() => (section = 'filters')}
-      >URL filters</button>
-      <button
-        type="button"
-        class="subtab"
-        class:active={section === 'users'}
-        aria-current={section === 'users' ? 'page' : undefined}
-        onclick={() => (section = 'users')}
-      >Users</button>
-      <button
-        type="button"
-        class="subtab"
-        class:active={section === 'audit'}
-        aria-current={section === 'audit' ? 'page' : undefined}
-        onclick={() => (section = 'audit')}
-      >Audit log</button>
+    <div class="admin-layout">
+    <nav class="admin-nav" aria-label="Admin sections">
+      {#each ADMIN_SECTIONS as s (s.id)}
+        <Link to={adminSectionPath(s.id)} class="admin-nav-link">{s.label}</Link>
+      {/each}
     </nav>
-
+    <select
+      class="admin-select"
+      aria-label="Admin section"
+      value={section}
+      onchange={(e) => navigate(adminSectionPath(e.currentTarget.value as AdminSection))}
+    >
+      {#each ADMIN_SECTIONS as s (s.id)}
+        <option value={s.id}>{s.label}</option>
+      {/each}
+    </select>
+    <div class="admin-main">
     {#if section === 'settings'}
       <Panel title="Settings">
         {#if settingsLoading}
@@ -906,49 +916,69 @@
         {/if}
       </Panel>
     {/if}
+    </div>
+    </div>
   {/if}
 </div>
+{/if}
 
 <style>
-  /* .nav-tabs/.nav-tab are global — see app.css (#0120). .subtabs/.subtab
-     stay local component state (not routes — out of scope per #0120). */
-  .subtabs {
+  /* Section nav (#0154): left rail on desktop, a select on phones. */
+  .admin-layout {
+    display: grid;
+    grid-template-columns: 180px minmax(0, 1fr);
+    gap: var(--space-5, 24px);
+    align-items: start;
+  }
+  .admin-nav {
     display: flex;
-    gap: var(--space-2);
-    margin-bottom: var(--space-4);
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: var(--space-1, 4px);
+    position: sticky;
+    top: var(--space-4);
   }
-  .subtab {
-    background: var(--bg-panel);
-    border: var(--border-w) solid var(--border);
-    border-bottom-width: 2px;
+  .admin-nav :global(.admin-nav-link) {
+    display: block;
+    padding: var(--space-2) var(--space-3);
     border-radius: var(--radius);
-    padding: var(--space-2) var(--space-4);
-    cursor: pointer;
-    font-size: var(--fs-md);
-    font-family: var(--font);
+    border-left: 3px solid transparent;
     color: var(--text-muted);
-    /* Comfortable tap target on mobile */
-    min-height: 40px;
-    display: inline-flex;
-    align-items: center;
+    text-decoration: none;
+    font-size: var(--fs-md);
   }
-  .subtab.active {
-    border-bottom-color: var(--accent);
-    color: var(--accent);
-    font-weight: 600;
-  }
-  .subtab:hover:not(.active) {
+  .admin-nav :global(.admin-nav-link:hover) {
     background: var(--bg-subtle);
     color: var(--text);
   }
+  .admin-nav :global(.admin-nav-link.active) {
+    border-left-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+    background: var(--bg-subtle);
+  }
+  .admin-select {
+    display: none;
+    width: 100%;
+    min-height: 44px;
+    font-size: var(--fs-md);
+  }
+  .admin-main {
+    min-width: 0;
+  }
+  @media (max-width: 720px) {
+    .admin-layout {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--space-3);
+    }
+    .admin-nav {
+      display: none;
+    }
+    .admin-select {
+      display: block;
+    }
+  }
 
   @media (max-width: 480px) {
-    /* Sub-tabs: already flex-wrap:wrap; reduce padding so 4 fit on 2 rows */
-    .subtab {
-      font-size: var(--fs-base);
-      padding: var(--space-2) var(--space-3);
-    }
     /* Pager: allow center + wrap */
     .pager {
       flex-wrap: wrap;

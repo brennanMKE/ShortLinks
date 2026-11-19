@@ -43,7 +43,9 @@
     { path: '/campaigns', component: CampaignsList },
     { path: '/campaigns/:slug', component: CampaignDetail },
     { path: '/account', component: Account },
+    // Bare /admin redirects to /admin/settings inside the view (#0154).
     { path: '/admin', component: Admin },
+    { path: '/admin/:section', component: Admin },
     { path: '*', component: NotFound },
   ];
 

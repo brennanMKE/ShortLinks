@@ -246,3 +246,57 @@ describe('registrationsEnabled', () => {
     expect(registrationsEnabled('TRUE')).toBe(false);
   });
 });
+
+// ── Section routes (#0154) ──────────────────────────────────────────────────
+import { matchRoute, type RouteDef } from './routing';
+import {
+  ADMIN_SECTIONS,
+  adminRouteAction,
+  adminSectionPath,
+  parseAdminSection,
+} from './admin';
+
+describe('admin section routes', () => {
+  // Mirrors the two admin entries in App.svelte's route table.
+  const table: RouteDef<string>[] = [
+    { path: '/admin', component: 'Admin' },
+    { path: '/admin/:section', component: 'Admin' },
+    { path: '*', component: 'NotFound' },
+  ];
+
+  it('has the four sections with stable paths', () => {
+    expect(ADMIN_SECTIONS.map((s) => adminSectionPath(s.id))).toEqual([
+      '/admin/settings',
+      '/admin/filters',
+      '/admin/users',
+      '/admin/audit',
+    ]);
+  });
+
+  for (const id of ['settings', 'filters', 'users', 'audit'] as const) {
+    it(`routes /admin/${id} to the Admin view showing ${id}`, () => {
+      const m = matchRoute(`/admin/${id}`, table);
+      expect(m?.component).toBe('Admin');
+      expect(adminRouteAction(m?.params.section)).toEqual({ kind: 'show', section: id });
+    });
+  }
+
+  it('redirects bare /admin to /admin/settings', () => {
+    const m = matchRoute('/admin', table);
+    expect(m?.component).toBe('Admin');
+    expect(adminRouteAction(m?.params.section)).toEqual({
+      kind: 'redirect',
+      to: '/admin/settings',
+    });
+  });
+
+  it('treats an unknown section as not found', () => {
+    const m = matchRoute('/admin/bogus', table);
+    expect(adminRouteAction(m?.params.section)).toEqual({ kind: 'not-found' });
+    expect(parseAdminSection('bogus')).toBeNull();
+  });
+
+  it('does not match deeper paths', () => {
+    expect(matchRoute('/admin/audit/extra', table)?.component).toBe('NotFound');
+  });
+});

@@ -260,3 +260,42 @@ export function parseUserIdFilter(raw: string): { userId: number | null } | { er
 export function registrationsEnabled(value: string | undefined): boolean {
   return value === 'true';
 }
+
+// ── Section routes (#0154) ──────────────────────────────────────────────────
+// Each admin section has its own hash route, `#/admin/<section>`.
+
+export type AdminSection = 'settings' | 'filters' | 'users' | 'audit';
+
+export const ADMIN_SECTIONS: readonly { id: AdminSection; label: string }[] = [
+  { id: 'settings', label: 'Settings' },
+  { id: 'filters', label: 'URL filters' },
+  { id: 'users', label: 'Users' },
+  { id: 'audit', label: 'Audit log' },
+];
+
+/** The section `#/admin` redirects to. */
+export const DEFAULT_ADMIN_SECTION: AdminSection = 'settings';
+
+/** The hash path for a section. */
+export function adminSectionPath(section: AdminSection): string {
+  return `/admin/${section}`;
+}
+
+/** Narrows a route param to a known section, or null (unknown or missing). */
+export function parseAdminSection(param: string | undefined | null): AdminSection | null {
+  return ADMIN_SECTIONS.find((s) => s.id === param)?.id ?? null;
+}
+
+/** What the Admin view should do for a given `:section` route param. */
+export type AdminRouteAction =
+  | { kind: 'redirect'; to: string }
+  | { kind: 'show'; section: AdminSection }
+  | { kind: 'not-found' };
+
+export function adminRouteAction(param: string | undefined | null): AdminRouteAction {
+  if (param === undefined || param === null || param === '') {
+    return { kind: 'redirect', to: adminSectionPath(DEFAULT_ADMIN_SECTION) };
+  }
+  const section = parseAdminSection(param);
+  return section ? { kind: 'show', section } : { kind: 'not-found' };
+}
