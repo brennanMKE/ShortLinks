@@ -191,8 +191,11 @@ func NewLinksHandler(store linkStore, redirectCache cacheEvictor, rules ruleProv
 // create response shape (always false until #0023 populates it); it is omitted
 // from list/detail responses where it is not meaningful.
 type linkView struct {
-	ID             int64      `json:"id"`
-	Key            string     `json:"key"`
+	ID  int64  `json:"id"`
+	Key string `json:"key"`
+	// ShortURL is the full shareable URL, built from BASE_URL with
+	// qr.ShortURL (#0181), so clients never rebuild it from the key.
+	ShortURL       string     `json:"short_url"`
 	DestinationURL string     `json:"destination_url"`
 	Title          string     `json:"title"`
 	Active         bool       `json:"active"`
@@ -215,10 +218,11 @@ type linkView struct {
 
 // toLinkView maps a domain Link to its JSON shape without the duplicate field
 // (used by list and detail responses).
-func toLinkView(l links.Link) linkView {
+func toLinkView(l links.Link, baseURL string) linkView {
 	return linkView{
 		ID:             l.ID,
 		Key:            l.Key,
+		ShortURL:       qr.ShortURL(baseURL, l.Key),
 		DestinationURL: l.DestinationURL,
 		Title:          l.Title,
 		Active:         l.Active,
@@ -573,7 +577,7 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	view := toLinkView(created)
+	view := toLinkView(created, h.baseURL)
 	view.Duplicate = &duplicate
 
 	// #0026 SSE: broadcast link.created to the user's connected dashboard clients
@@ -714,7 +718,7 @@ func (h *LinksHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]linkView, 0, len(rows))
 	for _, l := range rows {
-		views = append(views, toLinkView(l))
+		views = append(views, toLinkView(l, h.baseURL))
 	}
 	writeJSON(w, http.StatusOK, listLinksResponse{
 		Links:   views,
@@ -829,7 +833,7 @@ func (h *LinksHandler) listEnriched(w http.ResponseWriter, r *http.Request, user
 		rows, truncated = rows[:maxGroupedLinks], true
 	}
 	toItem := func(l links.Link) listLinkItem {
-		it := listLinkItem{linkView: toLinkView(l), ContentKey: reports.ContentKey(l.DestinationURL)}
+		it := listLinkItem{linkView: toLinkView(l, h.baseURL), ContentKey: reports.ContentKey(l.DestinationURL)}
 		_, it.Label = reports.LinkLabel(l.Title, l.UTMSource)
 		if l.CampaignSlug != "" {
 			slug := l.CampaignSlug
@@ -912,7 +916,7 @@ func (h *LinksHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	detail := linkDetailView{
-		linkView:     toLinkView(link),
+		linkView:     toLinkView(link, h.baseURL),
 		CampaignName: link.CampaignName,
 		CampaignSlug: link.CampaignSlug,
 	}
@@ -1247,7 +1251,7 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, toLinkView(link))
+	writeJSON(w, http.StatusOK, toLinkView(link, h.baseURL))
 }
 
 // checkReactivation decides whether link may be reactivated with dest as its

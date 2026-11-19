@@ -1244,6 +1244,7 @@ components:
       required:
         - id
         - key
+        - short_url
         - destination_url
         - title
         - active
@@ -1261,6 +1262,7 @@ components:
       properties:
         id: { type: integer, format: int64 }
         key: { type: string, description: "The short URL is `{base_url}/u/{key}`." }
+        short_url: { type: string, format: uri, description: "The full shareable URL, `{BASE_URL}/u/{key}`, so clients need not build it." }
         destination_url: { type: string, format: uri }
         title: { type: string }
         active: { type: boolean }

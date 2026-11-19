@@ -517,7 +517,7 @@ func (h *CampaignsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	linkViews := make([]linkView, 0, len(linkRows))
 	for _, l := range linkRows {
-		linkViews = append(linkViews, toLinkView(l))
+		linkViews = append(linkViews, toLinkView(l, h.baseURL))
 	}
 
 	detail := campaignDetailView{
@@ -947,7 +947,7 @@ func (h *CampaignsHandler) ListLinks(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]linkView, 0, len(rows))
 	for _, l := range rows {
-		views = append(views, toLinkView(l))
+		views = append(views, toLinkView(l, h.baseURL))
 	}
 	writeJSON(w, http.StatusOK, campaignLinksResponse{Links: views})
 }
@@ -1094,7 +1094,7 @@ func (h *CampaignsHandler) AssignLinks(w http.ResponseWriter, r *http.Request) {
 
 	views := make([]linkView, 0, len(assigned))
 	for _, l := range assigned {
-		views = append(views, toLinkView(l))
+		views = append(views, toLinkView(l, h.baseURL))
 	}
 	writeJSON(w, http.StatusOK, campaignLinksResponse{Links: views})
 }
@@ -1572,7 +1572,7 @@ func (h *CampaignsHandler) BatchCreateLinks(w http.ResponseWriter, r *http.Reque
 
 	views := make([]linkView, 0, len(created))
 	for _, l := range created {
-		views = append(views, toLinkView(l))
+		views = append(views, toLinkView(l, h.baseURL))
 	}
 	writeJSON(w, http.StatusCreated, batchCreateLinksResponse{Links: views, SkippedBlankRows: skipped})
 }

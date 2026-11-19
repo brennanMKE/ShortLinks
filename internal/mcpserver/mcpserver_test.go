@@ -614,20 +614,6 @@ func TestDescribeCoversRoutes(t *testing.T) {
 	}
 }
 
-func TestAddShortURLs(t *testing.T) {
-	in := []byte(`{"links":[{"key":"a b","destination_url":"https://x.test/?a=1&b=2","id":12345678901234567}],"other":{"key":"no-dest"}}`)
-	out := string(addShortURLs(in, "https://go.test/"))
-	if !strings.Contains(out, `"short_url":"https://go.test/u/a%20b"`) {
-		t.Errorf("out = %s", out)
-	}
-	if strings.Contains(out, `"other":{"key":"no-dest","short_url"`) {
-		t.Errorf("added short_url to a non-link: %s", out)
-	}
-	if !strings.Contains(out, "12345678901234567") || !strings.Contains(out, "a=1&b=2") {
-		t.Errorf("number or URL mangled: %s", out)
-	}
-}
-
 func TestBatchRejectedAndOversizeBody(t *testing.T) {
 	e := newEnv(t)
 	uid := e.user("alice@example.com")

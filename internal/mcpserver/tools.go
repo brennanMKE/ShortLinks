@@ -15,7 +15,6 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/brennanMKE/ShortLinks/internal/qr"
 )
 
 // Spec describes one tool.
@@ -197,10 +196,9 @@ func Describe() []ToolInfo {
 
 // success builds a tool result from a 2xx REST body: a one-line summary, then
 // the JSON itself as text (clients that ignore structured content still see
-// the data), plus the JSON as structured content. Every link object gains a
-// short_url built from BASE_URL.
+// the data), plus the JSON as structured content. Link objects already carry
+// short_url from the REST API (#0181).
 func success(c *Caller, summary func(m map[string]any) string, body []byte) *mcp.CallToolResult {
-	body = addShortURLs(body, c.BaseURL)
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		// Not an object (no REST route returns one): wrap it.
@@ -246,43 +244,6 @@ func proxy(ctx context.Context, c *Caller, method, path string, query url.Values
 		resp = []byte(`{"ok":true}`)
 	}
 	return success(c, summary, resp), nil
-}
-
-// addShortURLs adds "short_url" to every object that looks like a link (it has
-// a string key and a destination_url), at any depth.
-func addShortURLs(body []byte, baseURL string) []byte {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return body
-	}
-	var walk func(v any)
-	walk = func(v any) {
-		switch t := v.(type) {
-		case map[string]any:
-			if key, ok := t["key"].(string); ok && key != "" {
-				if _, ok := t["destination_url"]; ok {
-					t["short_url"] = qr.ShortURL(baseURL, key)
-				}
-			}
-			for _, x := range t {
-				walk(x)
-			}
-		case []any:
-			for _, x := range t {
-				walk(x)
-			}
-		}
-	}
-	walk(v)
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return body
-	}
-	return bytes.TrimSpace(buf.Bytes())
 }
 
 // bodyOf turns an input struct into a request body, dropping the fields that

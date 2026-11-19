@@ -343,25 +343,24 @@ cache misses more frequent, increasing DB load on the redirect path.
 
 ## Short URL composition
 
-The displayed short URL is built in `web/src/lib/links.ts`:
+Every link object the REST API returns (create, including a duplicate; get;
+list, plain, extended and grouped; PATCH; batch create rows; campaign link
+lists) carries `short_url`, built on the server from `BASE_URL` with
+`qr.ShortURL` (#0181):
 
-```typescript
-export const SHORT_URL_BASE = 'https://go.sstools.co';
-
-export function shortUrl(key: string): string {
-  return `${SHORT_URL_BASE}/u/${encodeURIComponent(key)}`;
-}
+```
+{BASE_URL}/u/{key}      e.g. https://go.coupledozen.com/u/8d0d93
 ```
 
-`SHORT_URL_BASE` is hardcoded to the production branded domain regardless of
-the environment the backend is running in. The rationale (from the source
-comment) is that the dashboard shows users the URL they will share, which is
-always `go.sstools.co`; a copied `localhost` link is useless outside the
-development machine.
+Clients should use this field instead of appending `/u/<key>` themselves. The
+SPA's `shortUrl()` in `web/src/lib/links.ts` builds the same string from the
+`base_url` of `GET /api/me` (the configured `BASE_URL`), so a scanned QR code,
+the displayed URL and the API field cannot disagree. MCP tools return the same
+field.
 
-The `encodeURIComponent` call is defensive. Generated keys are base-62
-(`[a-z0-9A-Z]`) and custom aliases are validated server-side to
-`[a-zA-Z0-9\-_]`, so encoding is normally a no-op for all valid keys.
+The key is path-escaped by `qr.ShortURL`. Generated keys are base-62 and custom
+aliases are validated server-side to `[a-zA-Z0-9\-_]`, so escaping is normally
+a no-op.
 
 The redirect namespace is always `/u/`. The full URL pattern is:
 

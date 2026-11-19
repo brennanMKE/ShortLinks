@@ -25,6 +25,8 @@ export interface User {
 export interface Link {
   id: number;
   key: string;
+  /** Full shareable URL built by the server from BASE_URL (#0181). */
+  short_url?: string;
   destination_url: string;
   title: string;
   active: boolean;

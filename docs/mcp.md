@@ -210,8 +210,8 @@ the `Idempotency-Key` header ([using-api-tokens.md](using-api-tokens.md)).
 
 **Results.** A successful call returns a one-line text summary, the REST JSON
 as a second text block (for clients that ignore structured content), and the
-same JSON as structured content. Every link object gains a **`short_url`**
-built from `BASE_URL`. A failed call is a tool error (`isError: true`) whose
+same JSON as structured content. Every link object carries the REST API's **`short_url`**
+(built from `BASE_URL`, #0181). A failed call is a tool error (`isError: true`) whose
 text is `ShortLinks API error: HTTP <status> <code>: <message>`, plus any extra
 fields (`reason`, `label` on a 422 `destination_denied`), so the agent can
 correct itself. Tool arguments are validated against the tool's schema first.
