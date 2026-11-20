@@ -25,6 +25,26 @@ No passkey ceremony, no setup.
 - Svelte HMR keeps the browser in sync with source changes in `web/src/`.
 - Ctrl-C stops both processes cleanly.
 
+## Portiko sign-in stand-in (`--portiko`)
+
+By default dev mode signs every request in as the mock admin (`DevAutoLogin`)
+and Portiko is skipped. Real Portiko needs Postgres and cannot run with
+`STORAGE=json` (`PORTIKO_ENABLED` is refused there), so for exercising the
+redirect-based sign-in flow (#0133) use the stand-in:
+
+```bash
+./scripts/dev.sh --portiko           # or DEV_PORTIKO=true with STORAGE=json
+./scripts/dev.sh --built --portiko
+```
+
+- No auto-login: requests are signed out (401 on `/api/me`).
+- `GET /auth/portiko/login?return_to=/#/campaigns/x` signs in as the mock admin
+  and redirects to the local `return_to` (same-origin paths only, fragment kept).
+- `POST /auth/logout` signs out as usual.
+- `DEV_PORTIKO=true` without `STORAGE=json` stops startup, so it cannot reach
+  production. It is a stand-in only; the real provider is exercised in the
+  Postgres integration tests (#0132).
+
 ## Built-SPA mode
 
 To test the production embedding (the same `//go:embed` path used in production):

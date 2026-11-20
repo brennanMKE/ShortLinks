@@ -370,6 +370,10 @@ func serveDevMode(cfg *config.Config) error {
 	// so RequireSession accepts it immediately — no passkey ceremony needed.
 	// The hard guardrail (cfg.DevMode() check) is enforced inside DevAutoLogin.
 	devAutoLogin := middleware.DevAutoLogin(ds, cfg.DevMode())
+	if cfg.DevPortiko {
+		// #0134: no auto-login; /auth/portiko/login is the only way in.
+		devAutoLogin = devPortikoLogin(ds, cfg.DevMode())
+	}
 
 	// Campaign CRUD + link-membership + batch-create API (#0098, #0099,
 	// #0105): devstore.Store now implements campaignStore in-memory

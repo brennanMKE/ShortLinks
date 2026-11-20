@@ -9,6 +9,8 @@
 # Usage:
 #   ./scripts/dev.sh           # hot-reload: Go API on :8080 + Vite dev server on :5173
 #   ./scripts/dev.sh --built   # built-SPA: npm build + go run serving on :8080 only
+#   ./scripts/dev.sh --portiko # no auto-login; /auth/portiko/login stands in for Portiko (#0134)
+#                              # (combine with --built:  --built --portiko)
 #
 # Open in browser:
 #   hot-reload mode:  http://localhost:5173  (Vite proxies /api → :8080)
@@ -41,12 +43,14 @@ info() { printf '    %s\n' "$*"; }
 
 # ── Parse flags ──────────────────────────────────────────────────────────────
 MODE="hot"
-case "${1:-}" in
-  --built|-b) MODE="built" ;;
-  -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
-  "") : ;;
-  *) printf 'Unknown flag: %s\n' "$1" >&2; exit 1 ;;
-esac
+for arg in "$@"; do
+  case "$arg" in
+    --built|-b) MODE="built" ;;
+    --portiko) export DEV_PORTIKO=true ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) printf 'Unknown flag: %s\n' "$arg" >&2; exit 1 ;;
+  esac
+done
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 step "Preflight"
@@ -124,7 +128,11 @@ step "Starting Vite dev server on http://localhost:5173"
 info "Vite proxies /api /auth /account /admin /u → http://localhost:${PORT}"
 printf '\n'
 printf '\033[1m  Open: http://localhost:5173\033[0m\n'
-printf '  (logs in automatically as %s)\n' "$ADMIN_EMAIL"
+if [ "${DEV_PORTIKO:-}" = "true" ]; then
+  printf '  (signed out until /auth/portiko/login; then %s)\n' "$ADMIN_EMAIL"
+else
+  printf '  (logs in automatically as %s)\n' "$ADMIN_EMAIL"
+fi
 printf '\n'
 
 # Run Vite in foreground — Ctrl-C naturally kills it, then EXIT trap fires.

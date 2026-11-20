@@ -98,6 +98,11 @@ type Config struct {
 	// per client IP: all requests, and 404/410 responses only.
 	RedirectRatePerMin     int
 	RedirectMissRatePerMin int
+
+	// DevPortiko (DEV_PORTIKO, #0134) swaps dev mode's auto-login for a
+	// stand-in of Portiko's sign-in: requests stay signed out until the
+	// browser visits GET /auth/portiko/login. Only valid with STORAGE=json.
+	DevPortiko bool
 }
 
 // DevMode reports whether the dev store should be used instead of Postgres.
@@ -184,6 +189,18 @@ func loadFromFile(path string) (*Config, error) {
 	}
 
 	loadPortiko(cfg, &errs)
+
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEV_PORTIKO"))) {
+	case "", "false", "0":
+	case "true", "1":
+		if devMode {
+			cfg.DevPortiko = true
+		} else {
+			errs = append(errs, "DEV_PORTIKO=true is a dev-mode stand-in and needs STORAGE=json")
+		}
+	default:
+		errs = append(errs, fmt.Sprintf("invalid boolean for DEV_PORTIKO: %q (use true or false)", os.Getenv("DEV_PORTIKO")))
+	}
 
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("config: %s", strings.Join(errs, "; "))
