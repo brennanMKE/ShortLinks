@@ -26,6 +26,24 @@ func devPortikoLogin(ds *devstore.Store, devMode bool) func(http.Handler) http.H
 	slog.Warn("DEV MODE: Portiko sign-in stand-in is active — /auth/portiko/login signs in as the mock admin; NEVER run this in production")
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/auth/logout" && r.Method == http.MethodPost {
+				// Mirrors the real flow's POST /auth/logout (#0132): end the session
+				// and answer 302 to /, so the SPA's form post lands signed out.
+				if c, err := r.Cookie(auth.SessionCookieName); err == nil {
+					_, _ = ds.DeleteSession(r.Context(), c.Value)
+				}
+				http.SetCookie(w, &http.Cookie{
+					Name:     auth.SessionCookieName,
+					Value:    "",
+					Path:     "/",
+					MaxAge:   -1,
+					HttpOnly: true,
+					Secure:   true,
+					SameSite: http.SameSiteStrictMode,
+				})
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
 			if r.URL.Path != "/auth/portiko/login" || r.Method != http.MethodGet {
 				next.ServeHTTP(w, r)
 				return

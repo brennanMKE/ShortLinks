@@ -67,7 +67,7 @@ func TestHomeHandler_ExactKeysNoStoreNoAuth(t *testing.T) {
 	}
 	// The key set is pinned: nothing else from settings may leak. No activity
 	// key outside activity mode (#0175).
-	want := []string{"about", "hero", "mode", "redirect_url", "registrations_enabled", "title"}
+	want := []string{"about", "hero", "mode", "portiko", "redirect_url", "registrations_enabled", "title"}
 	var got []string
 	for k := range m {
 		got = append(got, k)
@@ -128,5 +128,21 @@ func TestHomeHandler_ErrorsAre500(t *testing.T) {
 	}
 	if rec := serveHome(fakeHomeReader{urlErr: errors.New("boom")}); rec.Code != http.StatusInternalServerError {
 		t.Errorf("setting error status = %d, want 500", rec.Code)
+	}
+}
+
+func TestHomeHandler_PortikoFlag(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		mux := http.NewServeMux()
+		mux.Handle("GET /api/public/home", NewHomeHandler(fakeHomeReader{}).WithPortiko(on))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/public/home", nil))
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if m["portiko"] != on {
+			t.Errorf("WithPortiko(%v): portiko = %v", on, m["portiko"])
+		}
 	}
 }

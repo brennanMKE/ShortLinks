@@ -11,6 +11,7 @@
   import { onMount, onDestroy } from 'svelte';
   import Link from '../lib/Link.svelte';
   import AuthBrand from '../lib/AuthBrand.svelte';
+  import { portikoLoginURL, isPortiko } from '../lib/portiko';
   import { HOME_REDIRECT_DELAY_MS, isContentHome, redirectHost, type HomeInfo } from '../lib/home';
 
   let { info }: { info: HomeInfo } = $props();
@@ -46,7 +47,13 @@
     <a href={info.redirect_url} rel="noopener" class="btn-link btn-link-primary">Go now</a>
   </p>
 
-  <p class="text-muted signin"><Link to="/login">Sign in</Link></p>
+  <p class="text-muted signin">
+    {#if isPortiko(info)}
+      <a href={portikoLoginURL('#/')}>Sign in</a>
+    {:else}
+      <Link to="/login">Sign in</Link>
+    {/if}
+  </p>
 </main>
 {/if}
 

@@ -30,6 +30,8 @@ export interface HomeActivity {
 export interface HomeInfo {
   redirect_url: string;
   registrations_enabled: boolean;
+  /** True when the server signs in through Portiko's redirect flow (#0133). Absent on an older server. */
+  portiko?: boolean;
   mode?: HomeMode;
   title?: string;
   about?: string;

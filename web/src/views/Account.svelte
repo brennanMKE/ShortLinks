@@ -8,6 +8,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { currentUser, links } from '../lib/stores';
+  import { loadPortikoMode, portikoMode } from '../lib/authMode';
+  import { PORTIKO_PASSKEYS_PATH } from '../lib/portiko';
   import {
     listCredentials,
     renameCredential,
@@ -173,7 +175,22 @@
     replace('/login');
   }
 
-  onMount(load);
+  // Portiko mode (#0133): passkeys live on Portiko's account page, so the
+  // list, rename and revoke here are replaced by one link. Unknown mode
+  // reads as passkey mode and shows today's list.
+  let portiko = $state<boolean | null>(null);
+  // The mode fetch and the passkey list run in parallel; the list's result is
+  // ignored when the mode turns out to be Portiko.
+  onMount(async () => {
+    const [on] = await Promise.all([loadPortikoMode(), loadCredentialsUnlessKnownPortiko()]);
+    portiko = on;
+    if (on) loading = false;
+  });
+
+  async function loadCredentialsUnlessKnownPortiko() {
+    if ($portikoMode === true) return;
+    await load();
+  }
 </script>
 
 <ConfirmDialog
@@ -216,7 +233,13 @@
   </Panel>
 
   <Panel title="Passkeys">
-    {#if loading}
+    {#if portiko === true}
+      <p class="text-muted intro">
+        Your passkeys are managed on your sign-in account page: add a device,
+        rename or remove one.
+      </p>
+      <a class="btn-link" href={PORTIKO_PASSKEYS_PATH} data-testid="manage-passkeys">Manage passkeys</a>
+    {:else if portiko === null || loading}
       <p class="text-muted" role="status">Loading passkeys…</p>
     {:else if loadError}
       <p class="text-error" role="alert">{loadError}</p>

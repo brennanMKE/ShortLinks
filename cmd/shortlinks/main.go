@@ -189,7 +189,7 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 	// The sweeper stops with ctx (the process lifetime in production).
 	// The same job prunes expired Idempotency-Key records (#0147).
 	// Built here, ahead of the sweeper, because a purge invalidates its activity cache (#0183).
-	homeH := handlers.NewHomeHandler(store).WithActivity(handlers.PublicActivityFunc(pool, cfg.DefaultTimezone, cfg.BaseURL)).WithHero(siteassets.NewStore(pool), auditLogger)
+	homeH := handlers.NewHomeHandler(store).WithActivity(handlers.PublicActivityFunc(pool, cfg.DefaultTimezone, cfg.BaseURL)).WithHero(siteassets.NewStore(pool), auditLogger).WithPortiko(cfg.PortikoEnabled)
 	idemStore := idempotency.NewStore(pool)
 	go clicks.NewSweeper(pool, slog.Default()).
 		WithPrune("pruned expired idempotency keys", idemStore.Prune).
@@ -357,7 +357,7 @@ func serveDevMode(cfg *config.Config) error {
 	linksH := handlers.NewLinksHandler(ds, devstore.NoCacheEvictor{}, ds, nil, broker, ds, ds, cfg.BaseURL).WithDefaultTimezone(cfg.DefaultTimezone)
 
 	meH := handlers.NewMeHandler(cfg.BaseURL)
-	homeH := handlers.NewHomeHandler(ds).WithHero(siteassets.NewMemStore(), nil)
+	homeH := handlers.NewHomeHandler(ds).WithHero(siteassets.NewMemStore(), nil).WithPortiko(cfg.DevPortiko)
 
 	// Session middleware backed by the dev store.
 	requireSession := middleware.RequireSession(ds)

@@ -11,9 +11,11 @@
   See docs/ui-redesign.md section 3.1.
 -->
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { onMount, type Snippet } from 'svelte';
   import { currentUser, links } from './stores';
   import { logout } from './api';
+  import { loadPortikoMode } from './authMode';
+  import { portikoSignOut } from './portiko';
   import { replace } from './hashRouter.svelte';
   import { openNewLink } from './newLinkDialog';
   import NewLinkDialog from './NewLinkDialog.svelte';
@@ -23,6 +25,11 @@
 
   let { children }: { children: Snippet } = $props();
 
+  // Ask for the sign-in mode now, so it is known by the time Sign out is clicked.
+  onMount(() => {
+    void loadPortikoMode();
+  });
+
   const tabs = $derived(navTabs($currentUser?.is_admin === true));
   let menuOpen = $state(false);
   let menuWrap = $state<HTMLElement | null>(null);
@@ -30,6 +37,12 @@
 
   async function handleSignOut() {
     menuOpen = false;
+    // A signed-in cold load never fetched the mode, so ask (memoised).
+    if (await loadPortikoMode()) {
+      // POST /auth/logout answers 302 (#0132): a form post lets the browser follow it.
+      portikoSignOut();
+      return;
+    }
     try {
       await logout();
     } catch {

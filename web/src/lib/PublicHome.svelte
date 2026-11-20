@@ -22,6 +22,7 @@
     weekClicksLabel,
     type HomeInfo,
   } from './home';
+  import { isPortiko, portikoLoginURL } from './portiko';
 
   let { info, host, preview = false }: { info: HomeInfo; host: string; preview?: boolean } =
     $props();
@@ -112,9 +113,16 @@
         <span class="btn-link btn-link-primary">Sign in</span>
         {#if info.registrations_enabled}<span class="btn-link">Register</span>{/if}
       {:else}
-        <Link to="/login" class="btn-link btn-link-primary">Sign in</Link>
-        {#if info.registrations_enabled}
-          <Link to="/login?mode=register" class="btn-link">Register</Link>
+        {#if isPortiko(info)}
+          <a href={portikoLoginURL('#/')} class="btn-link btn-link-primary">Sign in</a>
+          {#if info.registrations_enabled}
+            <a href={portikoLoginURL('#/', { create: true })} class="btn-link">Register</a>
+          {/if}
+        {:else}
+          <Link to="/login" class="btn-link btn-link-primary">Sign in</Link>
+          {#if info.registrations_enabled}
+            <Link to="/login?mode=register" class="btn-link">Register</Link>
+          {/if}
         {/if}
       {/if}
     </nav>

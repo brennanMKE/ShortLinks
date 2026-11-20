@@ -38,6 +38,7 @@ type HomeHandler struct {
 	hero     *HeroHandler
 	activity ActivityFunc
 	now      func() time.Time
+	portiko  bool
 
 	mu        sync.Mutex
 	cached    *reports.PublicActivity
@@ -49,6 +50,14 @@ type HomeHandler struct {
 // NewHomeHandler constructs a HomeHandler.
 func NewHomeHandler(store homeSettingsReader) *HomeHandler {
 	return &HomeHandler{store: store, now: time.Now}
+}
+
+// WithPortiko records whether this instance signs in through Portiko
+// (PORTIKO_ENABLED, #0132) so the SPA can pick the redirect flow or the passkey
+// screens at runtime (#0133). It is a fixed boolean for the life of the process.
+func (h *HomeHandler) WithPortiko(on bool) *HomeHandler {
+	h.portiko = on
+	return h
 }
 
 // WithActivity wires the activity source used in activity mode. Without it
@@ -92,6 +101,8 @@ type homeResponse struct {
 	Title                string    `json:"title"`
 	About                string    `json:"about"`
 	Hero                 *heroInfo `json:"hero"`
+	// Portiko is true when sign-in goes through Portiko's redirect flow (#0133).
+	Portiko bool `json:"portiko"`
 	// Activity is present only when Mode is "activity" (#0175).
 	Activity *reports.PublicActivity `json:"activity,omitempty"`
 }
@@ -195,6 +206,7 @@ func (h *HomeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Mode:                 vals[settingHomeMode],
 		Title:                vals[settingHomeTitle],
 		About:                vals[settingHomeAbout],
+		Portiko:              h.portiko,
 	}
 	if validHomeMode(resp.Mode) != nil {
 		resp.Mode = homeModeDefault

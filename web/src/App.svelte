@@ -8,6 +8,8 @@
     parseHash,
     redirectTargetFrom,
   } from './lib/routing';
+  import { noteHomeInfo, portikoMode } from './lib/authMode';
+  import { autoRedirectToPortiko, clearAutoRedirectGuard } from './lib/portiko';
   import { componentToPreload, shouldShowHome, type HomeInfo } from './lib/home';
   import Home from './views/Home.svelte';
   import { routes } from './lib/routeTable';
@@ -62,17 +64,35 @@
   // BEFORE mode flips to 'app', so a signed-out cold load never mounts (and
   // fires the API call of) the protected view — and again from the $effect
   // below on every later hashchange.
-  function redirectIfNeeded(): void {
+  //
+  // Returns true when it started a full-page redirect to Portiko's sign-in
+  // (#0133): a signed-out deep link goes straight there and comes back to the
+  // same hash route. The bare root and /login show the sign-in card instead
+  // (so a sign-out does not bounce straight back), and so does a redirect that
+  // already happened moments ago without signing anyone in (loop guard).
+  function redirectIfNeeded(): boolean {
     const route = getRoute();
     if (
       $currentUser === null &&
       route.path !== '/login' &&
       !shouldShowHome(false, route.path, homeInfo)
     ) {
-      replace(loginPathWithRedirect(route.path));
+      if (
+        $portikoMode === true &&
+        route.path !== '/' &&
+        autoRedirectToPortiko(window.location.hash)
+      ) {
+        return true;
+      }
+      // Keep the query on the way back (a guarded fallback lands on the card,
+      // whose sign-in link returns to this same route).
+      const intended =
+        $portikoMode === true && route.rawQuery ? `${route.path}?${route.rawQuery}` : route.path;
+      replace(loginPathWithRedirect(intended));
     } else if ($currentUser !== null && route.path === '/login') {
       replace(redirectTargetFrom(route.query));
     }
+    return false;
   }
 
   // Enters (or re-enters) hash-routed mode: wires the route table into the
@@ -90,7 +110,8 @@
     } else if (window.location.hash === '' || window.location.hash === '#') {
       replace('/');
     }
-    redirectIfNeeded();
+    // Leaving for Portiko: stay on the loading screen, never mount a protected view.
+    if (redirectIfNeeded()) return;
     // Wait for the chunk of the view that will show, now that auth has settled
     // and any redirect has landed, so the first paint is the view itself and
     // not a second "Loading..." (#0186). `mode` is still 'loading', which shows
@@ -139,18 +160,20 @@
 
     try {
       currentUser.set(await getMe());
+      clearAutoRedirectGuard(); // signed in: the redirect worked
     } catch {
       // A 401 (signed out) or any other failure (network/server) both land
       // signed-out; the guard effect below bounces to /login either way.
       currentUser.set(null);
-      // Only the bare root can show the home page; any failure here means
-      // today's behavior (bounce to /login).
-      if (parseHash(window.location.hash).path === '/') {
-        try {
-          homeInfo = await getPublicHome();
-        } catch {
-          homeInfo = null;
-        }
+      // The answer says whether sign-in goes through Portiko (#0133) and, at
+      // the bare root, whether to show the home page. A failure here means
+      // today's behavior (bounce to /login, passkey screens).
+      try {
+        const info = await getPublicHome();
+        noteHomeInfo(info);
+        if (parseHash(window.location.hash).path === '/') homeInfo = info;
+      } catch {
+        homeInfo = null;
       }
     }
     enterApp();
@@ -164,7 +187,7 @@
   $effect(() => {
     if (mode !== 'app') return;
     if ($currentUser !== null) homeInfo = null;
-    redirectIfNeeded();
+    if (redirectIfNeeded()) mode = 'loading';
   });
 </script>
 

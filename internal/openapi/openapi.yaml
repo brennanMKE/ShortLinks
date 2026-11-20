@@ -1307,8 +1307,9 @@ components:
             read_only: { type: boolean }
     PublicHome:
       type: object
-      required: [redirect_url, registrations_enabled, mode, title, about, hero]
+      required: [redirect_url, registrations_enabled, mode, title, about, hero, portiko]
       properties:
+        portiko: { type: boolean, description: "True when sign-in goes through Portiko's redirect flow (`PORTIKO_ENABLED`): the web UI then sends people to `/auth/portiko/login` instead of running passkey ceremonies itself." }
         redirect_url: { type: string, description: Where the site root redirects, or empty. Applies only in `default` mode. }
         registrations_enabled: { type: boolean }
         mode:
