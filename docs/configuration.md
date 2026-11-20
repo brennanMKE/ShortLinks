@@ -24,7 +24,7 @@ implemented in [`internal/config/config.go`](../internal/config/config.go).
 | `CACHE_TTL_SECONDS` | optional | `300` | Default TTL in seconds for cache entries (5 minutes). |
 | `ADMIN_EMAIL` | **required** | — | Email address of the bootstrap admin user. On first startup with an empty database, this address is pre-authorized as admin when the user completes passkey registration. |
 | `DEFAULT_TIMEZONE` | optional | `UTC` | IANA time zone name (e.g. `America/Los_Angeles`) the reports API (`/api/reports`, #0139) uses to bucket clicks into days when a request has no `tz` parameter. Validated at load: an unknown zone name stops startup with an error naming `DEFAULT_TIMEZONE`. |
-| `PORTIKO_ENABLED` | optional | `false` | Runs the embedded [Portiko](https://github.com/Kolonnade/Portiko) identity provider under `/id` on this instance's own host (#0130). **Off by default**: with it unset or `false` the binary behaves exactly as before, reads no other `PORTIKO_*` value and creates nothing in the database. `true` or `false` only; any other value stops startup. It is refused with `STORAGE=json`. Sign-in does not use the provider yet (#0132). See [Embedded Portiko provider](#embedded-portiko-provider-id). |
+| `PORTIKO_ENABLED` | optional | `false` | Runs the embedded [Portiko](https://github.com/Kolonnade/Portiko) identity provider under `/id` on this instance's own host (#0130). **Off by default**: with it unset or `false` the binary behaves exactly as before, reads no other `PORTIKO_*` value and creates nothing in the database. `true` or `false` only; any other value stops startup. It is refused with `STORAGE=json`. With it on, ShortLinks signs in through the provider (#0132): see [Signing in through Portiko](#signing-in-through-portiko). See [Embedded Portiko provider](#embedded-portiko-provider-id). |
 | `PORTIKO_CRYPTO_KEY` | **required when enabled** | — | 32 bytes as 64 hex characters (or base64). Seals the provider's signing keys and authorization codes. Generate with `openssl rand -hex 32`. Keep it stable: with a different key the provider refuses to start (`cannot decrypt the private key`). |
 | `PORTIKO_CLIENT_SECRET` | **required when enabled** | — | At least 16 characters. The secret ShortLinks itself signs in with; it is registered as the `shortlinks` client on every start. Generate with `openssl rand -hex 32`. |
 | `PORTIKO_DATABASE_URL` | optional | `DATABASE_URL` with `search_path=portiko` | Where the provider keeps its tables. The default is the same database in its own `portiko` schema, created at startup if missing. If you set it, include a `search_path` for a schema of your own (created if missing) or point it at a separate database. |
@@ -84,6 +84,31 @@ captured since the last run are imported. It writes only `users.subject` and
 one `account.portiko_imported` audit row per user it changed; it never alters
 passkeys, sessions or any other ShortLinks table. With `PORTIKO_ENABLED` off it
 does nothing.
+
+### Signing in through Portiko
+
+With `PORTIKO_ENABLED=true` ShortLinks is a relying party of its own provider
+(#0132), using Portiko's `rp` library. One instance runs one sign-in system or
+the other; with the switch off the passkey flows are exactly as before.
+
+- `GET /auth/portiko/login?return_to=/path` starts a sign-in; `GET
+  /auth/portiko/callback` finishes it; `POST /auth/portiko/backchannel` and
+  `POST /auth/portiko/events` are the provider's sign-out and profile pushes.
+- `POST /auth/logout` ends the session here and at the provider and redirects to
+  `/`. `POST /auth/logout/all` ends every session of the account on this site
+  (JSON `{message, revoked_count}`, as before).
+- `/auth/register/*`, `/auth/login/*` and `/auth/recover*` answer 404.
+- Sessions live in the `rp_sessions` table (migration 000028). The cookie holds
+  an opaque id; the table keeps only its SHA-256, and the tokens and email are
+  sealed with AES-256-GCM. The session key and the flow-cookie key are derived
+  from `PORTIKO_CRYPTO_KEY`, so there is nothing more to set, and rotating that
+  key signs everyone out.
+- Each request maps the session's subject to `users.subject` and reads `active`
+  and `is_admin` from ShortLinks' own table, so deactivating a user takes effect
+  on their next request. A first sign-in by an unknown subject matches an
+  existing user by email (recording the subject), else creates a user (the first
+  user, or `ADMIN_EMAIL`, becomes admin) while `registrations_enabled` is true.
+- API tokens (`Authorization: Bearer slk_...`) are unchanged.
 
 ---
 

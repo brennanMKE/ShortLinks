@@ -57,7 +57,13 @@ func DefaultAPITokenLimits() APITokenLimits {
 //   - attaches an AuthUser with IsAdmin=false and the token identity, and
 //     marks the context for audit attribution (audit.WithAPIToken).
 func RequireSessionOrAPIToken(sessions SessionResolver, tokens APITokenResolver, limits APITokenLimits) func(http.Handler) http.Handler {
-	sessionGuard := RequireSession(sessions)
+	return RequireGuardOrAPIToken(RequireSession(sessions), tokens, limits)
+}
+
+// RequireGuardOrAPIToken is RequireSessionOrAPIToken over any session guard, so
+// the Portiko sign-in (#0132) can supply its own while the API-token path stays
+// the same code.
+func RequireGuardOrAPIToken(sessionGuard func(http.Handler) http.Handler, tokens APITokenResolver, limits APITokenLimits) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		viaSession := sessionGuard(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +129,11 @@ func RequireSessionOrAPIToken(sessions SessionResolver, tokens APITokenResolver,
 // SameSite=Strict session cookie. A leaked token therefore can never be used
 // to mint more tokens or to keep itself alive after being revoked.
 func RequireCookieSession(sessions SessionResolver) func(http.Handler) http.Handler {
-	sessionGuard := RequireSession(sessions)
+	return RequireCookieGuard(RequireSession(sessions))
+}
+
+// RequireCookieGuard is RequireCookieSession over any session guard (#0132).
+func RequireCookieGuard(sessionGuard func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		guarded := sessionGuard(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

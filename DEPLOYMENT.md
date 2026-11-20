@@ -180,8 +180,11 @@ invalidates all active sessions.
 
 Release #0130 adds an identity provider served under `/id`. **Leave it off
 until you mean to use it**: with `PORTIKO_ENABLED` unset the binary behaves as
-before and nothing is created in the database. Nothing signs in through it yet
-(#0132). To turn it on for an instance, add to `/etc/shortlinks/config.env`:
+before and nothing is created in the database. With it on, ShortLinks signs
+people in through it (#0132; migration 000028 adds the `rp_sessions` table, which
+stays empty while it is off). Everyone is signed out once at the switch-over, and
+the SPA must be the #0133 build before the switch is turned on, because the
+old passkey routes stop answering. To turn it on for an instance, add to `/etc/shortlinks/config.env`:
 
 ```bash
 PORTIKO_ENABLED=true

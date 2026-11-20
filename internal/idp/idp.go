@@ -4,7 +4,7 @@
 // Everything here is behind PORTIKO_ENABLED, which is off by default. cmd/
 // shortlinks calls Mount once; with the switch off Mount returns the handler it
 // was given untouched, so an instance that has not opted in behaves exactly as
-// before. Sign-in does not use the provider yet (#0132).
+// before. With it on, ShortLinks signs in through the provider as a relying party (#0132, portal.go).
 package idp
 
 import (
@@ -56,6 +56,18 @@ func Mount(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, next htt
 	if !cfg.PortikoEnabled {
 		return next, func() {}, nil
 	}
+	return MountPortal(ctx, cfg, pool, next, NewPortal(cfg, pool))
+}
+
+// MountPortal is Mount with the Portal (#0132) that the route table's guards
+// were built from. It starts the provider, binds the Portal's relying party to
+// it, and serves the Portiko sign-in routes in front of next. With the switch
+// off it returns next untouched.
+func MountPortal(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, next http.Handler, portal *Portal) (http.Handler, func(), error) {
+	if !cfg.PortikoEnabled {
+		return next, func() {}, nil
+	}
+	next = portal.Wrap(next)
 	startCtx, cancel := context.WithTimeout(ctx, StartupTimeout)
 	defer cancel()
 	p, err := start(startCtx, cfg, pool)
@@ -64,6 +76,12 @@ func Mount(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, next htt
 		return mountAt(unavailable(), next), func() {}, nil
 	}
 	go p.Sweep(ctx)
+	if err := portal.bind(startCtx, p.Handler()); err != nil {
+		// The provider is up but signing in through it is not: the guards answer 503.
+		slog.Error("portiko sign-in failed to start; protected routes answer 503", "err", err)
+	} else if st := portal.state.Load(); st != nil {
+		go st.sessions.RunPruner(ctx, time.Hour)
+	}
 	return mountAt(p.Handler(), next), p.Close, nil
 }
 
@@ -126,7 +144,10 @@ func start(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool) (*provid
 		RedirectURIs:           []string{base + "/auth/portiko/callback"},
 		PostLogoutRedirectURIs: []string{base + "/"},
 		BackchannelLogoutURI:   base + "/auth/portiko/backchannel",
-		FirstParty:             true,
+		EventsURI:              base + "/auth/portiko/events",
+		// email is what #0132's OnSignIn maps a sign-in onto a users row with.
+		Scopes:     []string{"openid", "profile", "email", "offline_access"},
+		FirstParty: true,
 	}); err != nil {
 		p.Close()
 		return nil, fmt.Errorf("idp: registering the ShortLinks client: %w", err)

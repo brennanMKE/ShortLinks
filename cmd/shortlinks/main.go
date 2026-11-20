@@ -273,6 +273,19 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 	apiTokensH := handlers.NewAPITokensHandler(store, auditLogger)
 	requireAPI := middleware.RequireSessionOrAPIToken(store, store, middleware.DefaultAPITokenLimits())
 	requireCookie := middleware.RequireCookieSession(store)
+	// With PORTIKO_ENABLED the same four guards authenticate through Portiko's rp
+	// library instead (#0132); only the session half changes, the API-token path
+	// is the same code. With it off, none of this runs.
+	var portal *idp.Portal
+	if cfg.PortikoEnabled {
+		portal = idp.NewPortal(cfg, pool)
+		requireSession = portal.RequireSession
+		requireAdmin = func(next http.Handler) http.Handler {
+			return requireSession(middleware.RequireAdmin(next))
+		}
+		requireAPI = middleware.RequireGuardOrAPIToken(portal.RequireSession, store, middleware.DefaultAPITokenLimits())
+		requireCookie = middleware.RequireCookieGuard(portal.RequireSession)
+	}
 
 	handler, patterns := buildMux(cfg, pool,
 		authH, credsH, settingsH, adminUsersH, adminAuditH,
@@ -281,7 +294,10 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 		idempotency.Middleware(idemStore))
 	// Embedded Portiko provider under /id (#0130). A no-op unless
 	// PORTIKO_ENABLED=true, which is off by default.
-	handler, closePortiko, err := idp.Mount(ctx, cfg, pool, handler)
+	if portal == nil {
+		portal = idp.NewPortal(cfg, pool) // unused with the switch off: MountPortal returns handler untouched
+	}
+	handler, closePortiko, err := idp.MountPortal(ctx, cfg, pool, handler, portal)
 	if err != nil {
 		redirectCache.Close()
 		return nil, nil, nil, err

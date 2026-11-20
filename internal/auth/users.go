@@ -235,3 +235,32 @@ func (s *Store) ReactivateUser(ctx context.Context, id int64, auditor *audit.Log
 	}
 	return u, nil
 }
+
+// ResolveSubject loads the account a Portiko subject maps to (#0132), for the
+// per-request check behind the rp session: users.subject is the join between
+// the provider's identity and ShortLinks' own account, and active and is_admin
+// are always read fresh from ShortLinks' table. An unknown subject is
+// ErrSessionInvalid and a deactivated account ErrAccountInactive, the same
+// errors ResolveSession gives.
+func (s *Store) ResolveSubject(ctx context.Context, subject string) (SessionUser, error) {
+	if subject == "" {
+		return SessionUser{}, ErrSessionInvalid
+	}
+	var (
+		u      SessionUser
+		active bool
+	)
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, email, is_admin, active FROM users WHERE subject = $1`, subject,
+	).Scan(&u.ID, &u.Email, &u.IsAdmin, &active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SessionUser{}, ErrSessionInvalid
+	}
+	if err != nil {
+		return SessionUser{}, fmt.Errorf("auth: resolving subject: %w", err)
+	}
+	if !active {
+		return SessionUser{}, ErrAccountInactive
+	}
+	return u, nil
+}
