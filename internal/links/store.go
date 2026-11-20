@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/brennanMKE/ShortLinks/internal/audit"
 )
 
 // ErrLinkNotFound is returned by the store when no link matches the lookup for
@@ -98,14 +100,16 @@ const linkColumns = `l.id, l.user_id, l.key, l.destination_url, l.title,
 	        l.active, l.denied_reason, l.created_at, l.expires_at,
 	        l.campaign_id, l.utm_source, l.utm_medium, l.utm_campaign, l.utm_term, l.utm_content, l.placement,
 	        l.external_id,
-	        l.fallback_url`
+	        l.fallback_url,
+	        l.purge_after_expiry_days`
 
 // Store is the data-access layer for links: create, list, fetch, update, and
 // deactivate. Every method is scoped to an owning user id so a request can only
 // ever touch its own links; ownership is enforced in SQL (the WHERE clause),
 // not in the handler, so it cannot be bypassed.
 type Store struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	auditor *audit.Logger // optional; see WithAudit (#0183)
 }
 
 // NewStore constructs a Store over the shared connection pool.
@@ -148,6 +152,9 @@ type Link struct {
 	// FallbackURL (#0180) is where a visitor goes when the link is expired or
 	// deactivated; empty means none (the campaign's default may still apply).
 	FallbackURL string
+	// PurgeAfterExpiryDays (#0183): the sweeper purges the link this many days
+	// after ExpiresAt; nil = never auto-purge.
+	PurgeAfterExpiryDays *int
 	// ExternalID is the client-supplied id (#0182); empty when the column is NULL.
 	ExternalID   string
 	CampaignName string // populated only by GetLink; "" elsewhere (ListLinksFiltered sets only the slug)
@@ -163,7 +170,7 @@ type Link struct {
 func (s *Store) KeyExists(ctx context.Context, key string) (bool, error) {
 	var exists bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1)`, key,
+		`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1) OR EXISTS(SELECT 1 FROM purged_keys WHERE key = $1)`, key,
 	).Scan(&exists); err != nil {
 		return false, fmt.Errorf("links: checking key exists: %w", err)
 	}
@@ -206,6 +213,9 @@ type NewLink struct {
 	// so a request for a longer key never gets a shorter existing one back. A
 	// shorter match is ignored and a new link is inserted. Zero means no limit.
 	MinKeyLength int
+	// PurgeAfterExpiryDays (#0183) sets purge_after_expiry_days on insert;
+	// nil = never auto-purge. Honoured by CreateLink and CreateOrReactivateLink.
+	PurgeAfterExpiryDays *int
 }
 
 // CreateLink inserts a new active, non-denied link and returns the full row
@@ -234,12 +244,12 @@ func (s *Store) CreateLink(ctx context.Context, in NewLink) (Link, error) {
 	}
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
-		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id, fallback_url)
-		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id, fallback_url, purge_after_expiry_days)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, in.Key, in.DestinationURL, title, in.ExpiresAt,
 		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
-		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID), nullIfEmpty(in.FallbackURL),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID), nullIfEmpty(in.FallbackURL), in.PurgeAfterExpiryDays,
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -258,21 +268,22 @@ func (s *Store) CreateLink(ctx context.Context, in NewLink) (Link, error) {
 // the three insert paths cannot drift on which NewLink fields get copied.
 func newLinkFromInput(in NewLink) Link {
 	return Link{
-		UserID:         in.UserID,
-		Key:            in.Key,
-		DestinationURL: in.DestinationURL,
-		Title:          in.Title,
-		Active:         true,
-		DeniedReason:   0,
-		CampaignID:     in.CampaignID,
-		UTMSource:      in.UTMSource,
-		UTMMedium:      in.UTMMedium,
-		UTMCampaign:    in.UTMCampaign,
-		UTMTerm:        in.UTMTerm,
-		UTMContent:     in.UTMContent,
-		Placement:      in.Placement,
-		FallbackURL:    in.FallbackURL,
-		ExternalID:     in.ExternalID,
+		UserID:               in.UserID,
+		Key:                  in.Key,
+		DestinationURL:       in.DestinationURL,
+		Title:                in.Title,
+		Active:               true,
+		DeniedReason:         0,
+		CampaignID:           in.CampaignID,
+		UTMSource:            in.UTMSource,
+		UTMMedium:            in.UTMMedium,
+		UTMCampaign:          in.UTMCampaign,
+		UTMTerm:              in.UTMTerm,
+		UTMContent:           in.UTMContent,
+		Placement:            in.Placement,
+		FallbackURL:          in.FallbackURL,
+		ExternalID:           in.ExternalID,
+		PurgeAfterExpiryDays: in.PurgeAfterExpiryDays,
 	}
 }
 
@@ -467,7 +478,7 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	key, err := genKey(func(candidate string) (bool, error) {
 		var exists bool
 		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1)`, candidate,
+			`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1) OR EXISTS(SELECT 1 FROM purged_keys WHERE key = $1)`, candidate,
 		).Scan(&exists); err != nil {
 			return false, fmt.Errorf("links: checking key exists in tx: %w", err)
 		}
@@ -485,12 +496,12 @@ func (s *Store) CreateOrReactivateLink(ctx context.Context, in NewLink, genKey f
 	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO links (user_id, key, destination_url, title, expires_at, active, denied_reason, created_at,
-		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id, fallback_url)
-		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		                     campaign_id, utm_source, utm_medium, utm_campaign, utm_term, utm_content, placement, external_id, fallback_url, purge_after_expiry_days)
+		 VALUES ($1, $2, $3, $4, $5, TRUE, 0, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		 RETURNING id, created_at, expires_at`,
 		in.UserID, key, in.DestinationURL, title, in.ExpiresAt,
 		in.CampaignID, nullIfEmpty(in.UTMSource), nullIfEmpty(in.UTMMedium), nullIfEmpty(in.UTMCampaign),
-		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID), nullIfEmpty(in.FallbackURL),
+		nullIfEmpty(in.UTMTerm), nullIfEmpty(in.UTMContent), nullIfEmpty(in.Placement), nullIfEmpty(in.ExternalID), nullIfEmpty(in.FallbackURL), in.PurgeAfterExpiryDays,
 	).Scan(&link.ID, &link.CreatedAt, &link.ExpiresAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -605,7 +616,7 @@ func (s *Store) CreateLinksBatch(ctx context.Context, rows []NewLink, genKey fun
 		key, err := genKey(func(candidate string) (bool, error) {
 			var exists bool
 			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1)`, candidate,
+				`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1) OR EXISTS(SELECT 1 FROM purged_keys WHERE key = $1)`, candidate,
 			).Scan(&exists); err != nil {
 				return false, fmt.Errorf("links: checking key exists in batch tx: %w", err)
 			}
@@ -932,6 +943,9 @@ type LinkUpdate struct {
 	FallbackURL *string
 	// ExternalID (#0182): nil = unchanged; pointer to "" clears it to NULL.
 	ExternalID *string
+	// PurgeAfterExpiryDays (#0183): nil = unchanged; non-nil = set to
+	// *PurgeAfterExpiryDays (nil clears it).
+	PurgeAfterExpiryDays **int
 }
 
 // UpdateLink applies a partial update to the user's own link and returns the
@@ -977,6 +991,12 @@ func (s *Store) UpdateLink(ctx context.Context, userID int64, key string, upd Li
 	if upd.ExpiresAt != nil {
 		setClauses = append(setClauses, fmt.Sprintf("expires_at = $%d", next))
 		args = append(args, *upd.ExpiresAt) // *upd.ExpiresAt is a *time.Time; nil clears the column
+		next++
+	}
+
+	if upd.PurgeAfterExpiryDays != nil {
+		setClauses = append(setClauses, fmt.Sprintf("purge_after_expiry_days = $%d", next))
+		args = append(args, *upd.PurgeAfterExpiryDays)
 		next++
 	}
 
@@ -1096,7 +1116,7 @@ func scanLink(row pgx.Row) (Link, error) {
 		&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
 		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID, &fallbackURL,
-		&l.ClickCount,
+		&l.PurgeAfterExpiryDays, &l.ClickCount,
 	); err != nil {
 		return Link{}, err
 	}
@@ -1123,7 +1143,7 @@ func scanLinkWithCampaign(row pgx.Row) (Link, error) {
 		&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 		&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
 		&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID, &fallbackURL,
-		&l.ClickCount, &campaignName, &campaignSlug,
+		&l.PurgeAfterExpiryDays, &l.ClickCount, &campaignName, &campaignSlug,
 	); err != nil {
 		return Link{}, err
 	}

@@ -192,3 +192,24 @@ func TestHomeHandler_NoDestinationInActivityJSON(t *testing.T) {
 		}
 	}
 }
+
+// A removed link must leave the public activity at once (#0183), not after the
+// 60 second cache window.
+func TestHomeHandler_InvalidateActivityRecomputes(t *testing.T) {
+	calls := 0
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	h := NewHomeHandler(fakeHomeReader{extra: map[string]string{"home_mode": "activity"}}).
+		WithActivity(func(context.Context) (*reports.PublicActivity, error) { calls++; return sampleActivity(), nil })
+	h.now = func() time.Time { return now }
+
+	getHome(h)
+	getHome(h)
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (cached)", calls)
+	}
+	h.InvalidateActivity()
+	getHome(h)
+	if calls != 2 {
+		t.Errorf("calls = %d after InvalidateActivity, want 2", calls)
+	}
+}

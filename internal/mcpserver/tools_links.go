@@ -2,11 +2,13 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/brennanMKE/ShortLinks/internal/qr"
@@ -76,21 +78,22 @@ type keyIn struct {
 }
 
 type createLinkIn struct {
-	DestinationURL string `json:"destination_url" jsonschema:"The full http or https URL the short link redirects to"`
-	Title          string `json:"title,omitempty" jsonschema:"A human-readable title for the link"`
-	Key            string `json:"key,omitempty" jsonschema:"A custom short key of 1 to 32 characters from a-z A-Z 0-9 - _. Omit it to get a generated one"`
-	KeyLength      int    `json:"key_length,omitempty" jsonschema:"Length of the generated key, 6 to 32 (default 6). Use 12 or more for links that must not be guessable. Ignored when key is set"`
-	ExpiresAt      string `json:"expires_at,omitempty" jsonschema:"When the link stops redirecting, as an RFC 3339 timestamp such as 2026-12-31T23:59:59Z"`
-	CampaignSlug   string `json:"campaign_slug,omitempty" jsonschema:"Slug of one of your campaigns to put the link in"`
-	UTMSource      string `json:"utm_source,omitempty" jsonschema:"utm_source label recorded with the link, such as newsletter"`
-	UTMMedium      string `json:"utm_medium,omitempty" jsonschema:"utm_medium label recorded with the link, such as email"`
-	UTMCampaign    string `json:"utm_campaign,omitempty" jsonschema:"utm_campaign label recorded with the link"`
-	UTMTerm        string `json:"utm_term,omitempty" jsonschema:"utm_term label recorded with the link"`
-	UTMContent     string `json:"utm_content,omitempty" jsonschema:"utm_content label that identifies the piece of content"`
-	Placement      string `json:"placement,omitempty" jsonschema:"Where the link will be placed, such as a poster location or channel"`
-	ExternalID     string `json:"external_id,omitempty" jsonschema:"Your own id for this link, 1 to 128 printable ASCII characters, unique among your links. Use it to find the link again with get_link_by_external_id. A different external_id always gets a new link, even for a destination already shortened"`
-	FallbackURL    string `json:"fallback_url,omitempty" jsonschema:"Where visitors go when the link is expired or deactivated, an absolute https (or http) URL. The server adds ?reason=expired or ?reason=inactive. Without it they get a 404 or 410"`
-	IdempotencyKey string `json:"idempotency_key,omitempty" jsonschema:"A unique string for this create. Retrying with the same value returns the first result instead of creating a duplicate"`
+	DestinationURL       string `json:"destination_url" jsonschema:"The full http or https URL the short link redirects to"`
+	Title                string `json:"title,omitempty" jsonschema:"A human-readable title for the link"`
+	Key                  string `json:"key,omitempty" jsonschema:"A custom short key of 1 to 32 characters from a-z A-Z 0-9 - _. Omit it to get a generated one"`
+	KeyLength            int    `json:"key_length,omitempty" jsonschema:"Length of the generated key, 6 to 32 (default 6). Use 12 or more for links that must not be guessable. Ignored when key is set"`
+	ExpiresAt            string `json:"expires_at,omitempty" jsonschema:"When the link stops redirecting, as an RFC 3339 timestamp such as 2026-12-31T23:59:59Z"`
+	CampaignSlug         string `json:"campaign_slug,omitempty" jsonschema:"Slug of one of your campaigns to put the link in"`
+	UTMSource            string `json:"utm_source,omitempty" jsonschema:"utm_source label recorded with the link, such as newsletter"`
+	UTMMedium            string `json:"utm_medium,omitempty" jsonschema:"utm_medium label recorded with the link, such as email"`
+	UTMCampaign          string `json:"utm_campaign,omitempty" jsonschema:"utm_campaign label recorded with the link"`
+	UTMTerm              string `json:"utm_term,omitempty" jsonschema:"utm_term label recorded with the link"`
+	UTMContent           string `json:"utm_content,omitempty" jsonschema:"utm_content label that identifies the piece of content"`
+	Placement            string `json:"placement,omitempty" jsonschema:"Where the link will be placed, such as a poster location or channel"`
+	ExternalID           string `json:"external_id,omitempty" jsonschema:"Your own id for this link, 1 to 128 printable ASCII characters, unique among your links. Use it to find the link again with get_link_by_external_id. A different external_id always gets a new link, even for a destination already shortened"`
+	FallbackURL          string `json:"fallback_url,omitempty" jsonschema:"Where visitors go when the link is expired or deactivated, an absolute https (or http) URL. The server adds ?reason=expired or ?reason=inactive. Without it they get a 404 or 410"`
+	PurgeAfterExpiryDays int    `json:"purge_after_expiry_days,omitempty" jsonschema:"Permanently delete the link this many days after it expires (1 to 3650). Needs expires_at. Omit to keep the link"`
+	IdempotencyKey       string `json:"idempotency_key,omitempty" jsonschema:"A unique string for this create. Retrying with the same value returns the first result instead of creating a duplicate"`
 }
 
 type updateLinkIn struct {
@@ -106,10 +109,19 @@ type updateLinkIn struct {
 	Placement      *string `json:"placement,omitempty" jsonschema:"New placement label"`
 	ExternalID     *string `json:"external_id,omitempty" jsonschema:"New external_id, or an empty string to clear it"`
 	FallbackURL    *string `json:"fallback_url,omitempty" jsonschema:"New fallback URL for when the link is expired or deactivated; an empty string clears it"`
+	// RawMessage so an explicit null (clear the setting) survives: encoding/json
+	// hands a null to a RawMessage field as the bytes "null", and omitempty drops
+	// the field only when it was not sent.
+	PurgeAfterExpiryDays json.RawMessage `json:"purge_after_expiry_days,omitempty" jsonschema:"Permanently delete the link this many days after it expires (1 to 3650). The link needs an expiry. Send null to turn auto-purge off"`
 }
 
 type externalIDIn struct {
 	ExternalID string `json:"external_id" jsonschema:"The external_id that was set when the link was created"`
+}
+
+type purgeLinkIn struct {
+	Key        string `json:"key" jsonschema:"The key of the link to permanently delete"`
+	ConfirmKey string `json:"confirm_key" jsonschema:"Must repeat the key exactly, to confirm the deletion"`
 }
 
 func registerLinkTools(b *Builder) {
@@ -201,9 +213,18 @@ func registerLinkTools(b *Builder) {
 	AddTool(b, Spec{
 		Name:        "update_link",
 		Title:       "Update a link",
-		Description: "Change a link's title, destination, expiry, UTM labels, placement or external_id. Only the fields you pass change; to turn a link off or on use deactivate_link or reactivate_link.",
+		Description: "Change a link's title, destination, expiry, UTM labels, placement, external_id, fallback URL or auto-purge days. Only the fields you pass change; to turn a link off or on use deactivate_link or reactivate_link.",
 		Write:       true, Idempotent: true,
 		Routes: []string{"PATCH /api/links/{key}"},
+		Refine: func(props map[string]*jsonschema.Schema) {
+			if p := props["purge_after_expiry_days"]; p != nil {
+				p.Type = ""
+				p.Types = []string{"integer", "null"}
+				p.Items = nil
+				one, max := 1.0, 3650.0
+				p.Minimum, p.Maximum = &one, &max
+			}
+		},
 	}, func(ctx context.Context, c *Caller, in updateLinkIn) (*mcp.CallToolResult, error) {
 		if r := requiredSeg("key", in.Key); r != nil {
 			return r, nil
@@ -222,6 +243,25 @@ func registerLinkTools(b *Builder) {
 			return r, nil
 		}
 		return proxy(ctx, c, http.MethodPatch, "/api/links/"+pathSeg(in.Key), nil, map[string]any{"active": false}, nil, summarizeLink("Deactivated"))
+	})
+
+	AddTool(b, Spec{
+		Name:  "purge_link",
+		Title: "Permanently delete a link",
+		Description: "DESTRUCTIVE and irreversible: permanently deletes a link and all of its click history, and removes its destination URL from the audit log. " +
+			"Use it when the destination holds a secret, such as an invitation token. The key can never be reused, and the short URL returns 404 at once. " +
+			"To only stop a link redirecting, use deactivate_link instead. Pass confirm_key equal to key.",
+		Write: true, Destructive: true,
+		Routes: []string{"DELETE /api/links/{key}"},
+	}, func(ctx context.Context, c *Caller, in purgeLinkIn) (*mcp.CallToolResult, error) {
+		if r := requiredSeg("key", in.Key); r != nil {
+			return r, nil
+		}
+		if in.ConfirmKey != in.Key {
+			return failure(0, "confirm_key must equal key to confirm the permanent deletion"), nil
+		}
+		return proxy(ctx, c, http.MethodDelete, "/api/links/"+pathSeg(in.Key), url.Values{"purge": {"true"}}, nil,
+			map[string]string{"X-Confirm-Purge": in.Key}, func(map[string]any) string { return "Purged link " + in.Key })
 	})
 
 	AddTool(b, Spec{

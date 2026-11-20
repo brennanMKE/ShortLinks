@@ -1,6 +1,6 @@
 # Audit log
 
-ShortLinks maintains an append-only audit log of every significant action. Rows are inserted once and never updated or deleted.
+ShortLinks maintains an append-only audit log of every significant action. Rows are inserted once and never deleted. They are never updated either, with one deliberate exception: purging a link (#0183) redacts the destination from that link's earlier entries (see [Purging a link](#purging-a-link-0183)).
 
 ## Schema
 
@@ -209,3 +209,21 @@ The UI is admin-only: a non-admin who reaches the Admin view sees an access-deni
 - **Credential metadata** — `credential.added` records `device_name` and `aaguid` (authenticator model identifier) but never the raw credential bytes or public key.
 - **Settings** — `settings.updated` records the old and new value of the changed setting key, making the full change history visible to admins with log access.
 - **Access control** — the read endpoint (`GET /admin/audit`) is admin-only. There is no user-facing self-service audit view.
+
+## Purging a link (#0183)
+
+`DELETE /api/links/{key}?purge=true` (with the header `X-Confirm-Purge: <key>`) permanently deletes a link, for destinations that carry a secret such as an invitation token. A plain `DELETE` still only deactivates. MCP has `purge_link`, and the Links table has "Delete permanently…".
+
+**The redaction exception.** Earlier entries for the link (`target_type = 'link'` and `target_id` = the link id: `link.created`, `link.reactivated`, `link.deactivated`, `link.denied`) are updated in the same transaction. `destination_url` is removed from `metadata`, and so are `fallback_url` and `default_fallback_url` (#0180), which can carry secrets the same way. `destination_redacted: true` is added. Their action, time, actor, key and other fields stay. This is the only place the audit log is updated. Batch-create rejections for denied URLs have no `target_id` and never created a link, so they are not redacted.
+
+**The purge entry.** `link.purged` records `key`, `title`, `campaign_id` and `campaign_slug`, and never the destination. For a purge by the retention sweeper (below) there is no actor and `metadata.via` is `retention`.
+
+**Related data removed in the same transaction:** the link's clicks, and the owner's `idempotency_keys` rows whose stored response names the link.
+
+**`external_id` is freed.** A purged link's `external_id` (#0182) can be used again, unlike its key. The tombstone rule exists because a key is printed on short URLs that live outside the database. An external id is only the client's own reference, so no printed copy depends on it staying unused.
+
+**Tombstones.** A purged key is recorded in `purged_keys` (key and time only) and is never issued again, generated or custom, because reusing it would send old printed URLs to a new destination. Creating a link with that key answers `409`.
+
+**`purge_after_expiry_days`.** An optional per-link setting (1 to 3650, needs `expires_at`, off by default). The hourly retention sweeper purges a link once `expires_at` plus that many days has passed, re-checking the condition under a row lock so an owner who extends the expiry in the meantime keeps the link. At most 500 links are purged per pass.
+
+**Backups and WAL.** A purge removes the destination from the live database only. Database backups, snapshots and WAL archives taken earlier still contain it until they rotate out, so the secret stays readable there for the length of the backup retention period. Treat tokens in destinations as exposed for that long, and rotate the token at its source if that matters.

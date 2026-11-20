@@ -65,6 +65,9 @@ type linkStore interface {
 	GetLinkByExternalID(ctx context.Context, userID int64, externalID string) (links.Link, error)
 	UpdateLink(ctx context.Context, userID int64, key string, upd links.LinkUpdate) (links.Link, error)
 	DeactivateLink(ctx context.Context, userID int64, key string) error
+	// PurgeLink hard-deletes the link and everything that holds its destination
+	// (#0183); links.ErrLinkNotFound when it is not the caller's.
+	PurgeLink(ctx context.Context, userID int64, key string) (links.Purged, error)
 	// ReactivateLink sets active=true (#0145); links.ErrLinkDenied for a
 	// filter-denied row.
 	ReactivateLink(ctx context.Context, userID int64, key, expectedDest string) error
@@ -145,6 +148,8 @@ type LinksHandler struct {
 	store linkStore
 	// defaultTZ is DEFAULT_TIMEZONE, the zone for the list window (#0144).
 	defaultTZ string
+	// onPurge runs after a successful purge (#0183); may be nil.
+	onPurge func()
 	// cache is the redirect cache to evict from on update/deactivate; may be nil
 	// (no cache wired) in which case eviction is skipped.
 	cache cacheEvictor
@@ -216,6 +221,9 @@ type linkView struct {
 	UTMTerm     string `json:"utm_term"`
 	UTMContent  string `json:"utm_content"`
 	Placement   string `json:"placement"`
+	// PurgeAfterExpiryDays (#0183): days after expires_at when the retention
+	// sweeper purges the link; null = never.
+	PurgeAfterExpiryDays *int `json:"purge_after_expiry_days"`
 	// ExternalID (#0182) is the client-supplied id, null when the link has none.
 	ExternalID *string `json:"external_id"`
 	// FallbackURL (#0180) is the link's own fallback for when it is expired or
@@ -232,25 +240,26 @@ func toLinkView(l links.Link, baseURL string) linkView {
 		extID = &e
 	}
 	return linkView{
-		ID:             l.ID,
-		Key:            l.Key,
-		ShortURL:       qr.ShortURL(baseURL, l.Key),
-		DestinationURL: l.DestinationURL,
-		Title:          l.Title,
-		Active:         l.Active,
-		DeniedReason:   l.DeniedReason,
-		CreatedAt:      l.CreatedAt,
-		ExpiresAt:      l.ExpiresAt,
-		ClickCount:     l.ClickCount,
-		CampaignID:     l.CampaignID,
-		UTMSource:      l.UTMSource,
-		UTMMedium:      l.UTMMedium,
-		UTMCampaign:    l.UTMCampaign,
-		UTMTerm:        l.UTMTerm,
-		UTMContent:     l.UTMContent,
-		Placement:      l.Placement,
-		ExternalID:     extID,
-		FallbackURL:    l.FallbackURL,
+		ID:                   l.ID,
+		Key:                  l.Key,
+		ShortURL:             qr.ShortURL(baseURL, l.Key),
+		DestinationURL:       l.DestinationURL,
+		Title:                l.Title,
+		Active:               l.Active,
+		DeniedReason:         l.DeniedReason,
+		CreatedAt:            l.CreatedAt,
+		ExpiresAt:            l.ExpiresAt,
+		ClickCount:           l.ClickCount,
+		CampaignID:           l.CampaignID,
+		UTMSource:            l.UTMSource,
+		UTMMedium:            l.UTMMedium,
+		UTMCampaign:          l.UTMCampaign,
+		UTMTerm:              l.UTMTerm,
+		UTMContent:           l.UTMContent,
+		Placement:            l.Placement,
+		ExternalID:           extID,
+		FallbackURL:          l.FallbackURL,
+		PurgeAfterExpiryDays: l.PurgeAfterExpiryDays,
 	}
 }
 
@@ -287,6 +296,9 @@ type createLinkRequest struct {
 	// KeyLength (#0179) is the length of the generated key, 6..32 (default 6).
 	// It is ignored when a custom key is supplied.
 	KeyLength *int `json:"key_length"`
+	// PurgeAfterExpiryDays (#0183), 1..3650: purge the link this many days after
+	// expires_at. Requires expires_at. Omitted = never auto-purge.
+	PurgeAfterExpiryDays *int `json:"purge_after_expiry_days"`
 	// ExternalID (#0182) is an optional client-supplied id, 1 to 128 printable
 	// ASCII characters, unique per user. null or "" means none.
 	ExternalID *string `json:"external_id"`
@@ -380,6 +392,13 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	customKey := strings.TrimSpace(req.customKey())
 
+	if req.PurgeAfterExpiryDays != nil {
+		if msg := validPurgeAfter(*req.PurgeAfterExpiryDays, req.ExpiresAt != nil); msg != "" {
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+	}
+
 	keyLength := links.KeyLength
 	// key_length only applies to generated keys: it is not validated (or used)
 	// when a custom key is sent.
@@ -439,20 +458,21 @@ func (h *LinksHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	in := links.NewLink{
-		UserID:         u.ID,
-		DestinationURL: dest,
-		Title:          strings.TrimSpace(req.Title),
-		ExpiresAt:      req.ExpiresAt,
-		CampaignID:     campaignID,
-		UTMSource:      strings.TrimSpace(req.UTMSource),
-		UTMMedium:      strings.TrimSpace(req.UTMMedium),
-		UTMCampaign:    strings.TrimSpace(req.UTMCampaign),
-		UTMTerm:        strings.TrimSpace(req.UTMTerm),
-		UTMContent:     strings.TrimSpace(req.UTMContent),
-		Placement:      strings.TrimSpace(req.Placement),
-		FallbackURL:    fallbackURL,
-		MinKeyLength:   keyLength,
-		ExternalID:     externalID,
+		UserID:               u.ID,
+		DestinationURL:       dest,
+		Title:                strings.TrimSpace(req.Title),
+		ExpiresAt:            req.ExpiresAt,
+		CampaignID:           campaignID,
+		UTMSource:            strings.TrimSpace(req.UTMSource),
+		UTMMedium:            strings.TrimSpace(req.UTMMedium),
+		UTMCampaign:          strings.TrimSpace(req.UTMCampaign),
+		UTMTerm:              strings.TrimSpace(req.UTMTerm),
+		UTMContent:           strings.TrimSpace(req.UTMContent),
+		Placement:            strings.TrimSpace(req.Placement),
+		FallbackURL:          fallbackURL,
+		MinKeyLength:         keyLength,
+		ExternalID:           externalID,
+		PurgeAfterExpiryDays: req.PurgeAfterExpiryDays,
 	}
 
 	// ───────────────────────────────────────────────────────────────────────
@@ -719,6 +739,13 @@ type enrichedListResponse struct {
 	PerPage int             `json:"per_page"`
 	Total   int64           `json:"total"`
 	Window  *listWindowInfo `json:"window,omitempty"`
+}
+
+// OnPurge registers fn to run after a link is purged (#0183), for example to
+// invalidate the home page activity cache.
+func (h *LinksHandler) OnPurge(fn func()) *LinksHandler {
+	h.onPurge = fn
+	return h
 }
 
 // WithDefaultTimezone sets the IANA zone (DEFAULT_TIMEZONE) used for the
@@ -1211,6 +1238,9 @@ type patchLinkRequest struct {
 	// all, so sending `"expires_at": null` clears it while omitting the field
 	// leaves it unchanged. Populated by UnmarshalJSON.
 	expiresAtPresent bool
+	// PurgeAfterExpiryDays (#0183): null clears, a number sets, absent leaves it.
+	PurgeAfterExpiryDays *int `json:"purge_after_expiry_days"`
+	purgeAfterPresent    bool
 	// externalIDPresent records whether the JSON had the external_id key, so
 	// null clears it instead of meaning "unchanged".
 	externalIDPresent bool
@@ -1232,6 +1262,7 @@ func (p *patchLinkRequest) UnmarshalJSON(data []byte) error {
 	}
 	*p = patchLinkRequest(a)
 	_, p.expiresAtPresent = probe["expires_at"]
+	_, p.purgeAfterPresent = probe["purge_after_expiry_days"]
 	_, p.externalIDPresent = probe["external_id"]
 	return nil
 }
@@ -1311,6 +1342,30 @@ func (h *LinksHandler) Patch(w http.ResponseWriter, r *http.Request) {
 	setUTM(&upd.UTMTerm, req.UTMTerm)
 	setUTM(&upd.UTMContent, req.UTMContent)
 	setUTM(&upd.Placement, req.Placement)
+	if req.purgeAfterPresent {
+		if req.PurgeAfterExpiryDays != nil {
+			// The effective expiry is the one sent, else the stored one.
+			hasExpiry := req.expiresAtPresent && req.ExpiresAt != nil
+			if !req.expiresAtPresent {
+				cur, gerr := h.store.GetLink(r.Context(), u.ID, key)
+				if gerr != nil {
+					if errors.Is(gerr, links.ErrLinkNotFound) {
+						writeError(w, http.StatusNotFound, "link not found")
+					} else {
+						writeError(w, http.StatusInternalServerError, "internal server error")
+					}
+					return
+				}
+				hasExpiry = cur.ExpiresAt != nil
+			}
+			if msg := validPurgeAfter(*req.PurgeAfterExpiryDays, hasExpiry); msg != "" {
+				writeError(w, http.StatusBadRequest, msg)
+				return
+			}
+		}
+		pd := req.PurgeAfterExpiryDays
+		upd.PurgeAfterExpiryDays = &pd
+	}
 
 	if req.FallbackURL != nil {
 		fb := strings.TrimSpace(*req.FallbackURL)
@@ -1523,6 +1578,11 @@ func (h *LinksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Query().Get("purge") == "true" {
+		h.purge(w, r, u.ID, key)
+		return
+	}
+
 	err := h.deactivate(r, u.ID, key)
 	switch {
 	case err == nil:
@@ -1536,6 +1596,44 @@ func (h *LinksHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Link deactivated"})
+}
+
+// validPurgeAfter checks purge_after_expiry_days; it returns an error message
+// or "" when the value is acceptable.
+func validPurgeAfter(days int, hasExpiry bool) string {
+	if days < 1 || days > 3650 {
+		return "purge_after_expiry_days must be between 1 and 3650"
+	}
+	if !hasExpiry {
+		return "purge_after_expiry_days requires expires_at"
+	}
+	return ""
+}
+
+// purge is DELETE /api/links/{key}?purge=true (#0183): a real, irreversible
+// delete of the caller's link, its clicks, its destination in earlier audit
+// entries and in stored idempotent responses. The request must carry
+// X-Confirm-Purge: <key> so it cannot happen by accident. Read-only API tokens
+// never reach this (the API-token middleware refuses every non-safe method).
+func (h *LinksHandler) purge(w http.ResponseWriter, r *http.Request, userID int64, key string) {
+	if r.Header.Get("X-Confirm-Purge") != key {
+		writeError(w, http.StatusBadRequest, "purging a link is irreversible: send the header X-Confirm-Purge with the link key")
+		return
+	}
+	if _, err := h.store.PurgeLink(r.Context(), userID, key); err != nil {
+		if errors.Is(err, links.ErrLinkNotFound) {
+			writeError(w, http.StatusNotFound, "link not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	// /u/{key} must 404 now, not when the cached entry's TTL lapses.
+	h.evict(key)
+	if h.onPurge != nil {
+		h.onPurge()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"message": "Link purged", "key": key, "purged": true})
 }
 
 // evict drops the key from the redirect cache when one is wired. It is a no-op

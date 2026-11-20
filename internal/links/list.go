@@ -194,7 +194,7 @@ func (s *Store) ListLinksFiltered(ctx context.Context, userID int64, opts ListOp
 			&l.ID, &l.UserID, &l.Key, &l.DestinationURL, &title,
 			&l.Active, &l.DeniedReason, &l.CreatedAt, &expiresAt,
 			&l.CampaignID, &utmSource, &utmMedium, &utmCampaign, &utmTerm, &utmContent, &placement, &externalID, &fallbackURL,
-			&l.ClickCount, &l.ClicksWindow, &slug, &total,
+			&l.PurgeAfterExpiryDays, &l.ClickCount, &l.ClicksWindow, &slug, &total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("links: scanning filtered link: %w", err)
 		}

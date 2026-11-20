@@ -50,6 +50,8 @@ export interface Link {
   utm_term: string;
   utm_content: string;
   placement: string;
+  /** Days after expires_at when the server permanently deletes the link (#0183); null = never. */
+  purge_after_expiry_days?: number | null;
   /** Present on the enriched list response (#0144), i.e. when search/filter/sort params are sent. */
   content_key?: string;
   label?: string;

@@ -24,6 +24,7 @@
     searchLinkGroups,
     listCampaigns,
     deactivateLink,
+    purgeLink,
     reactivateLink,
     assignLinksToCampaign,
     unassignLinkFromCampaign,
@@ -46,7 +47,8 @@
   import { createPhone } from '../lib/phone.svelte';
   import Button from '../lib/Button.svelte';
   import { pushToast } from '../lib/toasts';
-  import { deactivatedMessage, reactivateErrorMessage } from '../lib/linkActions';
+  import { deactivatedMessage, reactivateErrorMessage, purgeConfirmMessage, purgedMessage } from '../lib/linkActions';
+  import ConfirmDialog from '../lib/ConfirmDialog.svelte';
   import Panel from '../lib/Panel.svelte';
   import { pastedUrl } from '../lib/newLink';
   import { openNewLink } from '../lib/newLinkDialog';
@@ -349,6 +351,26 @@
     });
   }
 
+  // #0183: Permanently delete is irreversible, so it asks first via ConfirmDialog.
+  let purgeTarget = $state<Link | null>(null);
+
+  async function performPurge(link: Link) {
+    try {
+      await purgeLink(link.key);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) currentUser.set(null);
+      throw new Error(
+        err instanceof ApiError && err.status === 403
+          ? 'This API token is read-only.'
+          : 'Could not delete this link. Please try again.',
+      );
+    }
+    selected = new Set([...selected].filter((k) => k !== link.key));
+    links.update((cur) => cur.filter((l) => l.key !== link.key));
+    reloadCount++;
+    pushToast({ message: purgedMessage() });
+  }
+
   function menuItems(link: Link) {
     const items: MenuItem[] = [
       { label: 'Open destination', href: link.destination_url },
@@ -360,6 +382,7 @@
     if (link.active && link.denied_reason === 0) {
       items.push({ label: 'Deactivate', danger: true, onselect: () => void handleDeactivate(link) });
     }
+    items.push({ label: 'Delete permanently…', danger: true, onselect: () => (purgeTarget = link) });
     return items;
   }
 
@@ -555,6 +578,17 @@
 </script>
 
 <svelte:window onpaste={onPaste} onkeydown={onKeydown} />
+
+<ConfirmDialog
+  open={purgeTarget !== null}
+  title="Delete link permanently?"
+  message={purgeTarget ? purgeConfirmMessage(purgeTarget.title || purgeTarget.key) : ''}
+  confirmLabel="Delete permanently"
+  busyLabel="Deleting…"
+  returnFocus={purgeTarget ? focusActions(purgeTarget.title || purgeTarget.key)() ?? null : null}
+  oncancel={() => (purgeTarget = null)}
+  onconfirm={() => (purgeTarget ? performPurge(purgeTarget) : undefined)}
+/>
 
 <div class="app-shell">
   <h1 class="page-title">

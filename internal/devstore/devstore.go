@@ -1460,6 +1460,39 @@ func (s *Store) DeactivateLink(_ context.Context, userID int64, key string) erro
 	return links.ErrLinkNotFound
 }
 
+// PurgeLink hard-deletes the user's own link (#0183) and strips the destination
+// from the link's audit records. Dev mode keeps no clicks, tombstones or
+// idempotency rows.
+func (s *Store) PurgeLink(_ context.Context, userID int64, key string) (links.Purged, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, l := range s.links {
+		if l.UserID == userID && l.Key == key {
+			s.links = append(s.links[:i], s.links[i+1:]...)
+			for j, rec := range s.audit {
+				if rec.TargetID != nil && *rec.TargetID == l.ID && rec.TargetType != nil && *rec.TargetType == audit.TargetLink {
+					var m map[string]any
+					if json.Unmarshal(rec.Metadata, &m) == nil {
+						redacted := false
+						for _, k := range []string{"destination_url", "fallback_url", "default_fallback_url"} {
+							if _, has := m[k]; has {
+								delete(m, k)
+								redacted = true
+							}
+						}
+						if redacted {
+							m["destination_redacted"] = true
+							s.audit[j].Metadata, _ = json.Marshal(m)
+						}
+					}
+				}
+			}
+			return links.Purged{Key: key, Title: l.Title, UserID: userID, CampaignSlug: l.CampaignSlug}, nil
+		}
+	}
+	return links.Purged{}, links.ErrLinkNotFound
+}
+
 // ReactivateLink sets active=true on the user's own link, refusing a
 // filter-denied one (links.ErrLinkDenied). expires_at is untouched.
 func (s *Store) ReactivateLink(_ context.Context, userID int64, key, expectedDest string) error {
@@ -1815,6 +1848,7 @@ var _ interface {
 	GetLink(ctx context.Context, userID int64, key string) (links.Link, error)
 	UpdateLink(ctx context.Context, userID int64, key string, upd links.LinkUpdate) (links.Link, error)
 	DeactivateLink(ctx context.Context, userID int64, key string) error
+	PurgeLink(ctx context.Context, userID int64, key string) (links.Purged, error)
 } = (*Store)(nil)
 
 // linksHandler's campaignLookup interface (#0099): resolving an optional

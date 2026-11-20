@@ -14,7 +14,6 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
 )
 
 // Spec describes one tool.

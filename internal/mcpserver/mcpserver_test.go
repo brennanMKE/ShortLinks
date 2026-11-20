@@ -51,7 +51,7 @@ func newEnv(t *testing.T) *env {
 	}
 	truncate := func() {
 		if _, err := pool.Exec(ctx, `TRUNCATE webauthn_challenges, pending_registrations, sessions,
-			passkey_credentials, audit_log, campaigns, clicks, links, users RESTART IDENTITY CASCADE`); err != nil {
+			passkey_credentials, audit_log, campaigns, clicks, links, purged_keys, users RESTART IDENTITY CASCADE`); err != nil {
 			t.Fatalf("truncate: %v", err)
 		}
 	}
@@ -74,6 +74,7 @@ func newEnv(t *testing.T) *env {
 	mux.Handle("GET /api/links", requireAPI(http.HandlerFunc(linksH.List)))
 	mux.Handle("GET /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Get)))
 	mux.Handle("PATCH /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Patch)))
+	mux.Handle("DELETE /api/links/{key}", requireAPI(http.HandlerFunc(linksH.Delete)))
 	mux.Handle("GET /api/links/{key}/{file}", requireAPI(http.HandlerFunc(linksH.File)))
 	mux.Handle("GET /api/links/by-external-id/{id}", requireAPI(http.HandlerFunc(linksH.GetByExternalID)))
 	mux.Handle("GET /api/campaigns", requireAPI(http.HandlerFunc(campH.List)))
@@ -209,7 +210,7 @@ func toolNames(t *testing.T, cs *mcp.ClientSession) map[string]*mcp.Tool {
 }
 
 var allTools = []string{
-	"whoami", "list_links", "get_link", "get_link_by_external_id", "get_link_qr", "create_link", "update_link", "deactivate_link", "reactivate_link",
+	"whoami", "list_links", "get_link", "get_link_by_external_id", "get_link_qr", "create_link", "update_link", "deactivate_link", "purge_link", "reactivate_link",
 	"list_campaigns", "get_campaign", "list_campaign_links", "create_campaign", "update_campaign", "delete_campaign",
 	"batch_create_campaign_links", "assign_links_to_campaign", "remove_link_from_campaign",
 	"list_reports", "get_overview", "get_top_content", "get_top_links", "get_breakdown", "get_timeseries",
@@ -333,6 +334,33 @@ func TestRoundTrip_InitializeListAndEveryTool(t *testing.T) {
 		t.Errorf("reactivate_link = %v", on)
 	}
 
+	// purge_link (#0183): destructive, needs confirm_key, and really deletes.
+	if d := tools["purge_link"].Annotations.DestructiveHint; d == nil || !*d {
+		t.Error("purge_link should be destructive")
+	}
+	if !strings.Contains(tools["purge_link"].Description, "DESTRUCTIVE") {
+		t.Errorf("purge_link description should say DESTRUCTIVE: %q", tools["purge_link"].Description)
+	}
+	doomed := ok(t, cs, "create_link", map[string]any{"destination_url": "https://example.com/secret?token=abc", "key": "mcp-purge"})
+	if res := call(t, cs, "purge_link", map[string]any{"key": doomed["key"], "confirm_key": "nope"}); !res.IsError {
+		t.Errorf("purge_link with a wrong confirm_key should fail, got %s", textOf(res))
+	}
+	// update_link sets and then clears auto-purge (null), and needs an expiry.
+	exp := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	set := ok(t, cs, "update_link", map[string]any{"key": "mcp-purge", "expires_at": exp, "purge_after_expiry_days": 7})
+	if set["purge_after_expiry_days"] != float64(7) {
+		t.Errorf("update_link purge_after_expiry_days = %v, want 7", set["purge_after_expiry_days"])
+	}
+	cleared := ok(t, cs, "update_link", map[string]any{"key": "mcp-purge", "purge_after_expiry_days": nil})
+	if cleared["purge_after_expiry_days"] != nil {
+		t.Errorf("update_link null did not clear purge_after_expiry_days: %v", cleared["purge_after_expiry_days"])
+	}
+	ok(t, cs, "get_link", map[string]any{"key": "mcp-purge"})
+	ok(t, cs, "purge_link", map[string]any{"key": "mcp-purge", "confirm_key": "mcp-purge"})
+	if res := call(t, cs, "get_link", map[string]any{"key": "mcp-purge"}); !res.IsError {
+		t.Errorf("get_link after purge_link should fail, got %s", textOf(res))
+	}
+
 	// QR as image content.
 	qr := call(t, cs, "get_link_qr", map[string]any{"key": key})
 	if qr.IsError || len(qr.Content) != 2 {
@@ -422,7 +450,7 @@ func TestReadOnlyToken_SeesOnlyReadTools_AndWritesFailAtBothLayers(t *testing.T)
 
 	cs := e.connect(ro)
 	tools := toolNames(t, cs)
-	writes := map[string]bool{"create_link": true, "update_link": true, "deactivate_link": true, "reactivate_link": true,
+	writes := map[string]bool{"create_link": true, "update_link": true, "deactivate_link": true, "purge_link": true, "reactivate_link": true,
 		"create_campaign": true, "update_campaign": true, "delete_campaign": true, "batch_create_campaign_links": true,
 		"assign_links_to_campaign": true, "remove_link_from_campaign": true}
 	for _, n := range allTools {

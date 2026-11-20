@@ -169,6 +169,16 @@ func (h *HomeHandler) computeActivity(f *activityFlight) {
 	close(f.done)
 }
 
+// InvalidateActivity drops the cached activity summary (and any failure
+// backoff) so the next request recomputes it. A purged link must not keep
+// showing in the public activity for the rest of the cache window (#0183).
+func (h *HomeHandler) InvalidateActivity() {
+	h.mu.Lock()
+	h.cached = nil
+	h.failUntil = time.Time{}
+	h.mu.Unlock()
+}
+
 // ServeHTTP reads the settings fresh in a single query (no cache); only the
 // activity summary is cached. Missing rows are treated as unset, not an error;
 // an unknown stored mode falls back to default.

@@ -109,14 +109,15 @@ Key tables:
 | Table | Purpose |
 |---|---|
 | `users` | Account records. `is_admin` and `active` flags. |
-| `links` | Short codes. `key` (base-62, up to 12 chars), `destination_url`, `active`, `denied_reason` (0 = allowed). |
+| `links` | Short codes. `key` (base-62, up to 32 chars), `destination_url`, `active`, `denied_reason` (0 = allowed), optional `purge_after_expiry_days`. `DELETE ?purge=true` hard-deletes a link and its clicks. |
+| `purged_keys` | Tombstones (key and time only) for purged links. A purged key is never reissued. Backups and WAL keep a purged destination until they rotate. |
 | `clicks` | One row per redirect. Stores client IP, user agent, referer, and all five UTM parameters. |
 | `passkey_credentials` | One row per registered WebAuthn/FIDO2 passkey. |
 | `sessions` | Active sessions. `token` maps to the `shortlinks_session` cookie. 30-day sliding-window expiry. |
 | `webauthn_challenges` | Ephemeral WebAuthn challenge rows, deleted after ceremony completion. |
 | `pending_registrations` | Short-lived rows tracking an email mid-registration before a `users` row exists. |
 | `settings` | Key/value admin-controlled runtime settings (e.g. `registrations_enabled`). |
-| `audit_log` | Append-only. Rows are never updated or deleted. JSONB `metadata` column for structured context. |
+| `audit_log` | Append-only. Rows are never deleted, and never updated except that a link purge (#0183) redacts `destination_url` from that link's earlier entries. JSONB `metadata` column for structured context. See [audit.md](audit.md#purging-a-link-0183). |
 | `url_filter_rules` | Admin-managed Go regex patterns with a denial reason code. Evaluated in Go, not in the database. |
 
 ### Apache reverse proxy — `deploy/apache/go.sstools.co.conf`

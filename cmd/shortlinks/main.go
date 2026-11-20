@@ -173,7 +173,7 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 	// negative entries for absent keys). The clicks recorder persists each click
 	// best-effort off the redirect goroutine, and the stats store backs the #0030
 	// UTM analytics on the link-detail endpoint.
-	linkStore := links.NewStore(pool)
+	linkStore := links.NewStore(pool).WithAudit(auditLogger)
 	redirectCache, err := cache.New(int64(cfg.CacheMaxCost), time.Duration(cfg.CacheTTLSeconds)*time.Second)
 	if err != nil {
 		return nil, nil, nil, err
@@ -188,9 +188,22 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 	// #0121: strip ip_hash/user_agent from clicks older than 90 days, hourly.
 	// The sweeper stops with ctx (the process lifetime in production).
 	// The same job prunes expired Idempotency-Key records (#0147).
+	// Built here, ahead of the sweeper, because a purge invalidates its activity cache (#0183).
+	homeH := handlers.NewHomeHandler(store).WithActivity(handlers.PublicActivityFunc(pool, cfg.DefaultTimezone, cfg.BaseURL)).WithHero(siteassets.NewStore(pool), auditLogger)
 	idemStore := idempotency.NewStore(pool)
 	go clicks.NewSweeper(pool, slog.Default()).
 		WithPrune("pruned expired idempotency keys", idemStore.Prune).
+		// #0183: purge links a set number of days after they expired.
+		WithPrune("purged expired links", func(c context.Context, now time.Time) (int64, error) {
+			purged, err := linkStore.PurgeExpired(c, now)
+			for _, p := range purged {
+				redirectCache.Delete(p.Key)
+			}
+			if len(purged) > 0 {
+				homeH.InvalidateActivity()
+			}
+			return int64(len(purged)), err
+		}).
 		Run(ctx)
 	statsStore := clicks.NewStatsStore(pool)
 	redirectH := handlers.NewRedirectHandler(resolver, handlers.NewClickRecorder(clickRecorder))
@@ -242,7 +255,7 @@ func newPostgresHandler(ctx context.Context, cfg *config.Config, pool *pgxpool.P
 	// read straight off the RequireSession-attached context, so the Svelte SPA
 	// can gate the admin view. Stateless — no data-layer dependency.
 	meH := handlers.NewMeHandler(cfg.BaseURL)
-	homeH := handlers.NewHomeHandler(store).WithActivity(handlers.PublicActivityFunc(pool, cfg.DefaultTimezone, cfg.BaseURL)).WithHero(siteassets.NewStore(pool), auditLogger)
+	linksH.OnPurge(homeH.InvalidateActivity) // #0183: a purged link leaves the public activity at once
 
 	// requireSession guards the authenticated account-management routes; the
 	// store satisfies middleware.SessionResolver via ResolveSession.

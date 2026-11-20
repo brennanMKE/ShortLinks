@@ -111,8 +111,8 @@ export function apiPatch<T>(path: string, body?: unknown): Promise<T> {
 }
 
 /** DELETE a resource and parse any JSON response. */
-export function apiDelete<T>(path: string): Promise<T> {
-  return request<T>('DELETE', path);
+export function apiDelete<T>(path: string, headers?: Record<string, string>): Promise<T> {
+  return request<T>('DELETE', path, undefined, headers);
 }
 
 // ── Endpoint helpers ────────────────────────────────────────────────────────
@@ -285,6 +285,18 @@ export function updateLink(key: string, input: UpdateLinkInput): Promise<Link> {
 /** DELETE /api/links/{key} — deactivate (soft delete) a link. */
 export function deactivateLink(key: string): Promise<{ message: string }> {
   return apiDelete<{ message: string }>(`/api/links/${encodeURIComponent(key)}`);
+}
+
+/**
+ * DELETE /api/links/{key}?purge=true — permanently delete a link, its clicks and
+ * its destination URL (#0183). Irreversible. The server requires the
+ * X-Confirm-Purge header to equal the key.
+ */
+export function purgeLink(key: string): Promise<{ message: string; key: string; purged: boolean }> {
+  return apiDelete<{ message: string; key: string; purged: boolean }>(
+    `/api/links/${encodeURIComponent(key)}?purge=true`,
+    { 'X-Confirm-Purge': key },
+  );
 }
 
 /** PATCH {active: true} — bring a deactivated link back (#0145). 422 destination_denied if a filter rule now blocks it. */

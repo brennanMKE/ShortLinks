@@ -14,8 +14,8 @@ var Excluded = map[string]string{
 	"GET /api/events":                      "server-sent event stream for the web UI; MCP tools are request/response",
 	"GET /api/openapi.yaml":                "machine-readable REST spec (#0148); agents use the tools instead",
 
-	// Equivalent to a covered route.
-	"DELETE /api/links/{key}": "same effect as PATCH {active:false}, which deactivate_link calls",
+	// DELETE /api/links/{key} is covered by purge_link (?purge=true); without
+	// purge it deactivates, which deactivate_link does through PATCH.
 
 	// get_campaign already returns the stats for the campaign's default
 	// window; an explicit from/to window is what get_campaign_performance

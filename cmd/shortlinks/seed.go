@@ -117,7 +117,7 @@ func ensureTestLink(ctx context.Context, pool *pgxpool.Pool, adminID int64) (str
 	key, err = links.GenerateUniqueKey(func(candidate string) (bool, error) {
 		var exists bool
 		if qErr := pool.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1)`,
+			`SELECT EXISTS(SELECT 1 FROM links WHERE key = $1) OR EXISTS(SELECT 1 FROM purged_keys WHERE key = $1)`,
 			candidate,
 		).Scan(&exists); qErr != nil {
 			return false, qErr

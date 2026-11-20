@@ -56,7 +56,7 @@ func truncateCredsTables(t *testing.T, pool *pgxpool.Pool) {
 	defer cancel()
 	_, err := pool.Exec(ctx,
 		`TRUNCATE webauthn_challenges, pending_registrations, sessions,
-		          passkey_credentials, audit_log, campaigns, clicks, links, users
+		          passkey_credentials, audit_log, campaigns, clicks, links, purged_keys, users
 		 RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate tables: %v", err)

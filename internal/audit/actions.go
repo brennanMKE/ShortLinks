@@ -43,6 +43,9 @@ const (
 	ActionLinkDeactivated = "link.deactivated"
 	ActionLinkReactivated = "link.reactivated"
 	ActionLinkDenied      = "link.denied"
+	// ActionLinkPurged (#0183) records a hard delete. Its metadata carries the
+	// key, title and campaign, never the destination URL.
+	ActionLinkPurged = "link.purged"
 
 	// URL filter rule lifecycle.
 	ActionURLFilterCreated = "url_filter.created"

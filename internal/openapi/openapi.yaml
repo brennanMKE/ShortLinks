@@ -458,11 +458,46 @@ paths:
     delete:
       tags: [Links]
       operationId: deactivateLink
-      summary: Deactivate a link
+      summary: Deactivate a link, or purge it with ?purge=true
       description: |
-        Same effect as `PATCH` with `{"active": false}`. The link is kept, and
-        its redirect answers 404.
+        Without `purge`, the same effect as `PATCH` with `{"active": false}`.
+        The link is kept, and its redirect answers 404.
+
+        With `purge=true` the link is **permanently deleted** and this cannot be
+        undone. Use it when the destination holds a secret, such as an
+        invitation token. The request must also send `X-Confirm-Purge` with the
+        link's key, or it answers `400`. A purge:
+
+        - deletes the link and all of its clicks, so campaign totals and reports
+          drop by that link's clicks;
+        - removes `destination_url` from every earlier audit entry for the link
+          (they keep their action, time and other fields, and gain
+          `destination_redacted: true`);
+        - deletes the caller's stored `Idempotency-Key` responses that name the
+          link;
+        - writes a `link.purged` audit entry with the key, title and campaign,
+          and never the destination;
+        - evicts the redirect cache, so `/u/{key}` answers 404 at once;
+        - keeps the key itself as a tombstone: it is never issued again, so a
+          printed or shared short URL can never point somewhere new. Creating a
+          link with that key answers `409`.
+
+        Only the owner can purge. A read-only token gets `403`.
+      parameters:
+        - name: purge
+          in: query
+          description: "`true` permanently deletes the link. Any other value deactivates it."
+          schema: { type: boolean }
+        - name: X-Confirm-Purge
+          in: header
+          description: Required with `purge=true`. Must equal the link key.
+          schema: { type: string }
       responses:
+        "400":
+          description: "`purge=true` without a matching `X-Confirm-Purge` header."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "200":
           description: Deactivated.
           content:
@@ -1345,6 +1380,7 @@ components:
         - utm_term
         - utm_content
         - placement
+        - purge_after_expiry_days
         - external_id
         - fallback_url
       properties:
@@ -1370,6 +1406,7 @@ components:
         utm_term: { type: string }
         utm_content: { type: string }
         placement: { type: string, description: A free-text label for where the link is used, for example `lobby poster`. }
+        purge_after_expiry_days: { type: [integer, "null"], description: "Days after `expires_at` when the link is permanently deleted. `null` = never." }
         external_id:
           type: [string, "null"]
           description: The client-supplied id set at creation, unique per user, or `null`.
@@ -1520,6 +1557,7 @@ components:
         utm_term: { type: string }
         utm_content: { type: string }
         placement: { type: string }
+        purge_after_expiry_days: { type: [integer, "null"], minimum: 1, maximum: 3650, description: "Permanently delete the link (a purge) this many days after `expires_at`. Needs an expiry. `null` or absent never auto-purges." }
         external_id:
           type: [string, "null"]
           minLength: 1
@@ -1541,6 +1579,7 @@ components:
         utm_term: { type: string }
         utm_content: { type: string }
         placement: { type: string }
+        purge_after_expiry_days: { type: [integer, "null"], minimum: 1, maximum: 3650, description: "Permanently delete the link (a purge) this many days after `expires_at`. Needs an expiry. `null` or absent never auto-purges." }
         external_id:
           type: [string, "null"]
           maxLength: 128

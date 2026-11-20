@@ -16,6 +16,15 @@ export function deactivatedMessage(): string {
   return 'Link deactivated';
 }
 
+/** Confirmation copy for the irreversible purge (#0183). */
+export function purgeConfirmMessage(name: string): string {
+  return `"${name}" will be permanently deleted along with its click history, and its destination URL is removed from the audit log. The short URL will stop working and its key can never be reused. This cannot be undone.`;
+}
+
+export function purgedMessage(): string {
+  return 'Link permanently deleted';
+}
+
 export function removedFromCampaignMessage(campaignName: string): string {
   return `Removed from ${campaignName}`;
 }
