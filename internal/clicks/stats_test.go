@@ -1604,9 +1604,19 @@ func TestCampaignRollup_TimeseriesConsistentWithClickCountUnderConcurrentWrites(
 	// iterations floor on a slow run — a false failure about pacing, not about
 	// the snapshot property. The mutants still die at iteration 0, so the
 	// margin is unaffected; this only restores the floor's headroom.
-	deadline := time.Now().Add(2 * concurrencyDuration)
+	//
+	// The loop ends only when the burst window has elapsed AND a minimum
+	// iteration count is reached (#0193). A wall-clock-only deadline made the
+	// floor a pacing assertion: under `go test ./...` CPU contention a run
+	// could complete fewer than 10 iterations and fail with no inconsistency.
+	// minIterations is a floor, not a time budget; hardCap only bounds a hung
+	// read so the test cannot spin forever.
+	const minIterations = 10
+	start := time.Now()
+	deadline := start.Add(2 * concurrencyDuration)
+	hardCap := start.Add(60 * time.Second)
 	iterations := 0
-	for time.Now().Before(deadline) {
+	for (time.Now().Before(deadline) || iterations < minIterations) && time.Now().Before(hardCap) {
 		for _, r := range readers {
 			gotStats, gotTS, placementTotal, err := r.read(ctx, campID, from, to)
 			if err != nil {
@@ -1625,8 +1635,8 @@ func TestCampaignRollup_TimeseriesConsistentWithClickCountUnderConcurrentWrites(
 		}
 		iterations++
 	}
-	if iterations < 10 {
-		t.Fatalf("only completed %d iterations in %v — increase concurrencyDuration or investigate slow reads before trusting a pass here", iterations, 2*concurrencyDuration)
+	if iterations < minIterations {
+		t.Fatalf("only completed %d iterations in %v — reads are hanging or pathologically slow", iterations, time.Since(start))
 	}
 }
 

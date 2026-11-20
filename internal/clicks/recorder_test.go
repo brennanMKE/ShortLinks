@@ -43,7 +43,11 @@ func testPool(t *testing.T) *pgxpool.Pool {
 
 func truncate(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// TRUNCATE needs ACCESS EXCLUSIVE on clicks, so right after a concurrency
+	// test's write burst it can queue behind an autovacuum/analyze of that
+	// bloated table. 5s was too tight for that and flaked the cleanup (#0193);
+	// the budget only bounds a genuine hang.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if _, err := pool.Exec(ctx,
 		`TRUNCATE clicks, links, campaigns, users RESTART IDENTITY CASCADE`); err != nil {
